@@ -28,6 +28,10 @@
 # ---------------------------------------------------------------------------
 FROM ubuntu:24.04 AS builder
 
+# Fail the build if any stage of a piped command fails (e.g. the rustup
+# `curl … | sh` install below) instead of only honoring the last command.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 ENV DEBIAN_FRONTEND=noninteractive
 ARG SNPGUEST_REF=main
 
