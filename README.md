@@ -41,12 +41,25 @@ az vm create \
   --os-disk-security-encryption-type VMGuestStateOnly \
   --admin-username azureuser --generate-ssh-keys
 
-# 2. On the CVM: build the container.
+# 2. On the CVM: get the code and build the container.
+git clone https://github.com/solpbc/devops-lab.git solpbc && cd solpbc
 podman build -t solpbc .
 
-# 3. Run it, passing through the vTPM resource-manager device.
-podman run --rm --device /dev/tpmrm0 solpbc
+# 3. Grant your user (via the tss group) access to the raw vTPM device.
+#    snpguest reads the pre-fetched report from /dev/tpm0, which is owned
+#    tss:root — re-group it to tss so a rootless container can open it.
+#    (Runtime-only; resets on reboot. A udev rule makes it permanent.)
+sudo usermod -aG tss "$USER"          # then start a new shell / re-SSH
+sudo chgrp tss /dev/tpm0 && sudo chmod g+rw /dev/tpm0
+
+# 4. Run the demo: fetch the SEV-SNP report from the vTPM and decode it.
+podman run --rm --device /dev/tpm0 --device /dev/tpmrm0 \
+  --group-add keep-groups -v "$PWD:/out" solpbc
 ```
+
+This writes `report.bin` to the working directory and prints the decoded
+attestation report. Verifying it against the AMD cert chain is the next
+milestone (see [Attestation approach](#attestation-approach)).
 
 ## Attestation approach
 
