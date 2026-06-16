@@ -82,6 +82,8 @@ run_smoke() {
 run_selftest() {
   log "Tier 3: HCLA/freshness self-test (no hardware)"
   bash "${REPO_ROOT}/test/freshness-selftest.sh"
+  log "Tier 3: toy-verifier self-test (no hardware)"
+  bash "${REPO_ROOT}/test/verifier-selftest.sh"
 }
 
 case "$STAGE" in

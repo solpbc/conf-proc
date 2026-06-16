@@ -152,8 +152,11 @@ echo "           data, NOT because Azure issued a cert for it."
 echo
 echo "[8/8] Binding a fresh vTPM quote to a nonce + guest key..."
 # In production the nonce comes from the customer-side verifier. Here we
-# generate one (override with NONCE_HEX=...) to demonstrate the mechanism.
+# generate one (override with NONCE_HEX=..., e.g. from `verify.sh challenge`)
+# to demonstrate the mechanism. Persist it so a verifier can confirm freshness
+# against the nonce it issued.
 NONCE_HEX="${NONCE_HEX:-$(openssl rand -hex 32)}"
+printf '%s\n' "$NONCE_HEX" > "${OUT_DIR}/nonce.hex"
 openssl genpkey -algorithm X25519 -out "$GUEST_KEY" 2>/dev/null
 openssl pkey -in "$GUEST_KEY" -pubout -outform DER -out "$GUEST_PUB" 2>/dev/null
 BINDING="$(hcl_binding_hash "$BINDING_DOMAIN" "$NONCE_HEX" "$GUEST_PUB" "$CTX_FILE")"

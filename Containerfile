@@ -89,7 +89,8 @@ COPY --from=builder /out/snpguest /usr/local/bin/snpguest
 
 WORKDIR /app
 COPY run.sh /app/run.sh
+COPY verify.sh /app/verify.sh
 COPY lib /app/lib
-RUN chmod +x /app/run.sh /app/lib/*.sh
+RUN chmod +x /app/run.sh /app/verify.sh /app/lib/*.sh
 
 ENTRYPOINT ["/app/run.sh"]

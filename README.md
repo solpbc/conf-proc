@@ -13,12 +13,14 @@ See [`docs/azure-sev-snp-attestation-brief.pdf`](docs/azure-sev-snp-attestation-
 ```
 .
 ├── Containerfile          # Container image definition (Ubuntu 24.04 base)
-├── run.sh                 # Entry point: AMD chain + vTPM quote freshness binding
+├── run.sh                 # Attester: AMD chain + vTPM quote freshness binding
+├── verify.sh              # TOY in-container verifier (appraises the bundle)
 ├── lib/
 │   └── hcl.sh             # HCLA parsing + freshness-binding helpers (custom logic)
 ├── test/
 │   ├── build-check.sh     # Hardware-free build/lint/smoke/selftest harness
-│   └── freshness-selftest.sh  # Off-hardware tests for lib/hcl.sh
+│   ├── freshness-selftest.sh  # Off-hardware tests for lib/hcl.sh
+│   └── verifier-selftest.sh   # Off-hardware tests for verify.sh
 ├── .gitignore
 └── docs/
     └── azure-sev-snp-attestation-brief.pdf
@@ -115,6 +117,37 @@ This closes the loop: a customer-side verifier can release a secret to the
 quoted guest public key with AMD as the only root of trust. Reference values
 for the guest PCR/event-log policy remain the verifier's decision (see the
 brief's "Risks").
+
+### Toy verifier (`verify.sh`)
+
+`verify.sh` demonstrates the **verifier's role** — the half that, in a real
+deployment, runs on customer-controlled hardware that is *not* the CVM. It is a
+teaching aid: it runs in the same container as the attester and even unwraps the
+released key locally to show the round-trip. It independently re-runs the
+checks (it does not trust `run.sh`'s results) and only releases a secret if all
+pass:
+
+```bash
+# on the CVM, inside the container working dir (-v $PWD:/out):
+./verify.sh challenge          # verifier issues a fresh nonce -> nonce.hex
+NONCE_HEX=$(cat nonce.hex) ./run.sh    # attester binds that nonce, writes the bundle
+./verify.sh appraise           # re-verify the bundle + toy key release
+```
+
+`appraise` checks: HCLA header, runtime-data binding (`report_data == H(runtime
+data)`), AMD cert chain + report signature (optionally against a pinned ARK via
+`PINNED_ARK_SHA256`), the AK↔`HCLAkPub` binding, and the AK-signed quote whose
+qualifying data must equal the binding recomputed from the verifier's own nonce.
+On success it wraps a stand-in LUKS key to the guest's X25519 pubkey (ECDH →
+SHA-256 KDF → AES-CTR — toy crypto, clearly labelled) and proves the guest can
+unwrap it. What's deliberately **not** real here, flagged inline as `[TOY GAP]`:
+it runs on the CVM rather than a separate verifier, trusts the fetched ARK
+unless pinned, uses unauthenticated AES-CTR instead of an AEAD, and has only a
+record-then-pin PCR policy (no Microsoft HCL reference values). The real
+verifier is the next milestone — see `journal/2026-06-15-verifier-plan.md`.
+
+The hardware-free parts (policy parsing, key-release round-trip) are covered by
+`./test/verifier-selftest.sh`.
 
 ## Prerequisites
 
