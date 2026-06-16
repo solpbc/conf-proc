@@ -59,10 +59,14 @@ v_challenge() {
   printf '%s\n' "$nonce" > "${bundle}/nonce.hex"
   say "Issued nonce -> ${bundle}/nonce.hex"
   say "$nonce"
-  say
-  say "Now have the attester bind it, e.g.:"
-  say "  NONCE_HEX=${nonce} ./run.sh"
-  say "then: ./verify.sh appraise ${bundle}"
+  # In the orchestrated demo the next stages run automatically; only print the
+  # manual follow-up when invoked standalone.
+  if [[ -z "${DEMO:-}" ]]; then
+    say
+    say "Now have the attester bind it, e.g.:"
+    say "  NONCE_HEX=${nonce} ./run.sh"
+    say "then: ./verify.sh appraise ${bundle}"
+  fi
 }
 
 # --- individual checks (sourceable for tests) -------------------------------

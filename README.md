@@ -13,6 +13,7 @@ See [`docs/azure-sev-snp-attestation-brief.pdf`](docs/azure-sev-snp-attestation-
 ```
 .
 ├── Containerfile          # Container image definition (Ubuntu 24.04 base)
+├── demo.sh                # Default entrypoint: full challenge->attest->appraise demo
 ├── run.sh                 # Attester: AMD chain + vTPM quote freshness binding
 ├── verify.sh              # TOY in-container verifier (appraises the bundle)
 ├── lib/
@@ -59,16 +60,26 @@ podman build -t solpbc .
 sudo usermod -aG tss "$USER"          # then start a new shell / re-SSH
 sudo chgrp tss /dev/tpm0 && sudo chmod g+rw /dev/tpm0
 
-# 4. Run the demo: fetch the SEV-SNP report from the vTPM and decode it.
+# 4. Run the full end-to-end demo (single command).
 podman run --rm --device /dev/tpm0 --device /dev/tpmrm0 \
   --group-add keep-groups -v "$PWD:/out" solpbc
 ```
 
-On a CVM this runs the full chain: it fetches and decodes the SEV-SNP report,
-verifies it to the AMD root, then reads the HCLA blob, confirms the runtime-data
-binding, proves the vTPM AK is AMD-bound, and takes a fresh AK-signed quote
-(see [Attestation approach](#attestation-approach)). Off-hardware it exits
-cleanly with guidance.
+That one command runs the whole story (`demo.sh`): the **verifier** issues a
+fresh nonce, the **attester** binds it and produces AMD-rooted evidence (fetch +
+decode the SEV-SNP report, verify it to the AMD root, read the HCLA blob, confirm
+the runtime-data binding, prove the vTPM AK is AMD-bound, take a fresh AK-signed
+quote), and the **verifier** independently appraises that evidence and releases
+a (toy) key to the guest — all with no MAA in the path (see
+[Attestation approach](#attestation-approach)). Off-hardware it exits cleanly
+with guidance.
+
+Run an individual role instead of the full demo:
+
+```bash
+podman run ... --entrypoint /app/run.sh    solpbc              # attester only
+podman run ... --entrypoint /app/verify.sh solpbc appraise /out  # verifier only
+```
 
 To exercise the HCLA parsing and freshness-binding logic **without** a CVM (just
 `bash`, `openssl`, `jq`, `xxd`, `base64`), run the self-test:
