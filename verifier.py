@@ -152,7 +152,7 @@ class TcbFloor:
 
 @dataclass(frozen=True)
 class Policy:
-    allowed_report_versions: set[int] = field(default_factory=lambda: {3})
+    allowed_report_versions: set[int] = field(default_factory=lambda: {3, 5})
     allowed_hcla_versions: set[int] = field(default_factory=lambda: {1, 2})
     allowed_vmpl: set[int] = field(default_factory=lambda: {0})
     require_debug_disabled: bool = True
@@ -175,7 +175,7 @@ class Policy:
         if not isinstance(pcr_pins, list) or any(not isinstance(pin, str) for pin in pcr_pins):
             raise VerificationError("pcr_policy.pins must be a list of hex strings")
         return cls(
-            allowed_report_versions=set(data.get("allowed_report_versions", [3])),
+            allowed_report_versions=set(data.get("allowed_report_versions", [3, 5])),
             allowed_hcla_versions=set(data.get("allowed_hcla_versions", [1, 2])),
             allowed_vmpl=set(data.get("allowed_vmpl", [0])),
             require_debug_disabled=bool(data.get("require_debug_disabled", True)),

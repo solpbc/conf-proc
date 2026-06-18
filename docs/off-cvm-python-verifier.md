@@ -65,11 +65,13 @@ The verifier currently gates:
 ## Policy JSON
 
 The default policy is intentionally narrow but portable across the observed
-DC2as_v5 and DC2as_v6 data shapes:
+DC2as_v5 and DC2as_v6 data shapes. Earlier captures used AMD report version 3;
+the live DC2as_v5 replay on 2026-06-18 returned report version 5, with the same
+structural offsets used by this verifier.
 
 ```json
 {
-  "allowed_report_versions": [3],
+  "allowed_report_versions": [3, 5],
   "allowed_hcla_versions": [1, 2],
   "allowed_vmpl": [0],
   "require_debug_disabled": true,

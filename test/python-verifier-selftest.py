@@ -210,7 +210,7 @@ def make_runtime_json(ak_public_key) -> bytes:
 
 def make_report(runtime_json: bytes, vcek_key, *, debug: bool = False) -> bytes:
     report = bytearray(1184)
-    put_u32(report, 0x000, 3)
+    put_u32(report, 0x000, 5)
     put_u32(report, 0x004, 10)
     policy = 0x00030000 | ((1 << 19) if debug else 0)
     put_u64(report, 0x008, policy)
