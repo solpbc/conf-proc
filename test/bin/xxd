@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2026 sol pbc
+"""Small test-only xxd subset used when local vim-common is absent."""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+
+def main(argv: list[str]) -> int:
+    plain = False
+    reverse = False
+    cols = 30
+    files: list[str] = []
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "-p":
+            plain = True
+        elif arg == "-r":
+            reverse = True
+        elif arg == "-c":
+            i += 1
+            cols = int(argv[i])
+        elif arg.startswith("-c"):
+            cols = int(arg[2:])
+        elif arg.startswith("-"):
+            print(f"test xxd shim: unsupported option {arg}", file=sys.stderr)
+            return 2
+        else:
+            files.append(arg)
+        i += 1
+
+    if not plain:
+        print("test xxd shim only supports -p / -r -p", file=sys.stderr)
+        return 2
+
+    if reverse:
+        data = _read(files).decode()
+        sys.stdout.buffer.write(bytes.fromhex("".join(data.split())))
+        return 0
+
+    hex_s = _read(files).hex()
+    width = max(cols * 2, 1)
+    for start in range(0, len(hex_s), width):
+        print(hex_s[start : start + width])
+    return 0
+
+
+def _read(files: list[str]) -> bytes:
+    if not files:
+        return sys.stdin.buffer.read()
+    if len(files) != 1:
+        raise SystemExit("test xxd shim supports at most one file")
+    return Path(files[0]).read_bytes()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

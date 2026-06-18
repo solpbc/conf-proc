@@ -34,6 +34,12 @@ venv/
 hcl-blob*
 nonce*
 
+# Pinned AMD CA roots used by the off-CVM verifier.
+!roots/
+!roots/amd/
+!roots/amd/*/
+!roots/amd/*/*.pem
+
 # Logs & temp
 *.log
 *.tmp

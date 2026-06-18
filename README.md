@@ -13,17 +13,23 @@ See [`docs/azure-sev-snp-attestation-brief.pdf`](docs/azure-sev-snp-attestation-
 ```
 .
 ├── Containerfile          # Container image definition (Ubuntu 24.04 base)
+├── Makefile               # Local install/check/test convenience targets
+├── requirements.txt       # Python dependency set for verifier.py
 ├── demo.sh                # Default entrypoint: full challenge->attest->appraise demo
 ├── run.sh                 # Attester: AMD chain + vTPM quote freshness binding
 ├── verify.sh              # TOY in-container verifier (appraises the bundle)
+├── verifier.py            # Off-CVM Python verifier spike (owner-side appraisal)
+├── roots/amd/             # Pinned AMD ARK/ASK roots for verifier.py
 ├── lib/
 │   └── hcl.sh             # HCLA parsing + freshness-binding helpers (custom logic)
 ├── test/
 │   ├── build-check.sh     # Hardware-free build/lint/smoke/selftest harness
 │   ├── freshness-selftest.sh  # Off-hardware tests for lib/hcl.sh
+│   ├── python-verifier-selftest.py # Off-hardware tests for verifier.py
 │   └── verifier-selftest.sh   # Off-hardware tests for verify.sh
 ├── .gitignore
 └── docs/
+    ├── off-cvm-python-verifier.md
     └── azure-sev-snp-attestation-brief.pdf
 ```
 
@@ -160,6 +166,23 @@ verifier is the next milestone — see `journal/2026-06-16-verifier-plan.md`.
 The hardware-free parts (policy parsing, key-release round-trip) are covered by
 `./test/verifier-selftest.sh`.
 
+### Off-CVM Python verifier (`verifier.py`)
+
+`verifier.py` is the owner-side verifier spike: it runs off the CVM, issues the
+nonce, validates the bundle against pinned AMD roots in `roots/amd/`, checks the
+AMD report/runtime/AK/TPM-quote bindings, applies TCB + PCR policy, and releases
+a secret with X25519 -> HKDF -> AES-256-GCM. See
+[`docs/off-cvm-python-verifier.md`](docs/off-cvm-python-verifier.md) for the
+bundle contract, commands, policy JSON, and the explicit record-then-pin PCR
+reference-values gap.
+
+Hardware-free coverage:
+
+```bash
+python3 -m pip install -r requirements.txt
+./test/python-verifier-selftest.py
+```
+
 ## Prerequisites
 
 - Azure DCasv5/ECasv5 (or newer) Confidential VM with vTPM enabled, provisioned
@@ -168,6 +191,8 @@ The hardware-free parts (policy parsing, key-release round-trip) are covered by
   - `Canonical:ubuntu-24_04-lts:ubuntu-pro-cvm:latest` — Ubuntu Pro (ongoing patching)
 - `tpm2-tools`, `openssl`, `xxd`, `jq` (provided by the container; see `Containerfile`)
 - Rust toolchain (for `snpguest` with `--features hyperv`)
+- Python 3 with `cryptography` for `verifier.py` (`make install` installs the
+  pinned Python dependency range)
 
 ## References
 

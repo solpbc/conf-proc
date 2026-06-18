@@ -80,10 +80,13 @@ run_smoke() {
 
 # --- Tier 3: selftest --------------------------------------------------------
 run_selftest() {
+  PATH="${REPO_ROOT}/test/bin:${PATH}"
   log "Tier 3: HCLA/freshness self-test (no hardware)"
   bash "${REPO_ROOT}/test/freshness-selftest.sh"
   log "Tier 3: toy-verifier self-test (no hardware)"
   bash "${REPO_ROOT}/test/verifier-selftest.sh"
+  log "Tier 3: off-CVM Python verifier self-test (no hardware)"
+  python3 "${REPO_ROOT}/test/python-verifier-selftest.py"
 }
 
 case "$STAGE" in
