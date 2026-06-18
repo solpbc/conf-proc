@@ -5,6 +5,10 @@ bundle emitted by `run.sh`. It runs off the CVM, owns the challenge nonce, uses
 local pinned AMD CA roots from `roots/amd/`, appraises the file bundle, and
 releases a secret to the guest X25519 public key only after every check passes.
 
+![Off-CVM verifier architecture](assets/off-cvm-verifier-architecture.png)
+
+Editable source: [`assets/off-cvm-verifier-architecture.svg`](assets/off-cvm-verifier-architecture.svg).
+
 ## Bundle contract
 
 The verifier consumes the same file bundle the current attester writes under
