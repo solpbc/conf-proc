@@ -17,7 +17,8 @@ See [`docs/azure-sev-snp-attestation-brief.pdf`](docs/azure-sev-snp-attestation-
 ├── aci-cc-testbed.sh      # ACI Confidential Containers testbed (raw SNP path)
 ├── aks-cc-testbed.sh      # AKS EC*_cc testbed (kata-cc; preview sunset 2026-03)
 ├── templates/             # Azure deployment templates + AKS probe pod manifests
-│   └── aci-snp-probe.json # Confidential container group ARM template
+│   ├── aci-snp-probe.json # Probe container group (stock ubuntu, zero config)
+│   └── aci-solpbc.json    # Parameterized group for the solpbc image (ACR)
 ├── requirements.txt       # Python dependency set for verifier.py
 ├── demo.sh                # Default entrypoint: full challenge->attest->appraise demo
 ├── run.sh                 # Attester: AMD chain + vTPM quote freshness binding
@@ -143,36 +144,53 @@ podman tag solpbc "$IMAGE"
 podman push "$IMAGE"
 ```
 
-**2. Prepare the ARM template.** Start from `templates/aci-snp-probe.json`: set the
-container image to `$IMAGE` and override the entrypoint (`demo.sh` expects a
-vTPM) with `"command": ["/bin/sh", "-c", "sleep infinity"]`. ACR does not
-allow anonymous pull, so the container group must carry pull credentials in
-`properties.imageRegistryCredentials` — for a test registry the admin
-credentials below work. Don't reuse the `--expose-token` value there; it
-expires within hours. Longer-lived options: a scoped ACR token, or a managed
-identity with AcrPull.
+**2. Write a parameters file.** `templates/aci-solpbc.json` is parameterized —
+no template editing needed: it already runs `sleep infinity` (the default
+`demo.sh` entrypoint expects a vTPM) and takes the image reference and ACR
+pull credentials as parameters. ACR does not allow anonymous pull, so the
+credentials are mandatory; the admin credentials work for a test registry
+(don't use the short-lived `--expose-token` value here — longer-lived options
+are a scoped ACR token or a managed identity with AcrPull). Both the policy
+generator and the deployment consume this same file, so they can't drift.
 
 ```sh
-az acr credential show -n "$ACR"
+ACR_USER=$(az acr credential show -n "$ACR" --query username -o tsv)
+ACR_PASS=$(az acr credential show -n "$ACR" --query 'passwords[0].value' -o tsv)
+cat > params.json <<EOF
+{
+  "\$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "image": { "value": "$IMAGE" },
+    "registryUsername": { "value": "$ACR_USER" },
+    "registryPassword": { "value": "$ACR_PASS" }
+  }
+}
+EOF
+cp templates/aci-solpbc.json template.json
 ```
 
 **3. Generate and inject the CCE policy.** confcom is Linux/Windows-only; on
 macOS run it inside a container against a podman-saved image tar (the full
-recipe, including the `--tar` mapping, is in `aci-cc-testbed.sh`).
-`--debug-mode` permits exec/logs — drop it for anything real. The sha256
-printed on injection is the expected `HOST_DATA` value; save it.
+recipe, including the `--tar` mapping, is in `aci-cc-testbed.sh` — save the
+local `$IMAGE` tag, no registry pull needed). `--debug-mode` permits
+exec/logs — drop it for anything real. The sha256 printed on injection is the
+expected `HOST_DATA` value; save it. Rebuilding the image changes the layer
+hashes, so regenerate the policy after every build.
 
 ```sh
-az confcom acipolicygen -a template.json --debug-mode
+az confcom acipolicygen -a template.json -p params.json --debug-mode
 ```
 
-**4. Deploy and exec in.** The `Confidential` sku and the `snp-probe`/`probe`
-names come from the template.
+**4. Deploy and exec in.** The `Confidential` sku and the `solpbc` group and
+container names come from the template.
 
 ```sh
-az deployment group create -g "$RG" --template-file template.json
-az container exec -g "$RG" -n snp-probe --container-name probe --exec-command /bin/bash
+az deployment group create -g "$RG" --template-file template.json --parameters @params.json
+az container exec -g "$RG" -n solpbc --container-name solpbc --exec-command /bin/bash
 ```
+
+`params.json` holds a registry password — don't commit it.
 
 In the TEE, fetch a report from `/dev/sev-guest` binding a verifier-issued
 nonce into `REPORT_DATA` — the stock-python ioctl fetcher is in section 2 of

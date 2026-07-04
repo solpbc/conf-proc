@@ -44,3 +44,7 @@ nonce*
 *.log
 *.tmp
 tmp/
+
+# ACI deployment scratch (params.json carries ACR credentials)
+params.json
+template.json
