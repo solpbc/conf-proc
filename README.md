@@ -198,6 +198,24 @@ az container exec -g "$RG" -n solpbc --container-name solpbc --exec-command /bin
 
 `params.json` holds a registry password — don't commit it.
 
+**5. Clean up.** The container group bills while it runs (`sleep infinity`
+never exits on its own) and the resource group holds both the group and the
+ACR, so one delete covers everything. Remove the local scratch files too —
+`params.json` carries the registry password.
+
+```sh
+az group delete -n "$RG" --yes --no-wait
+rm -f params.json template.json
+```
+
+To pause instead of delete (keeping the registry and the policy-bound
+deployment for another session):
+
+```sh
+az container stop -g "$RG" -n solpbc
+az container start -g "$RG" -n solpbc
+```
+
 In the TEE, fetch a report binding a verifier-issued nonce into `REPORT_DATA`:
 
 ```sh
