@@ -248,10 +248,24 @@ python3 /app/fetch-report.py --nonce-hex <verifier-nonce> --out /tmp/report.bin
 (The image also fetches one automatically at startup with a random nonce —
 visible in `az container logs` — unless the template's `command` override is
 in effect. `snpguest` in this image is the default build, i.e. the native
-`/dev/sev-guest` path, not the CVM image's `hyperv` build.) Certificates come
-from THIM (`169.254.169.254/metadata/THIM/amd/certification`, in-fabric) or
-the AMD KDS — note ACI hardware observed so far is **Genoa**, so KDS URLs use
-the `Genoa` product string and chain to `roots/amd/Genoa`.
+`/dev/sev-guest` path, not the CVM image's `hyperv` build.)
+
+Certificates cannot be fetched from inside the TEE (verified 2026-07-04: the
+AKS-style THIM IMDS endpoint doesn't exist on ACI, and the host declines
+`SNP_GET_EXT_REPORT`, so `snpguest certificates` fails). Fetch the VCEK
+out-of-band instead, using `CHIP_ID` plus the reported-TCB SPLs printed by
+`fetch-report.py` / readable at report offset `0x180` (bytes 1, 2, 7, 8 =
+bl, tee, snp, ucode). ACI hardware observed so far is **Genoa**, so the
+product string is `Genoa` and the chain pins to `roots/amd/Genoa`:
+
+```sh
+curl -sf -o vcek.der "https://kdsintf.amd.com/vcek/v1/Genoa/$CHIP_ID?blSPL=10&teeSPL=0&snpSPL=23&ucodeSPL=84"
+openssl x509 -inform der -in vcek.der -out certs/vcek.pem
+```
+
+Microsoft's public cert cache serves the same AMD-signed certificates without
+KDS rate limits (`https://americas.acccache.azure.net/vcek/v1/...`, same URL
+shape) — a CDN for AMD's signatures, not a trust anchor.
 
 Off-TEE, appraise with the raw-report mode:
 
