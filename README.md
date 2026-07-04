@@ -114,19 +114,34 @@ comes from `REPORT_DATA` carrying the verifier nonce directly, and workload
 identity from `HOST_DATA` carrying the SHA-256 of the CCE policy.
 
 ```bash
+# 0. Names used throughout. ACR names are global DNS labels:
+#    5-50 lowercase alphanumerics, no dashes.
+RG=solpbc-aci-rg
+LOC=eastus
+ACR=solpbcacr$RANDOM          # must be globally unique
+IMAGE="$ACR.azurecr.io/solpbc:latest"
+
 # 1. Build for amd64 (mandatory on Apple Silicon: CCE policies are amd64-only)
 #    and push to a registry ACI can pull. Use ACR — Docker Hub throttles
 #    anonymous pulls from ACI IP ranges.
 podman build --platform linux/amd64 -t solpbc .
-az acr create -g <rg> -n <registry> --sku Basic
-az acr login -n <registry>    # or: podman login with ACR admin/token creds
-podman tag solpbc <registry>.azurecr.io/solpbc:latest
-podman push <registry>.azurecr.io/solpbc:latest
+az group create -n "$RG" -l "$LOC"
+az acr create -g "$RG" -n "$ACR" --sku Basic --admin-enabled true
+# `az acr login` (bare) needs a Docker daemon; with podman use the token flow:
+TOKEN=$(az acr login -n "$ACR" --expose-token --query accessToken -o tsv)
+podman login "$ACR.azurecr.io" -u 00000000-0000-0000-0000-000000000000 -p "$TOKEN"
+podman tag solpbc "$IMAGE"
+podman push "$IMAGE"
 
 # 2. ARM template: start from arm/aci-snp-probe.json; set the container image
-#    to the ACR reference, add imageRegistryCredentials if the registry is
-#    private, and override the entrypoint (demo.sh expects a vTPM):
+#    to $IMAGE and override the entrypoint (demo.sh expects a vTPM):
 #    "command": ["/bin/sh", "-c", "sleep infinity"]
+#    ACR does not allow anonymous pull, so the container group MUST carry
+#    pull credentials in properties.imageRegistryCredentials — for a test
+#    registry the admin credentials work; don't reuse the --expose-token
+#    value there, it expires within hours. Longer-lived options: a scoped
+#    ACR token, or a managed identity with AcrPull.
+az acr credential show -n "$ACR"    # username + password for the template
 
 # 3. Generate + inject the CCE policy. confcom is Linux/Windows-only; on macOS
 #    run it inside a container with a podman-saved image tar (the full recipe,
@@ -135,10 +150,11 @@ podman push <registry>.azurecr.io/solpbc:latest
 #    injection is the expected HOST_DATA value; save it.
 az confcom acipolicygen -a template.json --debug-mode
 
-# 4. Deploy (sku Confidential is set in the template) and exec in.
-az group create -n <rg> -l eastus
-az deployment group create -g <rg> --template-file template.json
-az container exec -g <rg> -n <group> --container-name <name> --exec-command /bin/bash
+# 4. Deploy (sku Confidential and the group name snp-probe come from the
+#    template) and exec in.
+az deployment group create -g "$RG" --template-file template.json
+az container exec -g "$RG" -n snp-probe --container-name probe \
+  --exec-command /bin/bash
 ```
 
 In the TEE, fetch a report from `/dev/sev-guest` binding a verifier-issued
