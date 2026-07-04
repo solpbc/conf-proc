@@ -243,6 +243,22 @@ deployment; to re-attest with a fresh one, redeploy with a new `nonceHex`, or
 `az container exec` in and run `fetch-report.py --nonce-hex <new>` manually.
 `params.json` holds a registry password — don't commit it.
 
+Notes for manual runs and debugging:
+
+- `snpguest` in this image is the default build (native `/dev/sev-guest`),
+  not the CVM image's `hyperv` build.
+- Certificates cannot be fetched from inside the TEE (verified 2026-07-04:
+  the AKS-style THIM IMDS endpoint doesn't exist on ACI, and the host
+  declines `SNP_GET_EXT_REPORT`, so `snpguest certificates` fails). That's
+  why `fetch-vcek` runs verifier-side: it builds the KDS/acccache URL from
+  `CHIP_ID` + the reported-TCB SPLs (report offset `0x180`, bytes 1, 2, 7, 8
+  = bl, tee, snp, ucode). Microsoft's acccache mirror serves the same
+  AMD-signed certs — a CDN for AMD's signatures, not a trust anchor.
+- `appraise-raw` also accepts `--host-data <hex>` in place of
+  `--cce-policy-file`, and `--measurement` to pin the UVM launch measurement
+  once reference values are established. The measurement is per-UVM-release,
+  not per-image — workload identity rides entirely in `HOST_DATA`.
+
 **5. Clean up.** The container group bills while it runs (`sleep infinity`
 never exits on its own) and the resource group holds both the group and the
 ACR, so one delete covers everything. Remove the local scratch files too —
@@ -260,50 +276,6 @@ deployment for another session):
 az container stop -g "$RG" -n solpbc
 az container start -g "$RG" -n solpbc
 ```
-
-In the TEE, fetch a report binding a verifier-issued nonce into `REPORT_DATA`:
-
-```sh
-python3 /app/fetch-report.py --nonce-hex <verifier-nonce> --out /tmp/report.bin
-```
-
-(The image also fetches one automatically at startup with a random nonce —
-visible in `az container logs` — unless the template's `command` override is
-in effect. `snpguest` in this image is the default build, i.e. the native
-`/dev/sev-guest` path, not the CVM image's `hyperv` build.)
-
-Certificates cannot be fetched from inside the TEE (verified 2026-07-04: the
-AKS-style THIM IMDS endpoint doesn't exist on ACI, and the host declines
-`SNP_GET_EXT_REPORT`, so `snpguest certificates` fails). Fetch the VCEK
-out-of-band instead, using `CHIP_ID` plus the reported-TCB SPLs printed by
-`fetch-report.py` / readable at report offset `0x180` (bytes 1, 2, 7, 8 =
-bl, tee, snp, ucode). ACI hardware observed so far is **Genoa**, so the
-product string is `Genoa` and the chain pins to `roots/amd/Genoa`:
-
-```sh
-curl -sf -o vcek.der "https://kdsintf.amd.com/vcek/v1/Genoa/$CHIP_ID?blSPL=10&teeSPL=0&snpSPL=23&ucodeSPL=84"
-openssl x509 -inform der -in vcek.der -out certs/vcek.pem
-```
-
-Microsoft's public cert cache serves the same AMD-signed certificates without
-KDS rate limits (`https://americas.acccache.azure.net/vcek/v1/...`, same URL
-shape) — a CDN for AMD's signatures, not a trust anchor.
-
-Off-TEE, appraise with the raw-report mode:
-
-```bash
-python3 verifier.py appraise-raw <bundle-dir> \
-  --roots roots/amd \
-  --cce-policy-file <base64-policy-from-template> \
-  --nonce-hex <verifier-nonce>
-```
-
-where `<bundle-dir>` holds `report.bin` and `certs/` with the VCEK PEM.
-`appraise-raw` verifies the AMD chain and report signature against the pinned
-roots, SNP policy (VMPL, debug), the nonce in `REPORT_DATA`, and `HOST_DATA`
-against the CCE policy hash (`--host-data <hex>` works too, and
-`--measurement` pins the UVM launch measurement once reference values are
-established).
 
 ## Attestation approach
 
