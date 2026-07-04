@@ -223,9 +223,9 @@ container prints the report as base64 into its logs — the report's
 machine-readable path out of the TEE. `fetch-vcek` locates the AMD cert from
 the report itself (CHIP_ID + reported TCB; `--source acccache` uses
 Microsoft's mirror of the same AMD-signed certs, no KDS rate limits). The
-appraisal needs Python ≥3.11 plus `requirements.txt`; on a Mac without one,
-run these two commands in any `python:3.12` container with the repo and
-bundle mounted.
+verifier runs on Python ≥3.9 (macOS Command Line Tools python works) and
+needs the pinned `cryptography` package:
+`python3 -m pip install --user -r requirements.txt`.
 
 ```sh
 NONCE=$(openssl rand -hex 32)

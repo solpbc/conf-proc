@@ -18,8 +18,10 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
+
+UTC = timezone.utc  # datetime.UTC needs 3.11; keep 3.9 (macOS CLT python) working
 from typing import Any
 
 from cryptography import x509

@@ -10,7 +10,9 @@ import json
 import shutil
 import sys
 import tempfile
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+UTC = timezone.utc  # datetime.UTC needs 3.11; keep 3.9 (macOS CLT python) working
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
