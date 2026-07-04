@@ -176,16 +176,39 @@ EOF
 cp templates/aci-solpbc.json template.json
 ```
 
-**3. Generate and inject the CCE policy.** confcom is Linux/Windows-only; on
-macOS run it inside a container against a podman-saved image tar (the full
-recipe, including the `--tar` mapping, is in `aci-cc-testbed.sh` — save the
-local `$IMAGE` tag, no registry pull needed). `--debug-mode` permits
-exec/logs — drop it for anything real. The sha256 printed on injection is the
-expected `HOST_DATA` value; save it. Rebuilding the image changes the layer
-hashes, so regenerate the policy after every build.
+**3. Generate and inject the CCE policy.** The policy generator computes
+dm-verity hashes of every image layer and writes the result into
+`template.json`'s `ccePolicy` field in place. It prints a sha256 on
+injection: that is the expected `HOST_DATA` value in the SNP report — save
+it. `--debug-mode` permits exec/logs; drop it for anything real. Rebuilding
+the image changes the layer hashes, so regenerate after every build.
+
+On Linux, it's one command:
 
 ```sh
+az extension add --upgrade --name confcom
 az confcom acipolicygen -a template.json -p params.json --debug-mode
+```
+
+On macOS the confcom extension does not run (`The extension for MacOS has not
+been implemented`), so run it inside a Linux container instead. Two things
+make this work daemon-free: the image layers are supplied as a tar
+(`podman save` of the local tag from step 1 — no registry pull, and it's
+already amd64), and a mapping file tells confcom which tar holds which image.
+The mapping key must byte-match the image reference in `params.json`. The
+`$PWD` mounts assume the repo lives under your home directory, which podman
+machine shares by default.
+
+```sh
+podman save -o /private/tmp/policy-img.tar "$IMAGE"
+printf '{"%s": "/work/img.tar"}' "$IMAGE" > /private/tmp/tarmap.json
+podman run --rm \
+  -v "$PWD/template.json":/work/template.json \
+  -v "$PWD/params.json":/work/params.json \
+  -v /private/tmp/policy-img.tar:/work/img.tar \
+  -v /private/tmp/tarmap.json:/work/tarmap.json \
+  mcr.microsoft.com/azure-cli \
+  bash -c 'az extension add --name confcom -y && az confcom acipolicygen -a /work/template.json -p /work/params.json --debug-mode --tar /work/tarmap.json'
 ```
 
 **4. Deploy and exec in.** The `Confidential` sku and the `solpbc` group and
