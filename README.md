@@ -113,48 +113,65 @@ report in-TEE, appraise it off-TEE with `verifier.py appraise-raw`. Freshness
 comes from `REPORT_DATA` carrying the verifier nonce directly, and workload
 identity from `HOST_DATA` carrying the SHA-256 of the CCE policy.
 
-```bash
-# 0. Names used throughout. ACR names are global DNS labels:
-#    5-50 lowercase alphanumerics, no dashes.
+The command blocks below are bash/zsh-neutral and contain no `#` comments, so
+they paste cleanly into a default interactive zsh (which does not accept
+comments unless `setopt interactive_comments` is set).
+
+**0. Names used throughout.** ACR names are global DNS labels: 5–50 lowercase
+alphanumerics, no dashes; `$RANDOM` is just a cheap uniqueness suffix.
+
+```sh
 RG=solpbc-aci-rg
 LOC=eastus
-ACR=solpbcacr$RANDOM          # must be globally unique
+ACR=solpbcacr$RANDOM
 IMAGE="$ACR.azurecr.io/solpbc:latest"
+```
 
-# 1. Build for amd64 (mandatory on Apple Silicon: CCE policies are amd64-only)
-#    and push to a registry ACI can pull. Use ACR — Docker Hub throttles
-#    anonymous pulls from ACI IP ranges.
+**1. Build for amd64 and push to ACR.** `--platform linux/amd64` is mandatory
+on Apple Silicon — CCE policies are amd64-only. ACR rather than Docker Hub
+because the Hub throttles anonymous pulls from ACI IP ranges. Bare
+`az acr login` needs a Docker daemon; with podman, use the token flow with the
+`00000000-…` sentinel username.
+
+```sh
 podman build --platform linux/amd64 -t solpbc .
 az group create -n "$RG" -l "$LOC"
 az acr create -g "$RG" -n "$ACR" --sku Basic --admin-enabled true
-# `az acr login` (bare) needs a Docker daemon; with podman use the token flow:
 TOKEN=$(az acr login -n "$ACR" --expose-token --query accessToken -o tsv)
 podman login "$ACR.azurecr.io" -u 00000000-0000-0000-0000-000000000000 -p "$TOKEN"
 podman tag solpbc "$IMAGE"
 podman push "$IMAGE"
+```
 
-# 2. ARM template: start from arm/aci-snp-probe.json; set the container image
-#    to $IMAGE and override the entrypoint (demo.sh expects a vTPM):
-#    "command": ["/bin/sh", "-c", "sleep infinity"]
-#    ACR does not allow anonymous pull, so the container group MUST carry
-#    pull credentials in properties.imageRegistryCredentials — for a test
-#    registry the admin credentials work; don't reuse the --expose-token
-#    value there, it expires within hours. Longer-lived options: a scoped
-#    ACR token, or a managed identity with AcrPull.
-az acr credential show -n "$ACR"    # username + password for the template
+**2. Prepare the ARM template.** Start from `arm/aci-snp-probe.json`: set the
+container image to `$IMAGE` and override the entrypoint (`demo.sh` expects a
+vTPM) with `"command": ["/bin/sh", "-c", "sleep infinity"]`. ACR does not
+allow anonymous pull, so the container group must carry pull credentials in
+`properties.imageRegistryCredentials` — for a test registry the admin
+credentials below work. Don't reuse the `--expose-token` value there; it
+expires within hours. Longer-lived options: a scoped ACR token, or a managed
+identity with AcrPull.
 
-# 3. Generate + inject the CCE policy. confcom is Linux/Windows-only; on macOS
-#    run it inside a container with a podman-saved image tar (the full recipe,
-#    including the --tar mapping, is in aci-cc-testbed.sh). --debug-mode
-#    permits exec/logs — drop it for anything real. The sha256 printed on
-#    injection is the expected HOST_DATA value; save it.
+```sh
+az acr credential show -n "$ACR"
+```
+
+**3. Generate and inject the CCE policy.** confcom is Linux/Windows-only; on
+macOS run it inside a container against a podman-saved image tar (the full
+recipe, including the `--tar` mapping, is in `aci-cc-testbed.sh`).
+`--debug-mode` permits exec/logs — drop it for anything real. The sha256
+printed on injection is the expected `HOST_DATA` value; save it.
+
+```sh
 az confcom acipolicygen -a template.json --debug-mode
+```
 
-# 4. Deploy (sku Confidential and the group name snp-probe come from the
-#    template) and exec in.
+**4. Deploy and exec in.** The `Confidential` sku and the `snp-probe`/`probe`
+names come from the template.
+
+```sh
 az deployment group create -g "$RG" --template-file template.json
-az container exec -g "$RG" -n snp-probe --container-name probe \
-  --exec-command /bin/bash
+az container exec -g "$RG" -n snp-probe --container-name probe --exec-command /bin/bash
 ```
 
 In the TEE, fetch a report from `/dev/sev-guest` binding a verifier-issued
