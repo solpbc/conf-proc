@@ -27,6 +27,35 @@ cp "$TEMPLATE_SRC" "$TEMPLATE"
 # generate a *debug* CCE policy (allows exec — test only) and inject it:
 az confcom acipolicygen -a "$TEMPLATE" --debug-mode
 
+# --- macOS alternative: confcom policy generation is Linux/Windows-only ---
+# Run acipolicygen inside a Linux container, with the image layers supplied as
+# a tar so no Docker daemon is needed (verified 2026-07-04). Gotchas, each of
+# which cost us a debugging round:
+#   * pull/build the image as amd64 — CCE policies are amd64-only and podman
+#     on Apple Silicon defaults to arm64 (confcom crashes on the mismatch);
+#   * the tarmap key must byte-match the image string in the template/params
+#     AND the RepoTags inside the tar (podman fully qualifies names; check
+#     with: tar -xOf img.tar manifest.json);
+#   * work under /private/tmp or $HOME — podman machine mounts those.
+#
+# IMG=mcr.microsoft.com/mirror/docker/library/ubuntu:24.04   # or your $IMAGE
+# podman pull --platform linux/amd64 "$IMG"
+# podman save -o /private/tmp/policy-img.tar "$IMG"
+# printf '{"%s": "/work/img.tar"}' "$IMG" > /private/tmp/tarmap.json
+# podman run --rm \
+#   -v "$TEMPLATE":/work/template.json \
+#   -v /private/tmp/policy-img.tar:/work/img.tar \
+#   -v /private/tmp/tarmap.json:/work/tarmap.json \
+#   mcr.microsoft.com/azure-cli \
+#   bash -c 'az extension add --name confcom -y && az confcom acipolicygen \
+#     -a /work/template.json --debug-mode --tar /work/tarmap.json'
+#
+# Parameterized templates (templates/aci-solpbc.json): also mount the params
+# file with -v params.json:/work/params.json and add `-p /work/params.json`
+# to the acipolicygen arguments. The sha256 printed on injection is the
+# expected HOST_DATA; with --print-policy nothing is injected and you hash
+# the output yourself (see step below).
+
 # record the expected HOST_DATA value (sha256 of the decoded policy):
 python3 - "$TEMPLATE" <<'EOF'
 import base64, hashlib, json, sys
