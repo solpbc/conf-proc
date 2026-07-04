@@ -12,7 +12,9 @@ See [`docs/azure-sev-snp-attestation-brief.pdf`](docs/azure-sev-snp-attestation-
 
 ```
 .
-├── Containerfile          # Container image definition (Ubuntu 24.04 base)
+├── Containerfile          # CVM container image (vTPM path; Ubuntu 24.04 base)
+├── Containerfile.aci      # ACI container image (raw /dev/sev-guest path)
+├── fetch-report.py        # In-TEE raw report fetcher (stdlib-only, ACI path)
 ├── Makefile               # Local install/check/test convenience targets
 ├── aci-cc-testbed.sh      # ACI Confidential Containers testbed (raw SNP path)
 ├── aks-cc-testbed.sh      # AKS EC*_cc testbed (kata-cc; preview sunset 2026-03)
@@ -124,23 +126,27 @@ alphanumerics, no dashes; `$RANDOM` is just a cheap uniqueness suffix.
 RG=solpbc-aci-rg
 LOC=eastus
 ACR=solpbcacr$RANDOM
-IMAGE="$ACR.azurecr.io/solpbc:latest"
+IMAGE="$ACR.azurecr.io/solpbc-aci:latest"
 ```
 
-**1. Build for amd64 and push to ACR.** `--platform linux/amd64` is mandatory
-on Apple Silicon — CCE policies are amd64-only. ACR rather than Docker Hub
-because the Hub throttles anonymous pulls from ACI IP ranges. Bare
-`az acr login` needs a Docker daemon; with podman, use the token flow with the
-`00000000-…` sentinel username.
+**1. Build for amd64 and push to ACR.** ACI has its own image:
+`Containerfile.aci` builds `snpguest` with default features (the native
+`/dev/sev-guest` ioctl path — there is no vTPM in this TEE) and ships
+`fetch-report.py`; the main `Containerfile` is the CVM/vTPM variant and its
+tooling is dead weight here. `--platform linux/amd64` is mandatory on Apple
+Silicon — CCE policies are amd64-only. ACR rather than Docker Hub because the
+Hub throttles anonymous pulls from ACI IP ranges. Bare `az acr login` needs a
+Docker daemon; with podman, use the token flow with the `00000000-…` sentinel
+username.
 
 ```sh
-podman build --platform linux/amd64 -t solpbc .
+podman build --platform linux/amd64 -f Containerfile.aci -t solpbc-aci .
 az provider register --namespace Microsoft.ContainerRegistry --wait
 az group create -n "$RG" -l "$LOC"
 az acr create -g "$RG" -n "$ACR" --sku Basic --admin-enabled true
 TOKEN=$(az acr login -n "$ACR" --expose-token --query accessToken -o tsv)
 podman login "$ACR.azurecr.io" -u 00000000-0000-0000-0000-000000000000 -p "$TOKEN"
-podman tag solpbc "$IMAGE"
+podman tag solpbc-aci "$IMAGE"
 podman push "$IMAGE"
 ```
 
@@ -192,13 +198,19 @@ az container exec -g "$RG" -n solpbc --container-name solpbc --exec-command /bin
 
 `params.json` holds a registry password — don't commit it.
 
-In the TEE, fetch a report from `/dev/sev-guest` binding a verifier-issued
-nonce into `REPORT_DATA` — the stock-python ioctl fetcher is in section 2 of
-`aci-cc-testbed.sh`. (The `snpguest` binary in this image is built with the
-`hyperv` vTPM feature for CVMs; it has not been exercised on the ACI raw path.)
-Certificates come from THIM (`169.254.169.254/metadata/THIM/amd/certification`,
-in-fabric) or the AMD KDS — note ACI hardware observed so far is **Genoa**, so
-KDS URLs use the `Genoa` product string and chain to `roots/amd/Genoa`.
+In the TEE, fetch a report binding a verifier-issued nonce into `REPORT_DATA`:
+
+```sh
+python3 /app/fetch-report.py --nonce-hex <verifier-nonce> --out /tmp/report.bin
+```
+
+(The image also fetches one automatically at startup with a random nonce —
+visible in `az container logs` — unless the template's `command` override is
+in effect. `snpguest` in this image is the default build, i.e. the native
+`/dev/sev-guest` path, not the CVM image's `hyperv` build.) Certificates come
+from THIM (`169.254.169.254/metadata/THIM/amd/certification`, in-fabric) or
+the AMD KDS — note ACI hardware observed so far is **Genoa**, so KDS URLs use
+the `Genoa` product string and chain to `roots/amd/Genoa`.
 
 Off-TEE, appraise with the raw-report mode:
 

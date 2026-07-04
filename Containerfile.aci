@@ -1,0 +1,81 @@
+# solpbc — ACI Confidential Containers variant (raw /dev/sev-guest path)
+#
+# On ACI's Confidential sku the UVM runs unparavisored at VMPL0 with a native
+# /dev/sev-guest — no vTPM, no HCL blob (journal/2026-07-04.md). So this image
+# differs deliberately from the CVM Containerfile:
+#   * snpguest built with DEFAULT features (the sev-guest ioctl path), not
+#     --features hyperv (the Azure-CVM vTPM path, meaningless here);
+#   * no tpm2-tools — there is no TPM in this TEE;
+#   * fetch-report.py — stdlib-only report fetcher, useful where the report
+#     must leave the TEE via logs or a pasted terminal.
+#
+# Build (amd64 is mandatory: CCE policies are amd64-only):
+#   podman build --platform linux/amd64 -f Containerfile.aci -t solpbc-aci .
+# Deploy via templates/aci-solpbc.json + a params file; see the README's
+# "Running on ACI Confidential Containers" section. Keep in mind the CCE
+# policy pins this image's layer hashes: every rebuild needs a fresh policy.
+
+# ---------------------------------------------------------------------------
+# Stage 1: build snpguest (default features — /dev/sev-guest ioctl)
+# ---------------------------------------------------------------------------
+FROM ubuntu:24.04 AS builder
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+ENV DEBIAN_FRONTEND=noninteractive
+ARG SNPGUEST_REF=main
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
+        build-essential \
+        pkg-config \
+        libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --default-toolchain stable --profile minimal
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+RUN git clone --depth 1 --branch "${SNPGUEST_REF}" \
+        https://github.com/virtee/snpguest.git /src/snpguest \
+    && cd /src/snpguest \
+    && cargo build --release \
+    && install -Dm0755 target/release/snpguest /out/snpguest
+
+# ---------------------------------------------------------------------------
+# Stage 2: runtime
+# ---------------------------------------------------------------------------
+FROM ubuntu:24.04
+
+LABEL org.opencontainers.image.title="solpbc-aci" \
+      org.opencontainers.image.description="AMD SEV-SNP attestation tooling for ACI Confidential Containers (raw sev-guest path, no MAA dependency)" \
+      org.opencontainers.image.source="https://github.com/solpbc/devops-lab"
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Runtime toolchain for the raw path:
+#   python3  — fetch-report.py (sev-guest ioctl, stdlib only)
+#   openssl  — inspect/verify the AMD VCEK certificate chain
+#   curl     — THIM endpoint and AMD KDS fetches
+#   xxd, jq  — binary/JSON spelunking
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 \
+        openssl \
+        xxd \
+        jq \
+        curl \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /out/snpguest /usr/local/bin/snpguest
+
+WORKDIR /app
+COPY fetch-report.py /app/fetch-report.py
+
+# Fetch a report at startup (random nonce; shows up in container logs), then
+# stay alive for exec-driven runs with a verifier-supplied --nonce-hex.
+# templates/aci-solpbc.json overrides this with plain sleep; drop the
+# template's "command" to get the auto-fetch behavior.
+ENTRYPOINT ["/bin/sh", "-c", "python3 /app/fetch-report.py --out /tmp/report.bin; exec sleep infinity"]
