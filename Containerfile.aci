@@ -56,33 +56,35 @@ LABEL org.opencontainers.image.title="solpbc-aci" \
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Runtime toolchain for the raw path:
-#   python3  — fetch-report.py (sev-guest ioctl, stdlib only)
+#   python3 + cryptography — fetch-report.py and verifier.py (in-TEE toy demo)
 #   openssl  — inspect/verify the AMD VCEK certificate chain
-#   curl     — THIM endpoint and AMD KDS fetches
+#   curl     — AMD KDS / acccache fetches
 #   xxd, jq  — binary/JSON spelunking
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 \
+        python3-pip \
         openssl \
         xxd \
         jq \
         curl \
         ca-certificates \
+    && pip3 install --break-system-packages --no-cache-dir 'cryptography>=46,<47' \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /out/snpguest /usr/local/bin/snpguest
 
 WORKDIR /app
+COPY demo-aci.sh /app/demo-aci.sh
 COPY fetch-report.py /app/fetch-report.py
+COPY verifier.py /app/verifier.py
+COPY roots /app/roots
+RUN chmod +x /app/demo-aci.sh
 
-# ATTESTER-ONLY ENTRYPOINT — deliberately not demo-aci.sh. The CVM image runs
-# demo.sh (all three roles in one container, flagged there as a toy
-# arrangement); on ACI the demo's trust boundary is real: demo-aci.sh is the
-# owner-side counterpart (it deploys this image and plays the verifier, which
-# must live OUTSIDE the TEE), while this container only produces evidence.
-#
-# Fetch a report at startup and print it (base64) to stdout — i.e. into
-# container logs, which is the report's machine-readable path out of the TEE.
-# NONCE_HEX (set by templates/aci-solpbc.json from the nonceHex deployment
-# parameter) binds a verifier nonce; unset, a random nonce is used. The
-# container then stays alive for exec-driven re-attestation.
-ENTRYPOINT ["/bin/sh", "-c", "python3 /app/fetch-report.py ${NONCE_HEX:+--nonce-hex \"$NONCE_HEX\"} --out /tmp/report.bin; exec sleep infinity"]
+# Default entrypoint mirrors the CVM image: demo-aci.sh runs the whole toy
+# story in-container (verifier nonce -> raw report via /dev/sev-guest -> KDS
+# VCEK -> appraisal), and the staged output — including the report as base64
+# — lands in container logs. NONCE_HEX (the template's nonceHex deployment
+# parameter) supplies an outside verifier's nonce. Provisioning (ACR, CCE
+# policy, deployment) happens outside the container; see the README. The real
+# verifier is owner-side: verifier.py appraise-raw against the logged report.
+ENTRYPOINT ["/app/demo-aci.sh"]

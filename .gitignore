@@ -49,5 +49,3 @@ tmp/
 params.json
 template.json
 
-.demo-aci.env
-aci-demo-out/

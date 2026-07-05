@@ -52,11 +52,7 @@
             "name": "solpbc",
             "properties": {
               "image": "[parameters('image')]",
-              "command": [
-                "/bin/sh",
-                "-c",
-                "python3 /app/fetch-report.py ${NONCE_HEX:+--nonce-hex \"$NONCE_HEX\"} --out /tmp/report.bin; exec sleep infinity"
-              ],
+              "command": ["/app/demo-aci.sh"],
               "environmentVariables": [
                 { "name": "NONCE_HEX", "value": "[parameters('nonceHex')]" }
               ],

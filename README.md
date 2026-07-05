@@ -22,8 +22,8 @@ See [`docs/azure-sev-snp-attestation-brief.pdf`](docs/azure-sev-snp-attestation-
 │   ├── aci-snp-probe.json # Probe container group (stock ubuntu, zero config)
 │   └── aci-solpbc.json    # Parameterized group for the solpbc image (ACR)
 ├── requirements.txt       # Python dependency set for verifier.py
-├── demo.sh                # Default entrypoint: full challenge->attest->appraise demo (CVM)
-├── demo-aci.sh            # Owner-side ACI demo: setup / attest+appraise / clean
+├── demo.sh                # CVM image entrypoint: full challenge->attest->appraise demo
+├── demo-aci.sh            # ACI image entrypoint: same toy story on the raw path
 ├── run.sh                 # Attester: AMD chain + vTPM quote freshness binding
 ├── verify.sh              # TOY in-container verifier (appraises the bundle)
 ├── verifier.py            # Off-CVM Python verifier spike (owner-side appraisal)
@@ -116,25 +116,17 @@ report in-TEE, appraise it off-TEE with `verifier.py appraise-raw`. Freshness
 comes from `REPORT_DATA` carrying the verifier nonce directly, and workload
 identity from `HOST_DATA` carrying the SHA-256 of the CCE policy.
 
-The scripted path is `demo-aci.sh`, which packages the whole flow the way
-`demo.sh` does for CVMs — except the verifier runs where it belongs, on your
-machine outside the TEE, so the demo's trust boundary is real:
+`demo-aci.sh` is the ACI counterpart of `demo.sh` and the default entrypoint
+of `Containerfile.aci`: the same self-contained toy story — take a nonce
+(the `nonceHex` deployment parameter, so it can be a real outside verifier's
+challenge), bind it into a raw report via `/dev/sev-guest`, fetch the VCEK
+from AMD KDS, appraise in-container — with the whole staged output landing in
+`az container logs`. As with `demo.sh`, the co-located verifier is a labeled
+`[TOY GAP]`; the real, owner-side verification is step 4 below.
 
-```sh
-./demo-aci.sh setup
-./demo-aci.sh
-./demo-aci.sh clean
-```
-
-`setup` is the slow, one-time half (resource group, ACR, amd64 image
-build/push, CCE policy); the bare invocation is the repeatable demo — fresh
-nonce, deploy, report from container logs, VCEK fetch, appraisal — and
-prints the same staged story as `demo.sh`. Resource names persist in
-`.demo-aci.env`; `clean` deletes the resource group and local scratch.
-
-The manual walkthrough below is the annotated version of what the script
-does. The command blocks are bash/zsh-neutral and contain no `#` comments, so
-they paste cleanly into a default interactive zsh (which does not accept
+Provisioning happens outside the container, in the numbered steps that
+follow. The command blocks are bash/zsh-neutral and contain no `#` comments,
+so they paste cleanly into a default interactive zsh (which does not accept
 comments unless `setopt interactive_comments` is set).
 
 **0. Names used throughout.** ACR names are global DNS labels: 5–50 lowercase
@@ -256,10 +248,12 @@ python3 verifier.py fetch-vcek bundle
 python3 verifier.py appraise-raw bundle --roots roots/amd --cce-policy-file policy.b64 --nonce-hex $NONCE
 ```
 
-Expect six `PASS` lines and `ALL CHECKS PASSED`. The nonce is fixed per
-deployment; to re-attest with a fresh one, redeploy with a new `nonceHex`, or
-`az container exec` in and run `fetch-report.py --nonce-hex <new>` manually.
-`params.json` holds a registry password — don't commit it.
+Expect six `PASS` lines and `ALL CHECKS PASSED`. (`az container logs` also
+shows the container's own in-TEE run of the same appraisal — the toy demo —
+ending in its `[TOY GAP]` notes; the run above is the one that counts, since
+it happened outside the TEE with your nonce.) The nonce is fixed per
+deployment and the demo exits when done, so re-attest by redeploying with a
+fresh `nonceHex`. `params.json` holds a registry password — don't commit it.
 
 Notes for manual runs and debugging:
 
@@ -277,23 +271,20 @@ Notes for manual runs and debugging:
   once reference values are established. The measurement is per-UVM-release,
   not per-image — workload identity rides entirely in `HOST_DATA`.
 
-**5. Clean up.** The container group bills while it runs (`sleep infinity`
-never exits on its own) and the resource group holds both the group and the
-ACR, so one delete covers everything. Remove the local scratch files too —
-`params.json` carries the registry password.
+**5. Clean up.** The demo container exits on completion (`restartPolicy:
+Never`), so compute billing stops on its own — but the container group, its
+logs, and the ACR persist in the resource group; one delete covers
+everything. Remove the local scratch files too — `params.json` carries the
+registry password.
 
 ```sh
 az group delete -n "$RG" --yes --no-wait
 rm -f params.json template.json
 ```
 
-To pause instead of delete (keeping the registry and the policy-bound
-deployment for another session):
-
-```sh
-az container stop -g "$RG" -n solpbc
-az container start -g "$RG" -n solpbc
-```
+(`az container start -g "$RG" -n solpbc` reruns the demo with the same
+deployment nonce; a fresh attestation needs a redeploy with a new
+`nonceHex`.)
 
 ## Attestation approach
 
