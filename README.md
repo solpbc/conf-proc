@@ -289,7 +289,8 @@ registry password.
 
 ```sh
 az group delete -n "$RG" --yes --no-wait
-rm -f params.json template.json
+rm -f params.json template.json policy.b64
+rm -rf bundle
 ```
 
 (`az container start -g "$RG" -n solpbc` reruns the demo with the same
