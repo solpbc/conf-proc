@@ -404,7 +404,7 @@ processing's Option-B+C channel. It is deliberately two-phase because a TLS
    Its first AK quote binds the owner nonce, certificate SPKI, and GPU-envelope
    digest. The owner appraises this extension in its certificate callback, so
    a relay without the quoted private key cannot complete the handshake.
-2. Once TLS 1.3 completes, both peers derive the registered contract's exporter
+2. Once TLS 1.3 completes, both peers derive the contract-defined exporter
    value. The first and only request admitted is
    `GET /._sol/spp/exporter-proof`; the gateway returns a second AK quote that
    binds the nonce, certificate SPKI, exporter, and same GPU-envelope digest.

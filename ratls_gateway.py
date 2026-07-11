@@ -22,13 +22,11 @@ import base64
 import hashlib
 import json
 import logging
-import os
 import selectors
 import shlex
 import socket
 import socketserver
 import subprocess
-import threading
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -122,7 +120,6 @@ class CommandCollector:
             check=False,
         )
         if completed.returncode != 0:
-            cause = completed.stderr.decode("utf-8", "replace").strip()
             raise CollectorError(
                 f"attestation collector failed with exit {completed.returncode}"
             )
