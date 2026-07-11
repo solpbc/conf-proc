@@ -31,6 +31,7 @@ from ratls_contract import (  # noqa: E402
     CompositeEvidence,
     ExporterProof,
 )
+from ratls_gateway import CollectorError, CommandCollector  # noqa: E402
 
 
 def recv_http(connection: SSL.Connection) -> tuple[bytes, bytes]:
@@ -107,6 +108,22 @@ class RatlsGatewayTest(unittest.TestCase):
         self.assertEqual(CompositeEvidence.from_der(evidence.to_der()), evidence)
         with self.assertRaisesRegex(ValueError, "trailing"):
             CompositeEvidence.from_der(evidence.to_der() + b"x")
+
+    def test_collector_stderr_cannot_escape_failure(self) -> None:
+        collector = CommandCollector(
+            [
+                sys.executable,
+                "-c",
+                "import sys; sys.stderr.write('nonce=device-secret-evidence'); sys.exit(7)",
+            ],
+            timeout=5,
+        )
+        with self.assertRaises(CollectorError) as caught:
+            collector.call({"operation": "test"})
+        self.assertEqual(
+            str(caught.exception), "attestation collector failed with exit 7"
+        )
+        self.assertNotIn("secret", str(caught.exception))
 
     def test_two_phase_gate_and_proxy(self) -> None:
         upstream = Upstream()

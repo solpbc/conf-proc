@@ -60,6 +60,10 @@ MAX_COLLECTOR_OUTPUT_BYTES = 8 * 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 180
 
 
+class CollectorError(RuntimeError):
+    """Hardware collector failure whose external diagnostics must not escape."""
+
+
 def _b64(value: bytes) -> str:
     return base64.b64encode(value).decode("ascii")
 
@@ -119,17 +123,17 @@ class CommandCollector:
         )
         if completed.returncode != 0:
             cause = completed.stderr.decode("utf-8", "replace").strip()
-            raise RuntimeError(
-                f"attestation collector failed with exit {completed.returncode}: {cause}"
+            raise CollectorError(
+                f"attestation collector failed with exit {completed.returncode}"
             )
         if len(completed.stdout) > MAX_COLLECTOR_OUTPUT_BYTES:
-            raise RuntimeError("attestation collector output exceeds limit")
+            raise CollectorError("attestation collector output exceeds limit")
         try:
             response = json.loads(completed.stdout)
         except json.JSONDecodeError as exc:
-            raise RuntimeError("attestation collector returned invalid JSON") from exc
+            raise CollectorError("attestation collector returned invalid JSON") from exc
         if not isinstance(response, dict):
-            raise RuntimeError("attestation collector response must be an object")
+            raise CollectorError("attestation collector response must be an object")
         return response
 
     def collect_composite(self, owner_nonce: bytes, spki_der: bytes) -> CompositeEvidence:
@@ -157,12 +161,12 @@ class CommandCollector:
             gpu_envelope=_unb64(response, "gpu_envelope_b64"),
         )
         if evidence.owner_nonce != owner_nonce:
-            raise RuntimeError("collector echoed a different owner nonce")
+            raise CollectorError("collector echoed a different owner nonce")
         if evidence.tls_spki_der != spki_der:
-            raise RuntimeError("collector echoed a different TLS SPKI")
+            raise CollectorError("collector echoed a different TLS SPKI")
         expected = certificate_binding(owner_nonce, spki_der, evidence.gpu_envelope)
         if response.get("qualifying_data_hex") != expected.hex():
-            raise RuntimeError("collector certificate quote used the wrong qualifying data")
+            raise CollectorError("collector certificate quote used the wrong qualifying data")
         return evidence
 
     def collect_exporter_proof(
@@ -188,7 +192,7 @@ class CommandCollector:
             }
         )
         if response.get("qualifying_data_hex") != qualifying_data.hex():
-            raise RuntimeError("collector exporter quote used the wrong qualifying data")
+            raise CollectorError("collector exporter quote used the wrong qualifying data")
         return ExporterProof(
             owner_nonce=owner_nonce,
             tls_spki_der=spki_der,
@@ -362,7 +366,20 @@ class GatewayHandler(socketserver.BaseRequestHandler):
                 LOG.info("event=attested_channel_admitted")
                 _tunnel(connection, upstream)
         except Exception as exc:
-            LOG.warning("event=attested_channel_rejected cause=%s", str(exc))
+            if isinstance(exc, CollectorError):
+                reason = "collector_failed"
+            elif isinstance(exc, TimeoutError):
+                reason = "timeout"
+            elif isinstance(exc, ConnectionError):
+                reason = "peer_closed"
+            elif isinstance(exc, (ValueError, SSL.Error)):
+                reason = "protocol_or_tls_rejected"
+            else:
+                reason = "internal_error"
+            # Never log exception text here: collector/vendor diagnostics can
+            # carry nonce, device, or evidence metadata. The rejection class
+            # is the complete persistent-log surface.
+            LOG.warning("event=attested_channel_rejected reason=%s", reason)
         finally:
             if connection is not None:
                 try:
