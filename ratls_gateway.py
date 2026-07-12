@@ -39,6 +39,7 @@ import shlex
 import socket
 import socketserver
 import subprocess
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -133,16 +134,21 @@ class CommandCollector:
             raise ValueError("collector command is required")
         self.command = command
         self.timeout = timeout
+        # The TPM report path opens raw /dev/tpm0 (single opener); concurrent
+        # admissions racing the collector fail EBUSY. Evidence collection is
+        # rare and sub-second — serialize it.
+        self._lock = threading.Lock()
 
     def call(self, request: dict[str, object]) -> dict[str, Any]:
-        completed = subprocess.run(
-            self.command,
-            input=(json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n").encode(),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=self.timeout,
-            check=False,
-        )
+        with self._lock:
+            completed = subprocess.run(
+                self.command,
+                input=(json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n").encode(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=self.timeout,
+                check=False,
+            )
         if completed.returncode != 0:
             raise CollectorError(
                 f"attestation collector failed with exit {completed.returncode}"
