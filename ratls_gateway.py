@@ -39,7 +39,7 @@ import shlex
 import socket
 import socketserver
 import subprocess
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from cryptography import x509
@@ -227,7 +227,7 @@ class CommandCollector:
 def _make_certificate(
     key: ec.EllipticCurvePrivateKey, extension_der: bytes
 ) -> x509.Certificate:
-    now = datetime.now(UTC)
+    now = datetime.now(timezone.utc)  # datetime.UTC needs 3.11; CVM is 3.10
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "spp-engine")])
     return (
         x509.CertificateBuilder()
