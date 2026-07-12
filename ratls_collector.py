@@ -236,6 +236,14 @@ def _exporter_proof(request: dict[str, Any]) -> dict[str, str]:
 
 
 def main() -> int:
+    # The vendor GPU verifier prints progress to stdout in ways Python-level
+    # redirect_stdout cannot always intercept (streams bound at import, fd-1
+    # writes). The gateway consumes stdout as one JSON object, so park the
+    # real stdout fd, point fd 1 (and sys.stdout) at stderr for the whole
+    # collection, and write only the final JSON to the parked fd.
+    real_stdout_fd = os.dup(1)
+    os.dup2(2, 1)
+    sys.stdout = sys.stderr
     try:
         request = json.load(sys.stdin)
         if not isinstance(request, dict):
@@ -247,11 +255,14 @@ def main() -> int:
             response = _exporter_proof(request)
         else:
             raise ValueError(f"unsupported collector operation {operation!r}")
-        print(json.dumps(response, sort_keys=True, separators=(",", ":")))
+        payload = json.dumps(response, sort_keys=True, separators=(",", ":")) + "\n"
+        os.write(real_stdout_fd, payload.encode("ascii"))
         return 0
     except Exception as exc:
         print(f"collector failed: {exc}", file=sys.stderr)
         return 1
+    finally:
+        os.close(real_stdout_fd)
 
 
 if __name__ == "__main__":
