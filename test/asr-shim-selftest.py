@@ -148,6 +148,42 @@ def non_canonical_probes() -> dict[str, bytes]:
     }
 
 
+class WireParserImportHygieneTest(unittest.TestCase):
+    """No decoder library is importable from the wire-byte parsers.
+
+    Pins the recipe § 0 "no transcoder reachable with wire bytes" invariant
+    mechanically (CSO A7 F2): NeMo transitively installs audio libraries
+    (soundfile/librosa), so the dependency set can't carry the property —
+    the modules that touch wire bytes must never import a decoder, directly
+    or lazily.
+    """
+
+    FORBIDDEN = {
+        "aifc", "audioop", "audioread", "av", "ffmpeg", "librosa",
+        "miniaudio", "pydub", "scipy", "sndhdr", "soundfile", "torchaudio",
+        "wave",
+    }
+
+    def test_wire_parsers_import_no_decoder_library(self) -> None:
+        import ast
+
+        for filename in ("asr_shim.py", "strict_wav.py"):
+            tree = ast.parse((ROOT / filename).read_text(), filename=filename)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    names = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    names = [node.module]
+                else:
+                    continue
+                for name in names:
+                    self.assertNotIn(
+                        name.split(".")[0],
+                        self.FORBIDDEN,
+                        f"{filename} imports decoder library {name!r}",
+                    )
+
+
 class MultipartParserTest(unittest.TestCase):
     def test_round_trip_and_strict_rejects(self) -> None:
         body = multipart_body(b"AUDIOBYTES", {"response_format": "verbose_json"})

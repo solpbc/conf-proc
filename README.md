@@ -463,7 +463,10 @@ graphs on, micro-batch capped at 8). It speaks the journal's local STT wire —
 top-level word timestamps — plus `GET /v1/audio/models` (served-model identity)
 and `GET /v1/audio/health` (readiness). `strict_wav.py` is the ONLY parser that
 touches wire audio bytes: exactly PCM16-WAV/16 kHz/mono/≤330 s is accepted,
-everything else is rejected 400 — there is no transcoder anywhere on the box.
+everything else is rejected 400 — no transcoder is reachable with wire bytes
+(NeMo's transitive audio libraries are installed but never invoked on wire
+bytes; the import-hygiene selftest pins that neither wire parser imports a
+decoder library).
 
 Fail-closed by construction: the CC-ON/PRODUCTION gate re-runs on every start
 (a restart that is not in CC PRODUCTION refuses to serve), the model loads from
