@@ -459,6 +459,76 @@ class RoutedRelayTest(unittest.TestCase):
         connection.close()
         raw.close()
 
+    def test_oversized_audio_request_gets_413_and_channel_survives(self) -> None:
+        """CSO A7 F1: relay-level 413, no upstream contact, channel keeps working."""
+        connection, raw = admitted_connection(self.gateway.port, b"e" * 32)
+        try:
+            body = b"x" * (11 * 1024 * 1024 + 1)
+            connection.sendall(
+                b"POST /v1/audio/transcriptions HTTP/1.1\r\nHost: spp-engine\r\n"
+                + f"Content-Length: {len(body)}\r\n\r\n".encode()
+            )
+            connection.sendall(body)  # client streams on, oblivious to the 413
+            head, _ = recv_http(connection)
+            self.assertIn(b"413", head.split(b"\r\n")[0])
+            self.assertNotIn(b"connection: close", head.lower())
+
+            follow_up = b"NEXT-REQUEST"
+            connection.sendall(
+                b"POST /v1/audio/transcriptions HTTP/1.1\r\nHost: spp-engine\r\n"
+                + f"Content-Length: {len(follow_up)}\r\n\r\n".encode()
+                + follow_up
+            )
+            head, response_body = recv_http(connection)
+            self.assertIn(b"200 OK", head)
+            self.assertEqual(response_body, b'{"upstream":"asr"}')
+        finally:
+            connection.close()
+            raw.close()
+        # only the follow-up reached the sidecar; the oversized request never did
+        self.assertEqual(len(self.audio_upstream.requests), 1)
+        self.assertEqual(self.audio_upstream.requests[0][1], follow_up)
+        self.assertEqual(self.default_upstream.requests, [])
+
+    def test_absurd_audio_length_gets_413_then_clean_close(self) -> None:
+        connection, raw = admitted_connection(self.gateway.port, b"f" * 32)
+        try:
+            connection.sendall(
+                b"POST /v1/audio/transcriptions HTTP/1.1\r\nHost: spp-engine\r\n"
+                b"Content-Length: 68719476736\r\n\r\n"  # 64 GiB: beyond the drain ceiling
+            )
+            head, _ = recv_http(connection)
+            self.assertIn(b"413", head.split(b"\r\n")[0])
+            self.assertIn(b"connection: close", head.lower())
+            with self.assertRaises((SSL.SysCallError, SSL.ZeroReturnError, ConnectionError)):
+                if connection.recv(1) == b"":
+                    raise ConnectionError("closed")
+        finally:
+            connection.close()
+            raw.close()
+        self.assertEqual(self.audio_upstream.requests, [])
+        self.assertEqual(self.default_upstream.requests, [])
+
+    def test_oversized_chat_request_is_not_capped(self) -> None:
+        """The cap is audio-route-only: chat bodies (base64 frames) may be larger."""
+        connection, raw = admitted_connection(self.gateway.port, b"g" * 32)
+        try:
+            body = b"y" * (11 * 1024 * 1024 + 64)
+            connection.sendall(
+                b"POST /v1/chat/completions HTTP/1.1\r\nHost: spp-engine\r\n"
+                + f"Content-Length: {len(body)}\r\n\r\n".encode()
+            )
+            connection.sendall(body)
+            head, response_body = recv_http(connection)
+            self.assertIn(b"200 OK", head)
+            self.assertEqual(response_body, b'{"upstream":"sglang"}')
+        finally:
+            connection.close()
+            raw.close()
+        self.assertEqual(len(self.default_upstream.requests), 1)
+        self.assertEqual(self.default_upstream.requests[0][1], body)
+        self.assertEqual(self.audio_upstream.requests, [])
+
     def test_chunked_request_body_fails_closed(self) -> None:
         connection, raw = admitted_connection(self.gateway.port, b"d" * 32)
         try:

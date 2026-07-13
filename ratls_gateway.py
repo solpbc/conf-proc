@@ -15,9 +15,13 @@ channel carries two serving surfaces: each HTTP/1.1 request is routed by path
 — ``/v1/audio/*`` to the ASR sidecar loopback, everything else to SGLang.  The
 relay parses request/response FRAMING only (request line, header lines, body
 lengths); bodies stream through untouched and unlogged, and any framing the
-relay cannot carry fail-closes the channel.  The Phase-1/2 admission contract
-is unchanged either way — routing is post-admission behavior, invisible to
-``ratls-contract.json``.
+relay cannot carry fail-closes the channel.  One exception answers instead of
+tearing down: an audio-route body declared over the sidecar's request cap gets
+a relay-level 413 without the upstream ever being opened, and the attested
+channel survives (the sidecar's own 413-and-close would otherwise fail the
+mid-body relay send and cost the client its whole admitted session).  The
+Phase-1/2 admission contract is unchanged either way — routing is
+post-admission behavior, invisible to ``ratls-contract.json``.
 
 The external collector command reads one JSON object on stdin and writes one
 JSON object on stdout.  It owns hardware-specific evidence collection; this
@@ -72,6 +76,15 @@ DEFAULT_TIMEOUT_SECONDS = 180
 AUDIO_PATH_PREFIX = b"/v1/audio/"
 MAX_RELAY_HEAD_BYTES = 32 * 1024
 RELAY_CHUNK_BYTES = 65536
+# Mirrors asr_shim.MAX_REQUEST_BYTES. The relay answers an oversized audio
+# request 413 itself, before opening the upstream: the shim 413s-and-closes
+# without reading the body, so relaying one would fail the mid-body send and
+# tear down the whole attested channel (CSO A7 F1). Audio route only — chat
+# bodies (base64 frames) legitimately exceed this.
+MAX_AUDIO_BODY_BYTES = 11 * 1024 * 1024
+# Keep-alive drain ceiling: a mildly oversized body is drained so the channel
+# survives its own 413; a declared length beyond this closes the channel.
+MAX_AUDIO_DRAIN_BYTES = 64 * 1024 * 1024
 _HEADER_NAME_RE = re.compile(rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
 
 
@@ -445,6 +458,29 @@ def _response_body_mode(
     return "close", 0
 
 
+def _send_relay_413(client: Any, close: bool) -> None:
+    body = b'{"error":"request exceeds maximum size"}'
+    client.sendall(
+        b"HTTP/1.1 413 Request Entity Too Large\r\n"
+        b"Content-Type: application/json\r\n"
+        + f"Content-Length: {len(body)}\r\n".encode("ascii")
+        + (b"Connection: close\r\n" if close else b"")
+        + b"\r\n"
+        + body
+    )
+
+
+def _drain_exact(reader: _RelayReader, length: int) -> bool:
+    """Discard exactly ``length`` body bytes; False if the peer closed first."""
+    remaining = length
+    while remaining:
+        chunk = reader.read_available(min(RELAY_CHUNK_BYTES, remaining))
+        if not chunk:
+            return False
+        remaining -= len(chunk)
+    return True
+
+
 def _copy_exact(reader: _RelayReader, destination: Any, length: int) -> None:
     remaining = length
     while remaining:
@@ -502,7 +538,20 @@ def _http_relay(
         method, path = request_parts[0], request_parts[1]
         headers = _parse_relay_headers(lines[1:])
         body_length = _request_body_length(headers)
+        client_wants_close = b"close" in [
+            value.lower() for value in headers.get(b"connection", [])
+        ]
         target = audio_upstream if path.startswith(AUDIO_PATH_PREFIX) else default_upstream
+        if target is audio_upstream and body_length > MAX_AUDIO_BODY_BYTES:
+            # Relay-level reject-before-read (see MAX_AUDIO_BODY_BYTES): the
+            # upstream is never opened, and the body is never forwarded.
+            if client_wants_close or body_length > MAX_AUDIO_DRAIN_BYTES:
+                _send_relay_413(client, close=True)
+                return
+            _send_relay_413(client, close=False)
+            if not _drain_exact(reader, body_length):
+                return
+            continue
         try:
             upstream = socket.create_connection(target, timeout=timeout)
         except OSError as exc:
@@ -545,8 +594,7 @@ def _http_relay(
                 break
         finally:
             upstream.close()
-        connection_values = [value.lower() for value in headers.get(b"connection", [])]
-        if b"close" in connection_values:
+        if client_wants_close:
             return
 
 
