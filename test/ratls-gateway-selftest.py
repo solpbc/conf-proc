@@ -36,6 +36,7 @@ from ratls_gateway import (  # noqa: E402
     CollectorError,
     CommandCollector,
 )
+from spp_health import admit_gateway  # noqa: E402
 
 
 def recv_http(connection: SSL.Connection) -> tuple[bytes, bytes]:
@@ -207,6 +208,20 @@ def admitted_connection(
 
 
 class RatlsGatewayTest(unittest.TestCase):
+    def test_health_client_completes_real_two_phase_admission(self) -> None:
+        upstream = Upstream()
+        upstream.start()
+        gateway = GatewayProcess(upstream.port)
+        try:
+            connection, raw, _http = admit_gateway(
+                "127.0.0.1", gateway.port, timeout=10
+            )
+            self.assertEqual(connection.get_protocol_version_name(), "TLSv1.3")
+            connection.close()
+            raw.close()
+        finally:
+            gateway.close()
+
     def test_audio_body_cap_matches_asr_shim(self) -> None:
         """CSO A7 F4: the relay must reject at the shim's exact byte cap."""
         import ast

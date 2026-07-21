@@ -30,6 +30,7 @@ See [`docs/azure-sev-snp-attestation-brief.pdf`](docs/azure-sev-snp-attestation-
 ├── ratls_contract.py       # SPP RA-TLS identifiers + strict DER codec (code SoT)
 ├── ratls-contract.json     # Generated cross-implementation contract artifact
 ├── ratls_gateway.py        # TLS 1.3 evidence gate + loopback proxy/path-router
+├── spp_health.py           # Content-free on-box serving + RA-TLS health SOT
 ├── ratls_collector.py      # Live H100/vTPM evidence collector for the gateway
 ├── asr_shim.py             # SPP ASR sidecar: hosted STT at local parity (NeMo)
 ├── strict_wav.py           # Canonical PCM16-WAV intake gate (the only audio parser)
@@ -502,6 +503,24 @@ hardware via an injected stub transcriber.
 - Rust toolchain (for `snpguest` with `--features hyperv`)
 - Python 3 with `cryptography` and `pyOpenSSL` for `verifier.py` and the RA-TLS
   gateway (`make install` installs the pinned Python dependency range)
+
+### Persistent engine health
+
+`spp_health.py` is the single source of truth for whether the persistent SPP
+engine is fit to serve. Install it as `spp-health` on the engine and run:
+
+```bash
+sudo ln -sfn "$PWD/spp_health.py" /usr/local/bin/spp-health
+spp-health --json
+```
+
+Healthy is the conjunction of CC ON/PRODUCTION, the three required systemd
+units and SGLang container, one H100 NVL with readable memory counters, a real
+SPPRAT1/TLS 1.3/exporter-proof admission, and the pinned inference and ASR
+models responding through that admitted channel. Exit is zero only when the
+document says `healthy`; an unhealthy run still emits the complete JSON and
+exits one. Output is content-free: fixed states/reason codes, model identities,
+and GPU capacity counters only—never evidence or serving content.
 
 ## References
 
