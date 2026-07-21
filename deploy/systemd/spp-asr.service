@@ -1,0 +1,14 @@
+[Unit]
+Description=Confidential-processing ASR sidecar (parakeet-tdt-0.6b-v3, loopback 8100)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=azureuser
+WorkingDirectory=/home/azureuser/conf-proc
+ExecStart=/home/azureuser/asrenv/bin/python /home/azureuser/conf-proc/asr_shim.py --host 127.0.0.1 --port 8100 --model-path /opt/spp-asr/parakeet-tdt-0.6b-v3.nemo --model-sha256 3cbdc85877e668ca7b82d0d56770eb1fac76691f55d6b97545e8d61ca588d10d
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

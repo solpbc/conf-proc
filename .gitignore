@@ -1,28 +1,25 @@
-# macOS
+# macOS / editors
 .DS_Store
 .AppleDouble
 .LSOverride
 ._*
-
-# Editor / IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
-# Rust / snpguest build artifacts
-/target/
-**/*.rs.bk
-Cargo.lock
-
 # Python
 __pycache__/
 *.py[cod]
+.pytest_cache/
 .venv/
 venv/
 
-# Attestation artifacts & secrets (never commit)
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
 *.pem
 *.key
 *.cert
@@ -34,20 +31,13 @@ venv/
 hcl-blob*
 nonce*
 
-# Pinned AMD CA roots used by the off-CVM verifier.
+# Pinned public AMD trust roots used by verifier.py.
 !roots/
 !roots/amd/
 !roots/amd/*/
 !roots/amd/*/*.pem
 
-# Logs & temp
+# Logs and temporary output
 *.log
 *.tmp
 tmp/
-
-# ACI deployment scratch (params.json carries ACR credentials)
-params.json
-template.json
-
-policy.b64
-bundle/

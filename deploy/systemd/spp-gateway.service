@@ -1,0 +1,15 @@
+[Unit]
+Description=Confidential-processing RA-TLS gateway (:9443 -> SGLang :8000 + ASR :8100)
+After=network-online.target docker.service spp-asr.service
+Wants=network-online.target
+
+[Service]
+User=azureuser
+WorkingDirectory=/home/azureuser/conf-proc
+Environment=SPP_NVIDIA_VERIFIER_SRC=/usr/local/lib/local_gpu_verifier/src
+ExecStart=/home/azureuser/gwenv/bin/python /home/azureuser/conf-proc/ratls_gateway.py --listen-host 0.0.0.0 --listen-port 9443 --upstream-host 127.0.0.1 --upstream-port 8000 --audio-upstream-host 127.0.0.1 --audio-upstream-port 8100 --collector-command /home/azureuser/conf-proc/run-collector.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
