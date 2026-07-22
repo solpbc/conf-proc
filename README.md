@@ -51,6 +51,13 @@ The ASR serving environment is intentionally separate and pinned in
 `parse_multipart`, or change to gateway relay framing requires security
 re-qualification before production rollout.
 
+Production rebuilds install `requirements-lock.txt` and
+`requirements-asr-lock.txt`, the complete environments resolved on the qualified
+Ubuntu 22.04 / CPython 3.10 / CUDA 13 pool. The shorter requirement files remain
+the human-maintained direct-dependency intent. Refresh a lock only from an A–H
+qualified candidate and commit it with the source revision that advances the
+deployment recipe.
+
 ## Deployment
 
 The checked-in systemd units under `deploy/systemd/` describe the live service

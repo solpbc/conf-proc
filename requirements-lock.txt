@@ -1,0 +1,7 @@
+# Production gateway environment lock for Ubuntu 22.04 / CPython 3.10.
+# Refreshed from the qualified live pool on 2026-07-22.
+cffi==2.1.0
+cryptography==46.0.7
+pycparser==3.0
+pyopenssl==26.2.0
+typing-extensions==4.16.0
