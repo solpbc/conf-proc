@@ -1,0 +1,5 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2026 sol pbc
+# Stable operator entrypoint: keep health-check imports inside the pinned gateway venv.
+exec /home/azureuser/gwenv/bin/python /home/azureuser/conf-proc/spp_health.py "$@"

@@ -54,8 +54,11 @@ re-qualification before production rollout.
 ## Deployment
 
 The checked-in systemd units under `deploy/systemd/` describe the live service
-layout. `run-collector.sh` is the narrow bridge into the independently installed
-NVIDIA verifier environment. A deployment is ready only when:
+layout. `deploy/spp-health` is the stable `/usr/local/bin/spp-health` entrypoint
+and deliberately runs the checker in the pinned gateway venv; do not symlink the
+Python module directly to a system interpreter. `run-collector.sh` is the narrow
+bridge into the independently installed NVIDIA verifier environment. A deployment
+is ready only when:
 
 ```sh
 spp-health --json
