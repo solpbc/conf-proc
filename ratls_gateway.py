@@ -8,19 +8,17 @@ evidence during the TLS 1.3 handshake, then verifies an exporter-bound AK quote
 at the reserved proof endpoint.  Only after both phases does this process admit
 the connection.  It never logs or parses inference request/response bodies.
 
-Post-admission there are two proxy modes.  Without ``--audio-upstream-port``
-the connection becomes an opaque byte tunnel to the single loopback upstream
-(SGLang), byte-identical to the V5-proven behavior.  With it, the one admitted
-channel carries two serving surfaces: each HTTP/1.1 request is routed by path
-— ``/v1/audio/*`` to the ASR sidecar loopback, everything else to SGLang.  The
-relay parses request/response FRAMING only (request line, header lines, body
-lengths); bodies stream through untouched and unlogged, and any framing the
-relay cannot carry fail-closes the channel.  One exception answers instead of
+Post-admission, the relay parses HTTP/1.1 FRAMING only (request line, header
+lines, body lengths).  Before the first upstream byte, it validates the
+request's bearer credential against the portal's live entitlement state; each
+later request on the channel must carry the same credential.  It derives the
+opaque metering id from that credential rather than trusting a client-asserted
+``x-sol-device`` value.  Bodies stream through untouched and unlogged.  With
+``--audio-upstream-port``, ``/v1/audio/*`` routes to the ASR sidecar loopback
+and everything else routes to SGLang.  One exception answers instead of
 tearing down: an audio-route body declared over the sidecar's request cap gets
 a relay-level 413 without the upstream ever being opened, and the attested
-channel survives (the sidecar's own 413-and-close would otherwise fail the
-mid-body relay send and cost the client its whole admitted session).  The
-Phase-1/2 admission contract is unchanged either way — routing is
+channel survives.  The Phase-1/2 admission contract is unchanged — this is
 post-admission behavior, invisible to ``ratls-contract.json``.
 
 The external collector command reads one JSON object on stdin and writes one
@@ -34,17 +32,21 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import hmac
 import json
 import logging
 import re
 import select
-import selectors
 import shlex
 import socket
 import socketserver
 import subprocess
 import threading
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from cryptography import x509
@@ -98,6 +100,76 @@ class RelayProtocolError(ValueError):
 
 class UpstreamUnavailableError(RuntimeError):
     """Post-admission upstream connect or mid-response failure."""
+
+
+class EntitlementRejectedError(RuntimeError):
+    """The presented portal credential is absent, invalid, or inactive."""
+
+
+class EntitlementUnavailableError(RuntimeError):
+    """The portal could not make an authoritative entitlement decision."""
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Never forward an entitlement credential across an HTTP redirect."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        raise urllib.error.HTTPError(req.full_url, code, msg, headers, fp)
+
+
+class PortalEntitlementAuthorizer:
+    """Validate one journal credential against the portal's live entitlement state."""
+
+    def __init__(self, url: str, secret_file: Path, timeout: int) -> None:
+        parsed = urllib.parse.urlsplit(url)
+        loopback_http = parsed.scheme == "http" and parsed.hostname in {
+            "127.0.0.1",
+            "::1",
+            "localhost",
+        }
+        if parsed.scheme != "https" and not loopback_http:
+            raise ValueError("entitlement URL must use HTTPS (HTTP is loopback-only)")
+        if parsed.username or parsed.password or parsed.fragment:
+            raise ValueError("entitlement URL must not contain credentials or a fragment")
+        if timeout <= 0:
+            raise ValueError("entitlement timeout must be positive")
+        secret = secret_file.read_text(encoding="utf-8").strip()
+        if not secret:
+            raise ValueError("entitlement secret file is empty")
+        self.url = url
+        self.secret = secret
+        self.timeout = timeout
+        self.opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}),
+            _NoRedirectHandler(),
+        )
+
+    def authorize(self, credential: str) -> None:
+        request = urllib.request.Request(
+            self.url,
+            data=b"",
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {self.secret}",
+                "X-Sol-Entitlement": credential,
+                "Cache-Control": "no-store",
+            },
+        )
+        try:
+            with self.opener.open(request, timeout=self.timeout) as response:
+                if response.status != 204:
+                    raise EntitlementUnavailableError(
+                        "portal returned an invalid authorization response"
+                    )
+        except urllib.error.HTTPError as exc:
+            try:
+                if exc.code in {401, 403}:
+                    raise EntitlementRejectedError("portal rejected entitlement") from None
+                raise EntitlementUnavailableError("portal authorization failed") from None
+            finally:
+                exc.close()
+        except (OSError, urllib.error.URLError, TimeoutError):
+            raise EntitlementUnavailableError("portal authorization unavailable") from None
 
 
 def _b64(value: bytes) -> str:
@@ -324,28 +396,6 @@ def _send_proof(connection: SSL.Connection, proof_der: bytes) -> None:
     connection.sendall(response)
 
 
-def _tunnel(client: SSL.Connection, upstream: socket.socket) -> None:
-    selector = selectors.DefaultSelector()
-    selector.register(client, selectors.EVENT_READ, (client, upstream))
-    selector.register(upstream, selectors.EVENT_READ, (upstream, client))
-    try:
-        while True:
-            events = selector.select(timeout=DEFAULT_TIMEOUT_SECONDS)
-            if not events:
-                raise TimeoutError("idle attested channel timed out")
-            for key, _mask in events:
-                source, destination = key.data
-                try:
-                    chunk = source.recv(65536)
-                except (SSL.WantReadError, SSL.WantWriteError):
-                    continue
-                if not chunk:
-                    return
-                destination.sendall(chunk)
-    finally:
-        selector.close()
-
-
 class _RelayReader:
     """Bounded buffered reader over an SSL connection or plain socket."""
 
@@ -441,6 +491,37 @@ def _request_body_length(headers: dict[bytes, list[bytes]]) -> int:
     return _single_content_length(headers) or 0
 
 
+def _bearer_credential(headers: dict[bytes, list[bytes]]) -> str:
+    values = headers.get(b"authorization", [])
+    if len(values) != 1:
+        raise EntitlementRejectedError("exactly one authorization header is required")
+    scheme, separator, credential = values[0].partition(b" ")
+    if (
+        not separator
+        or scheme.lower() != b"bearer"
+        or not re.fullmatch(rb"[\x21-\x7e]+", credential)
+    ):
+        raise EntitlementRejectedError("a bearer credential is required")
+    if len(credential) > 4096:
+        raise EntitlementRejectedError("bearer credential exceeds limit")
+    try:
+        return credential.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise EntitlementRejectedError("bearer credential must be ASCII") from exc
+
+
+def _canonical_request_head(lines: list[bytes], device_id: str) -> bytes:
+    retained = [
+        line
+        for line in lines[1:]
+        if line.partition(b":")[0].strip().lower()
+        not in {b"authorization", b"x-sol-device"}
+    ]
+    return b"\r\n".join(
+        [lines[0], *retained, f"x-sol-device: {device_id}".encode("ascii"), b"", b""]
+    )
+
+
 def _response_body_mode(
     status: int, method: bytes, headers: dict[bytes, list[bytes]]
 ) -> tuple[str, int]:
@@ -466,6 +547,25 @@ def _send_relay_413(client: Any, close: bool) -> None:
         + f"Content-Length: {len(body)}\r\n".encode("ascii")
         + (b"Connection: close\r\n" if close else b"")
         + b"\r\n"
+        + body
+    )
+
+
+def _send_entitlement_error(client: Any, status: int) -> None:
+    if status == 401:
+        reason = b"Unauthorized"
+        body = b'{"error":"invalid entitlement credential"}'
+        authenticate = b'WWW-Authenticate: Bearer realm="spp"\r\n'
+    else:
+        reason = b"Service Unavailable"
+        body = b'{"error":"entitlement service unavailable"}'
+        authenticate = b""
+    client.sendall(
+        f"HTTP/1.1 {status} {reason.decode('ascii')}\r\n".encode("ascii")
+        + b"Content-Type: application/json\r\n"
+        + f"Content-Length: {len(body)}\r\n".encode("ascii")
+        + authenticate
+        + b"Cache-Control: no-store\r\nConnection: close\r\n\r\n"
         + body
     )
 
@@ -512,8 +612,9 @@ def _copy_chunked(reader: _RelayReader, destination: Any) -> None:
 def _http_relay(
     client: SSL.Connection,
     default_upstream: tuple[str, int],
-    audio_upstream: tuple[str, int],
+    audio_upstream: tuple[str, int] | None,
     timeout: int,
+    authorizer: PortalEntitlementAuthorizer,
 ) -> None:
     """Serial per-request HTTP/1.1 relay over the one admitted channel.
 
@@ -523,6 +624,8 @@ def _http_relay(
     framing only — bodies are never interpreted or logged.
     """
     reader = _RelayReader(client, idle_timeout=timeout)
+    admitted_credential: str | None = None
+    device_id: str | None = None
     while True:
         head = reader.read_head()
         if head is None:
@@ -537,12 +640,34 @@ def _http_relay(
             raise RelayProtocolError("malformed request line")
         method, path = request_parts[0], request_parts[1]
         headers = _parse_relay_headers(lines[1:])
+        try:
+            credential = _bearer_credential(headers)
+            if admitted_credential is None:
+                authorizer.authorize(credential)
+                admitted_credential = credential
+                device_id = hashlib.sha256(credential.encode("ascii")).hexdigest()
+                LOG.info("event=entitlement_admitted")
+            elif not hmac.compare_digest(credential, admitted_credential):
+                raise EntitlementRejectedError(
+                    "credential changed within an admitted channel"
+                )
+        except EntitlementRejectedError:
+            LOG.warning("event=entitlement_rejected reason=invalid_or_inactive")
+            _send_entitlement_error(client, 401)
+            return
+        except EntitlementUnavailableError:
+            LOG.warning("event=entitlement_rejected reason=authorizer_unavailable")
+            _send_entitlement_error(client, 503)
+            return
+        assert device_id is not None
+        head = _canonical_request_head(lines, device_id)
         body_length = _request_body_length(headers)
         client_wants_close = b"close" in [
             value.lower() for value in headers.get(b"connection", [])
         ]
-        target = audio_upstream if path.startswith(AUDIO_PATH_PREFIX) else default_upstream
-        if target is audio_upstream and body_length > MAX_AUDIO_BODY_BYTES:
+        is_audio = audio_upstream is not None and path.startswith(AUDIO_PATH_PREFIX)
+        target = audio_upstream if is_audio else default_upstream
+        if is_audio and body_length > MAX_AUDIO_BODY_BYTES:
             # Relay-level reject-before-read (see MAX_AUDIO_BODY_BYTES): the
             # upstream is never opened, and the body is never forwarded.
             if client_wants_close or body_length > MAX_AUDIO_DRAIN_BYTES:
@@ -606,11 +731,13 @@ class GatewayServer(socketserver.ThreadingTCPServer):
         self,
         address: tuple[str, int],
         collector: CommandCollector,
+        authorizer: PortalEntitlementAuthorizer,
         upstream: tuple[str, int],
         socket_timeout: int,
         audio_upstream: tuple[str, int] | None = None,
     ) -> None:
         self.collector = collector
+        self.authorizer = authorizer
         self.upstream = upstream
         self.socket_timeout = socket_timeout
         self.audio_upstream = audio_upstream
@@ -653,20 +780,13 @@ class GatewayHandler(socketserver.BaseRequestHandler):
             _send_proof(connection, proof.to_der())
 
             LOG.info("event=attested_channel_admitted")
-            if self.server.audio_upstream is None:
-                with socket.create_connection(
-                    self.server.upstream, timeout=self.server.socket_timeout
-                ) as upstream:
-                    upstream.settimeout(None)
-                    raw.settimeout(None)
-                    _tunnel(connection, upstream)
-            else:
-                _http_relay(
-                    connection,
-                    self.server.upstream,
-                    self.server.audio_upstream,
-                    self.server.socket_timeout,
-                )
+            _http_relay(
+                connection,
+                self.server.upstream,
+                self.server.audio_upstream,
+                self.server.socket_timeout,
+                self.server.authorizer,
+            )
         except Exception as exc:
             if isinstance(exc, CollectorError):
                 reason = "collector_failed"
@@ -738,6 +858,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--collector-command")
     parser.add_argument("--collector-timeout", type=int, default=120)
     parser.add_argument("--socket-timeout", type=int, default=180)
+    parser.add_argument(
+        "--entitlement-url",
+        help="portal endpoint that authorizes the first post-attestation bearer credential",
+    )
+    parser.add_argument(
+        "--entitlement-secret-file",
+        type=Path,
+        help="root/operator-provisioned file containing the portal service credential",
+    )
+    parser.add_argument("--entitlement-timeout", type=int, default=5)
     parser.add_argument("--print-collector-contract", action="store_true")
     return parser
 
@@ -749,11 +879,20 @@ def main() -> int:
         return 0
     if not args.collector_command:
         raise SystemExit("--collector-command is required")
+    if not args.entitlement_url:
+        raise SystemExit("--entitlement-url is required")
+    if not args.entitlement_secret_file:
+        raise SystemExit("--entitlement-secret-file is required")
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     collector = CommandCollector(shlex.split(args.collector_command), args.collector_timeout)
+    authorizer = PortalEntitlementAuthorizer(
+        args.entitlement_url,
+        args.entitlement_secret_file,
+        args.entitlement_timeout,
+    )
     audio_upstream = (
         (args.audio_upstream_host, args.audio_upstream_port)
         if args.audio_upstream_port
@@ -762,6 +901,7 @@ def main() -> int:
     with GatewayServer(
         (args.listen_host, args.listen_port),
         collector,
+        authorizer,
         (args.upstream_host, args.upstream_port),
         args.socket_timeout,
         audio_upstream=audio_upstream,

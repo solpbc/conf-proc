@@ -6,9 +6,13 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import http.server
+import os
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import unittest
 from pathlib import Path
@@ -37,6 +41,47 @@ from ratls_gateway import (  # noqa: E402
     CommandCollector,
 )
 from spp_health import admit_gateway  # noqa: E402
+
+
+TEST_ENTITLEMENT = "test-entitlement-token"
+TEST_ENGINE_SECRET = "test-engine-authorizer-secret"
+AUTHORIZATION_LINE = f"Authorization: Bearer {TEST_ENTITLEMENT}\r\n".encode()
+
+
+class EntitlementAuthority:
+    def __init__(
+        self,
+        accepted_token: str = TEST_ENTITLEMENT,
+        response_status: int | None = None,
+    ) -> None:
+        authority = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                authority.requests.append(dict(self.headers.items()))
+                authorized = (
+                    self.path == "/internal/spp/authorize"
+                    and self.headers.get("Authorization")
+                    == f"Bearer {TEST_ENGINE_SECRET}"
+                    and self.headers.get("X-Sol-Entitlement") == accepted_token
+                )
+                self.send_response(response_status or (204 if authorized else 401))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self.server.server_address[1]
+        self.requests: list[dict[str, str]] = []
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
 
 
 def recv_http(connection: SSL.Connection) -> tuple[bytes, bytes]:
@@ -80,7 +125,18 @@ class Upstream:
 
 
 class GatewayProcess:
-    def __init__(self, upstream_port: int, audio_upstream_port: int | None = None) -> None:
+    def __init__(
+        self,
+        upstream_port: int,
+        audio_upstream_port: int | None = None,
+        authority: EntitlementAuthority | None = None,
+    ) -> None:
+        self.authority = authority or EntitlementAuthority()
+        self.owns_authority = authority is None
+        secret_file = tempfile.NamedTemporaryFile(mode="w", delete=False)
+        secret_file.write(TEST_ENGINE_SECRET)
+        secret_file.close()
+        self.secret_path = secret_file.name
         command = [
             sys.executable,
             str(ROOT / "ratls_gateway.py"),
@@ -92,6 +148,10 @@ class GatewayProcess:
             str(upstream_port),
             "--collector-command",
             f"{sys.executable} {ROOT / 'test/fake-ratls-collector.py'}",
+            "--entitlement-url",
+            f"http://127.0.0.1:{self.authority.port}/internal/spp/authorize",
+            "--entitlement-secret-file",
+            self.secret_path,
         ]
         if audio_upstream_port is not None:
             command += ["--audio-upstream-port", str(audio_upstream_port)]
@@ -108,6 +168,9 @@ class GatewayProcess:
     def close(self) -> None:
         self.process.terminate()
         self.process.communicate(timeout=5)
+        os.unlink(self.secret_path)
+        if self.owns_authority:
+            self.authority.close()
 
 
 class RecordingUpstream:
@@ -321,7 +384,11 @@ class RatlsGatewayTest(unittest.TestCase):
             self.assertEqual(proof.owner_nonce, nonce)
             self.assertEqual(proof.tls_exporter, client_exporter)
 
-            connection.sendall(b"GET /health HTTP/1.1\r\nHost: spp-engine\r\nConnection: close\r\n\r\n")
+            connection.sendall(
+                b"GET /health HTTP/1.1\r\nHost: spp-engine\r\n"
+                + AUTHORIZATION_LINE
+                + b"Connection: close\r\n\r\n"
+            )
             response_head, response_body = recv_http(connection)
             self.assertIn(b"200 OK", response_head)
             self.assertEqual(response_body, b'{"status":"ok"}')
@@ -415,6 +482,8 @@ class RoutedRelayTest(unittest.TestCase):
             audio_body = b"FAKE-CANONICAL-WAV-BYTES"
             connection.sendall(
                 b"POST /v1/audio/transcriptions HTTP/1.1\r\nHost: spp-engine\r\n"
+                + AUTHORIZATION_LINE
+                + b"x-sol-device: client-spoof\r\n"
                 + f"Content-Length: {len(audio_body)}\r\n\r\n".encode()
                 + audio_body
             )
@@ -425,6 +494,7 @@ class RoutedRelayTest(unittest.TestCase):
             chat_body = b'{"messages":[]}'
             connection.sendall(
                 b"POST /v1/chat/completions HTTP/1.1\r\nHost: spp-engine\r\n"
+                + AUTHORIZATION_LINE
                 + f"Content-Length: {len(chat_body)}\r\n\r\n".encode()
                 + chat_body
             )
@@ -432,7 +502,9 @@ class RoutedRelayTest(unittest.TestCase):
             self.assertEqual(body, b'{"upstream":"sglang"}')
 
             connection.sendall(
-                b"GET /v1/models HTTP/1.1\r\nHost: spp-engine\r\n\r\n"
+                b"GET /v1/models HTTP/1.1\r\nHost: spp-engine\r\n"
+                + AUTHORIZATION_LINE
+                + b"\r\n"
             )
             head, body = recv_http(connection)
             self.assertEqual(body, b'{"upstream":"sglang"}')
@@ -443,12 +515,76 @@ class RoutedRelayTest(unittest.TestCase):
         self.assertEqual(len(self.audio_upstream.requests), 1)
         audio_head, recorded_audio_body = self.audio_upstream.requests[0]
         self.assertTrue(audio_head.startswith(b"POST /v1/audio/transcriptions HTTP/1.1"))
+        canonical_device = hashlib.sha256(TEST_ENTITLEMENT.encode()).hexdigest().encode()
+        self.assertIn(b"x-sol-device: " + canonical_device, audio_head)
+        self.assertNotIn(b"client-spoof", audio_head)
+        self.assertNotIn(b"authorization:", audio_head.lower())
         self.assertEqual(recorded_audio_body, audio_body)
         self.assertEqual(len(self.default_upstream.requests), 2)
         self.assertTrue(
             self.default_upstream.requests[0][0].startswith(b"POST /v1/chat/completions")
         )
         self.assertTrue(self.default_upstream.requests[1][0].startswith(b"GET /v1/models"))
+        self.assertEqual(len(self.gateway.authority.requests), 1)
+
+    def test_invalid_entitlement_is_rejected_before_any_upstream_byte(self) -> None:
+        connection, raw = admitted_connection(self.gateway.port, b"i" * 32)
+        try:
+            connection.sendall(
+                b"POST /v1/chat/completions HTTP/1.1\r\nHost: spp-engine\r\n"
+                b"Authorization: Bearer not-entitled\r\nContent-Length: 0\r\n\r\n"
+            )
+            head, body = recv_http(connection)
+            self.assertIn(b"401 Unauthorized", head)
+            self.assertEqual(body, b'{"error":"invalid entitlement credential"}')
+        finally:
+            connection.close()
+            raw.close()
+        self.assertEqual(self.audio_upstream.requests, [])
+        self.assertEqual(self.default_upstream.requests, [])
+        self.assertEqual(len(self.gateway.authority.requests), 1)
+
+    def test_missing_entitlement_is_rejected_without_portal_call(self) -> None:
+        connection, raw = admitted_connection(self.gateway.port, b"j" * 32)
+        try:
+            connection.sendall(
+                b"GET /v1/models HTTP/1.1\r\nHost: spp-engine\r\n\r\n"
+            )
+            head, _body = recv_http(connection)
+            self.assertIn(b"401 Unauthorized", head)
+        finally:
+            connection.close()
+            raw.close()
+        self.assertEqual(self.audio_upstream.requests, [])
+        self.assertEqual(self.default_upstream.requests, [])
+        self.assertEqual(self.gateway.authority.requests, [])
+
+    def test_authorizer_outage_returns_503_before_any_upstream_byte(self) -> None:
+        authority = EntitlementAuthority(response_status=500)
+        gateway = GatewayProcess(
+            self.default_upstream.port,
+            audio_upstream_port=self.audio_upstream.port,
+            authority=authority,
+        )
+        try:
+            connection, raw = admitted_connection(gateway.port, b"u" * 32)
+            try:
+                connection.sendall(
+                    b"GET /v1/models HTTP/1.1\r\nHost: spp-engine\r\n"
+                    + AUTHORIZATION_LINE
+                    + b"\r\n"
+                )
+                head, body = recv_http(connection)
+                self.assertIn(b"503 Service Unavailable", head)
+                self.assertEqual(body, b'{"error":"entitlement service unavailable"}')
+            finally:
+                connection.close()
+                raw.close()
+        finally:
+            gateway.close()
+            authority.close()
+        self.assertEqual(self.audio_upstream.requests, [])
+        self.assertEqual(self.default_upstream.requests, [])
 
     def test_chunked_response_streams_through(self) -> None:
         chunked_upstream = RecordingUpstream(b'{"streamed":true}', chunked=True)
@@ -459,7 +595,9 @@ class RoutedRelayTest(unittest.TestCase):
             connection, raw = admitted_connection(gateway.port, b"c" * 32)
             try:
                 connection.sendall(
-                    b"GET /v1/models HTTP/1.1\r\nHost: spp-engine\r\n\r\n"
+                    b"GET /v1/models HTTP/1.1\r\nHost: spp-engine\r\n"
+                    + AUTHORIZATION_LINE
+                    + b"\r\n"
                 )
                 data = bytearray()
                 while b"0\r\n\r\n" not in data:
@@ -470,7 +608,9 @@ class RoutedRelayTest(unittest.TestCase):
 
                 # the channel remains usable after a chunked exchange
                 connection.sendall(
-                    b"GET /health HTTP/1.1\r\nHost: spp-engine\r\n\r\n"
+                    b"GET /health HTTP/1.1\r\nHost: spp-engine\r\n"
+                    + AUTHORIZATION_LINE
+                    + b"\r\n"
                 )
                 data = bytearray()
                 while b"0\r\n\r\n" not in data:
@@ -510,6 +650,7 @@ class RoutedRelayTest(unittest.TestCase):
             body = b"x" * (11 * 1024 * 1024 + 1)
             connection.sendall(
                 b"POST /v1/audio/transcriptions HTTP/1.1\r\nHost: spp-engine\r\n"
+                + AUTHORIZATION_LINE
                 + f"Content-Length: {len(body)}\r\n\r\n".encode()
             )
             connection.sendall(body)  # client streams on, oblivious to the 413
@@ -520,6 +661,7 @@ class RoutedRelayTest(unittest.TestCase):
             follow_up = b"NEXT-REQUEST"
             connection.sendall(
                 b"POST /v1/audio/transcriptions HTTP/1.1\r\nHost: spp-engine\r\n"
+                + AUTHORIZATION_LINE
                 + f"Content-Length: {len(follow_up)}\r\n\r\n".encode()
                 + follow_up
             )
@@ -539,7 +681,8 @@ class RoutedRelayTest(unittest.TestCase):
         try:
             connection.sendall(
                 b"POST /v1/audio/transcriptions HTTP/1.1\r\nHost: spp-engine\r\n"
-                b"Content-Length: 68719476736\r\n\r\n"  # 64 GiB: beyond the drain ceiling
+                + AUTHORIZATION_LINE
+                + b"Content-Length: 68719476736\r\n\r\n"  # 64 GiB: beyond the drain ceiling
             )
             head, _ = recv_http(connection)
             self.assertIn(b"413", head.split(b"\r\n")[0])
@@ -560,6 +703,7 @@ class RoutedRelayTest(unittest.TestCase):
             body = b"y" * (11 * 1024 * 1024 + 64)
             connection.sendall(
                 b"POST /v1/chat/completions HTTP/1.1\r\nHost: spp-engine\r\n"
+                + AUTHORIZATION_LINE
                 + f"Content-Length: {len(body)}\r\n\r\n".encode()
             )
             connection.sendall(body)
@@ -578,7 +722,8 @@ class RoutedRelayTest(unittest.TestCase):
         try:
             connection.sendall(
                 b"POST /v1/audio/transcriptions HTTP/1.1\r\nHost: spp-engine\r\n"
-                b"Transfer-Encoding: chunked\r\n\r\n"
+                + AUTHORIZATION_LINE
+                + b"Transfer-Encoding: chunked\r\n\r\n"
             )
             with self.assertRaises((SSL.SysCallError, SSL.ZeroReturnError, ConnectionError)):
                 if connection.recv(1) == b"":
