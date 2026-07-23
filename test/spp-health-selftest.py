@@ -45,8 +45,11 @@ class FakeRunner:
 
 
 def healthy_gateway(_host: str, _port: int, _timeout: int) -> dict[str, object]:
+    return {"admitted": True}
+
+
+def healthy_models(_timeout: int) -> dict[str, str]:
     return {
-        "admitted": True,
         "inference_model": spp_health.EXPECTED_INFERENCE_MODEL,
         "asr_model": spp_health.EXPECTED_ASR_MODEL,
     }
@@ -57,6 +60,7 @@ class SppHealthTest(unittest.TestCase):
         result = spp_health.collect_health(
             runner=FakeRunner(),
             gateway_probe=healthy_gateway,
+            models_probe=healthy_models,
             now=lambda: datetime(2026, 7, 21, 1, 2, 3, tzinfo=timezone.utc),
         )
 
@@ -104,6 +108,7 @@ class SppHealthTest(unittest.TestCase):
         result = spp_health.collect_health(
             runner=runner,
             gateway_probe=failed_gateway,
+            models_probe=healthy_models,
             now=lambda: datetime(2026, 7, 21, tzinfo=timezone.utc),
         )
         rendered = json.dumps(result)
@@ -117,15 +122,18 @@ class SppHealthTest(unittest.TestCase):
         self.assertNotIn("audio-material", rendered)
 
     def test_model_drift_is_unhealthy_context_not_raw_response(self) -> None:
-        def drifted(_host: str, _port: int, _timeout: int) -> dict[str, object]:
+        def drifted(_timeout: int) -> dict[str, str]:
             return {
-                "admitted": True,
                 "inference_model": "wrong/inference",
                 "asr_model": "wrong/asr",
                 "future": "untrusted-body",
             }
 
-        result = spp_health.collect_health(runner=FakeRunner(), gateway_probe=drifted)
+        result = spp_health.collect_health(
+            runner=FakeRunner(),
+            gateway_probe=healthy_gateway,
+            models_probe=drifted,
+        )
 
         self.assertEqual(result["state"], "unhealthy")
         self.assertIn("inference_model", result["reasons"])
@@ -166,7 +174,11 @@ class SppHealthTest(unittest.TestCase):
             }
         )
 
-        result = spp_health.collect_health(runner=runner, gateway_probe=healthy_gateway)
+        result = spp_health.collect_health(
+            runner=runner,
+            gateway_probe=healthy_gateway,
+            models_probe=healthy_models,
+        )
 
         self.assertEqual(result["gpu"]["count"], 0)
         self.assertIn("gpu_probe", result["reasons"])

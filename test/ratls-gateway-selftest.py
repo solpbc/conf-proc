@@ -40,7 +40,7 @@ from ratls_gateway import (  # noqa: E402
     CollectorError,
     CommandCollector,
 )
-from spp_health import admit_gateway  # noqa: E402
+from spp_health import admit_gateway, probe_gateway  # noqa: E402
 
 
 TEST_ENTITLEMENT = "test-entitlement-token"
@@ -271,6 +271,19 @@ def admitted_connection(
 
 
 class RatlsGatewayTest(unittest.TestCase):
+    def test_health_probe_requires_unauthenticated_serving_rejection(self) -> None:
+        upstream = Upstream()
+        gateway = GatewayProcess(upstream.port)
+        try:
+            self.assertEqual(
+                probe_gateway("127.0.0.1", gateway.port, timeout=10),
+                {"admitted": True},
+            )
+            self.assertEqual(upstream.request, b"")
+        finally:
+            gateway.close()
+            upstream.listener.close()
+
     def test_health_client_completes_real_two_phase_admission(self) -> None:
         upstream = Upstream()
         upstream.start()

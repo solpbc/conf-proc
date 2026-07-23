@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 import socket
@@ -52,6 +53,7 @@ MAX_HTTP_BODY_BYTES: Final = 1024 * 1024
 
 RunCommand = Callable[[list[str], int], subprocess.CompletedProcess[str]]
 GatewayProbe = Callable[[str, int, int], dict[str, object]]
+ModelsProbe = Callable[[int], dict[str, str]]
 
 
 class HealthProbeError(RuntimeError):
@@ -351,25 +353,15 @@ def probe_gateway(
 ) -> dict[str, object]:
     connection, raw, http = admit_gateway(host, port, timeout)
     try:
-        inference_health, _, _ = http.get("/health")
-        inference_models, _, inference_body = http.get("/v1/models")
-        asr_health, _, asr_health_body = http.get("/v1/audio/health")
-        asr_models, _, asr_body = http.get("/v1/audio/models")
-        asr_ready = _json_object(asr_health_body)
+        status, headers, body = http.get("/health")
         if (
-            inference_health != 200
-            or inference_models != 200
-            or asr_health != 200
-            or asr_models != 200
-            or asr_ready.get("ok") is not True
-            or asr_ready.get("ready") is not True
+            status != 401
+            or headers.get(b"cache-control") != b"no-store"
+            or not headers.get(b"www-authenticate", b"").lower().startswith(b"bearer")
+            or body != b'{"error":"invalid entitlement credential"}'
         ):
-            raise HealthProbeError("serving endpoint is not ready")
-        return {
-            "admitted": True,
-            "inference_model": _model_id(inference_body),
-            "asr_model": _model_id(asr_body),
-        }
+            raise HealthProbeError("gateway did not enforce entitlement admission")
+        return {"admitted": True}
     finally:
         try:
             connection.shutdown()
@@ -379,10 +371,47 @@ def probe_gateway(
         raw.close()
 
 
+def _loopback_get(port: int, path: str, timeout: int) -> tuple[int, bytes]:
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    try:
+        connection.request("GET", path, headers={"Accept": "application/json"})
+        response = connection.getresponse()
+        body = response.read(MAX_HTTP_BODY_BYTES + 1)
+        if len(body) > MAX_HTTP_BODY_BYTES:
+            raise HealthProbeError("loopback response body exceeds limit")
+        return response.status, body
+    except (OSError, http.client.HTTPException) as exc:
+        raise HealthProbeError("loopback serving probe failed") from exc
+    finally:
+        connection.close()
+
+
+def probe_loopback_models(timeout: int = COMMAND_TIMEOUT_SECONDS) -> dict[str, str]:
+    inference_health, _ = _loopback_get(8000, "/health", timeout)
+    inference_models, inference_body = _loopback_get(8000, "/v1/models", timeout)
+    asr_health, asr_health_body = _loopback_get(8100, "/v1/audio/health", timeout)
+    asr_models, asr_body = _loopback_get(8100, "/v1/audio/models", timeout)
+    asr_ready = _json_object(asr_health_body)
+    if (
+        inference_health != 200
+        or inference_models != 200
+        or asr_health != 200
+        or asr_models != 200
+        or asr_ready.get("ok") is not True
+        or asr_ready.get("ready") is not True
+    ):
+        raise HealthProbeError("loopback serving endpoint is not ready")
+    return {
+        "inference_model": _model_id(inference_body),
+        "asr_model": _model_id(asr_body),
+    }
+
+
 def collect_health(
     *,
     runner: RunCommand = _run,
     gateway_probe: GatewayProbe = probe_gateway,
+    models_probe: ModelsProbe = probe_loopback_models,
     now: Callable[[], datetime] | None = None,
 ) -> dict[str, object]:
     """Return the complete bounded health document without raising probe details."""
@@ -451,8 +480,13 @@ def collect_health(
             gateway["admitted"] = True
         else:
             reasons.append("gateway_admission")
-        inference_model = gateway_result.get("inference_model")
-        asr_model = gateway_result.get("asr_model")
+    try:
+        model_result = models_probe(COMMAND_TIMEOUT_SECONDS)
+    except Exception:  # noqa: BLE001 - never leak loopback response diagnostics
+        reasons.extend(["inference_model", "asr_model"])
+    else:
+        inference_model = model_result.get("inference_model")
+        asr_model = model_result.get("asr_model")
         if isinstance(inference_model, str):
             models["inference"] = (
                 inference_model
