@@ -153,6 +153,7 @@ class PortalEntitlementAuthorizer:
                 "Authorization": f"Bearer {self.secret}",
                 "X-Sol-Entitlement": credential,
                 "Cache-Control": "no-store",
+                "User-Agent": "spp-engine-authorizer/1",
             },
         )
         try:

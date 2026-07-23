@@ -526,6 +526,10 @@ class RoutedRelayTest(unittest.TestCase):
         )
         self.assertTrue(self.default_upstream.requests[1][0].startswith(b"GET /v1/models"))
         self.assertEqual(len(self.gateway.authority.requests), 1)
+        self.assertEqual(
+            self.gateway.authority.requests[0].get("User-Agent"),
+            "spp-engine-authorizer/1",
+        )
 
     def test_invalid_entitlement_is_rejected_before_any_upstream_byte(self) -> None:
         connection, raw = admitted_connection(self.gateway.port, b"i" * 32)
