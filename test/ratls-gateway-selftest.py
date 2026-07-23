@@ -581,6 +581,48 @@ class RoutedRelayTest(unittest.TestCase):
         self.assertEqual(self.default_upstream.requests, [])
         self.assertEqual(self.gateway.authority.requests, [])
 
+    def test_duplicate_authorization_is_rejected_without_portal_call(self) -> None:
+        connection, raw = admitted_connection(self.gateway.port, b"k" * 32)
+        try:
+            connection.sendall(
+                b"GET /v1/models HTTP/1.1\r\nHost: spp-engine\r\n"
+                + AUTHORIZATION_LINE
+                + AUTHORIZATION_LINE
+                + b"\r\n"
+            )
+            head, _body = recv_http(connection)
+            self.assertIn(b"401 Unauthorized", head)
+        finally:
+            connection.close()
+            raw.close()
+        self.assertEqual(self.audio_upstream.requests, [])
+        self.assertEqual(self.default_upstream.requests, [])
+        self.assertEqual(self.gateway.authority.requests, [])
+
+    def test_credential_change_on_channel_is_rejected_without_second_portal_call(self) -> None:
+        connection, raw = admitted_connection(self.gateway.port, b"l" * 32)
+        try:
+            connection.sendall(
+                b"GET /v1/models HTTP/1.1\r\nHost: spp-engine\r\n"
+                + AUTHORIZATION_LINE
+                + b"\r\n"
+            )
+            head, _body = recv_http(connection)
+            self.assertIn(b"200 OK", head)
+
+            connection.sendall(
+                b"GET /v1/models HTTP/1.1\r\nHost: spp-engine\r\n"
+                b"Authorization: Bearer changed-token\r\n\r\n"
+            )
+            head, _body = recv_http(connection)
+            self.assertIn(b"401 Unauthorized", head)
+        finally:
+            connection.close()
+            raw.close()
+        self.assertEqual(len(self.default_upstream.requests), 1)
+        self.assertEqual(self.audio_upstream.requests, [])
+        self.assertEqual(len(self.gateway.authority.requests), 1)
+
     def test_authorizer_outage_returns_503_before_any_upstream_byte(self) -> None:
         authority = EntitlementAuthority(response_status=500)
         gateway = GatewayProcess(
