@@ -21,11 +21,16 @@ deployment dependencies rather than vendored source.
 ## Trust boundary
 
 The gateway admits no credential or inference bytes until both attestation
-phases verify. Inference and audio upstreams bind only to loopback. The engine
-does not log request or response content, write owner content to durable
-storage, or send content to a third-party telemetry service. The audio path
-accepts only canonical PCM16 WAV, 16 kHz, mono input and rejects rather than
-transcodes every other format.
+phases verify. Before the first post-attestation request reaches a serving
+upstream, the gateway validates its portal-issued bearer against the live SPP
+binding and entitlement state. Invalid/inactive credentials fail 401;
+authorizer failure fails 503; neither path opens an upstream connection. The
+raw bearer is stripped before forwarding, and the gateway replaces any
+client-asserted `x-sol-device` value with a SHA-256-derived opaque id. Inference
+and audio upstreams bind only to loopback. The engine does not log request or
+response content, write owner content to durable storage, or send content to a
+third-party telemetry service. The audio path accepts only canonical PCM16
+WAV, 16 kHz, mono input and rejects rather than transcodes every other format.
 
 The engine produces the composite attestation evidence. The checked-in
 `verifier.py` preserves the independently testable CPU-leg reference, but the
@@ -71,8 +76,10 @@ is ready only when:
 spp-health --json
 ```
 
-returns `"state":"healthy"` after a real two-phase admission and both served
-model identities match. A process merely listening on its port is not ready.
+returns `"state":"healthy"` after a real two-phase admission, a portal-backed
+rejection of a fixed synthetic invalid entitlement, and independent loopback
+readiness/model identity checks. No owner credential is used. A process merely
+listening on its port is not ready.
 
 The current production environment is one persistent Azure
 `Standard_NCC40ads_H100_v5` confidential VM. This repository does not provision
