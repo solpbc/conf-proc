@@ -50,6 +50,7 @@ COMMAND_TIMEOUT_SECONDS: Final = 15
 GATEWAY_TIMEOUT_SECONDS: Final = 45
 MAX_HTTP_HEAD_BYTES: Final = 32 * 1024
 MAX_HTTP_BODY_BYTES: Final = 1024 * 1024
+HEALTH_PROBE_ENTITLEMENT: Final = "spp-health-deliberately-invalid-v1"
 
 RunCommand = Callable[[list[str], int], subprocess.CompletedProcess[str]]
 GatewayProbe = Callable[[str, int, int], dict[str, object]]
@@ -204,10 +205,24 @@ class _TlsHttp:
             if self._read_exact(2) != b"\r\n":
                 raise HealthProbeError("invalid gateway chunk framing")
 
-    def get(self, path: str) -> tuple[int, dict[bytes, bytes], bytes]:
+    def get(
+        self,
+        path: str,
+        *,
+        bearer: str | None = None,
+    ) -> tuple[int, dict[bytes, bytes], bytes]:
+        if bearer is not None and (
+            not bearer
+            or len(bearer) > 256
+            or not bearer.isascii()
+            or any(char.isspace() or not char.isprintable() for char in bearer)
+        ):
+            raise HealthProbeError("invalid health-probe bearer")
+        authorization = f"Authorization: Bearer {bearer}\r\n" if bearer else ""
         try:
             self.connection.sendall(
                 f"GET {path} HTTP/1.1\r\nHost: spp-engine\r\n"
+                f"{authorization}"
                 "Accept: application/json\r\nContent-Length: 0\r\n\r\n".encode(
                     "ascii"
                 )
@@ -353,7 +368,10 @@ def probe_gateway(
 ) -> dict[str, object]:
     connection, raw, http = admit_gateway(host, port, timeout)
     try:
-        status, headers, body = http.get("/health")
+        status, headers, body = http.get(
+            "/health",
+            bearer=HEALTH_PROBE_ENTITLEMENT,
+        )
         if (
             status != 401
             or headers.get(b"cache-control") != b"no-store"
