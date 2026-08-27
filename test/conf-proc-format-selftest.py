@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import struct
 import sys
 import tempfile
@@ -169,6 +170,7 @@ class AclCodecTests(unittest.TestCase):
 
     def test_live_round_trip(self) -> None:
         base = tempfile.mkdtemp(dir="/var/tmp")
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
         entries = [
             acl.AclEntry(acl.ACL_USER_OBJ, 0o7, acl.ACL_UNDEFINED_ID),
             acl.AclEntry(acl.ACL_USER, 0o5, os.getuid()),

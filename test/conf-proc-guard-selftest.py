@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import socket
 import sys
 import tempfile
@@ -29,6 +30,7 @@ def _sha256_file(path: str) -> str:
 class HermeticGuardTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(dir="/var/tmp")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.declared_file = os.path.join(self.tmp, "declared.txt")
         self.undeclared_file = os.path.join(self.tmp, "undeclared.txt")
         with open(self.declared_file, "wb") as handle:
