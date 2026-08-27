@@ -55,6 +55,37 @@ def _verify_stage(**overrides) -> renderer.VerifyStageArgv:
     return renderer.render_verify_stage(**values)
 
 
+def _leaf_paths(value: object, prefix: tuple[object, ...] = ()) -> list[tuple[object, ...]]:
+    if type(value) is dict:
+        paths: list[tuple[object, ...]] = []
+        for key in sorted(value):
+            paths.extend(_leaf_paths(value[key], prefix + (key,)))
+        return paths
+    if type(value) is list:
+        paths = []
+        for index, item in enumerate(value):
+            paths.extend(_leaf_paths(item, prefix + (index,)))
+        return paths
+    return [prefix]
+
+
+def _mutate_leaf(root: object, path: tuple[object, ...]) -> None:
+    parent = root
+    for coordinate in path[:-1]:
+        parent = parent[coordinate]  # type: ignore[index]
+    coordinate = path[-1]
+    value = parent[coordinate]  # type: ignore[index]
+    if type(value) is bool:
+        replacement = not value
+    elif type(value) is int:
+        replacement = value + 1
+    elif type(value) is str:
+        replacement = value + "-mutated"
+    else:
+        raise AssertionError(f"unsupported renderer-rules leaf at {path!r}: {value!r}")
+    parent[coordinate] = replacement  # type: ignore[index]
+
+
 class ProvenanceRenderTests(unittest.TestCase):
     def assert_rejected(self, callback, expected_reason: str) -> None:
         with self.assertRaises(ApplianceError) as ctx:
@@ -71,6 +102,27 @@ class ProvenanceRenderTests(unittest.TestCase):
         models = _build_stage(image_id="models")
         self.assertEqual(models.salt, "653164b98d60decf1523fe68b05b3f3f7cf63593a0834a728800a372fcd37d17")
         self.assertEqual(models.uuid, "a5640a08-4b9c-529b-9591-a86493dc41cd")
+
+        runtime_verify = _verify_stage()
+        self.assertEqual(runtime_verify.build_epoch, runtime_policy.build_epoch)
+        self.assertEqual(runtime_verify.salt, runtime_policy.salt)
+        self.assertEqual(runtime_verify.uuid, runtime_policy.uuid)
+        models_verify = _verify_stage(image_id="models")
+        self.assertEqual(models_verify.build_epoch, models.build_epoch)
+        self.assertEqual(models_verify.salt, models.salt)
+        self.assertEqual(models_verify.uuid, models.uuid)
+
+        changed = _build_stage(artifact_input_sha256="0" * 64)
+        self.assertNotEqual(changed.build_epoch, runtime_policy.build_epoch)
+        self.assertNotEqual(changed.salt, runtime_policy.salt)
+        self.assertNotEqual(changed.uuid, runtime_policy.uuid)
+        changed_verify = _verify_stage(artifact_input_sha256="0" * 64)
+        self.assertEqual(
+            (changed_verify.build_epoch, changed_verify.salt, changed_verify.uuid),
+            (changed.build_epoch, changed.salt, changed.uuid),
+        )
+        self.assertNotEqual(changed.salt, "0" * 64)
+        self.assertNotEqual(changed.uuid, "00000000-0000-5000-8000-000000000000")
 
     def test_renders_exact_build_and_verify_argv(self) -> None:
         build = _build_stage()
@@ -140,16 +192,15 @@ class ProvenanceRenderTests(unittest.TestCase):
                 "/work/runtime-policy.squashfs",
                 "/work/runtime-policy.verity",
                 _ROOT_HASH,
+                "--hash-offset=0",
             ),
         )
 
     def test_rejects_rules_mutations_from_both_stages(self) -> None:
-        for mutate in (
-            lambda raw: raw["squashfs"].update(processors=2),
-            lambda raw: raw["verity"].update(hash_offset_bytes=4096),
-        ):
+        baseline = canonical_loads(provenance.supported_verity_rules_bytes())
+        for path in _leaf_paths(baseline):
             raw = canonical_loads(provenance.supported_verity_rules_bytes())
-            mutate(raw)
+            _mutate_leaf(raw, path)
             rules_bytes = canonical_dumps(raw)
             self.assert_rejected(
                 lambda rules_bytes=rules_bytes: _build_stage(rules_bytes=rules_bytes),

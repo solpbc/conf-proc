@@ -475,6 +475,7 @@ class ProvenanceOracleTests(unittest.TestCase):
             lambda raw: raw["inputs"][0].pop("component"),
             lambda raw: raw["inputs"][0].update(role=[]),
             lambda raw: raw["inputs"][0]["placements"][0].update(image={}),
+            lambda raw: raw["inputs"][0]["placements"][0].update(path="//fixture/kernel"),
             lambda raw: raw["tool_ids"].pop(),
             lambda raw: next(item for item in raw["inputs"] if item["id"] == "python").update(component="mksquashfs"),
         ):
@@ -516,7 +517,12 @@ class ProvenanceOracleTests(unittest.TestCase):
 
     def test_reject_runtime_path_escape_and_special_node(self) -> None:
         raw = oracle.canonical_loads(_closure_bytes())
-        for field, value in (("path", "/usr/../etc/passwd"), ("path", "/usr/bin/python3\x00hidden"), ("node_type", "device")):
+        for field, value in (
+            ("path", "//usr/bin/python3"),
+            ("path", "/usr/../etc/passwd"),
+            ("path", "/usr/bin/python3\x00hidden"),
+            ("node_type", "device"),
+        ):
             changed = {**raw, "entries": [{**raw["entries"][0], field: value}]}
             with self.assertRaises(ApplianceError) as ctx:
                 oracle.parse_runtime_closure(canonical_dumps(changed))

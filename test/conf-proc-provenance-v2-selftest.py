@@ -332,6 +332,264 @@ def _authority_bundle() -> dict[str, bytes]:
     }
 
 
+def _literal_policy_bytes(boot_root: str | None = None) -> bytes:
+    return canonical_dumps(
+        {
+            "schema": "conf-proc-policy/v1",
+            "policy_version": 1,
+            "images": {"models": {"nodes": []}, "runtime-policy": {"nodes": []}},
+            "boot_roots": [] if boot_root is None else [boot_root],
+            "process_nodes": [],
+            "process_edges": [],
+            "mounts": [],
+            "network_policy": {},
+            "capability_policy": {},
+        }
+    )
+
+
+def _literal_placement(input_id: str, path: str) -> dict:
+    return {
+        "image": "runtime-policy",
+        "path": path,
+        "node_type": "file",
+        "mode": 420,
+        "uid": 0,
+        "gid": 0,
+        "xattrs": [],
+        "source_input_id": input_id,
+        "target": None,
+    }
+
+
+def _literal_input(
+    input_id: str,
+    role: str,
+    digest: str,
+    size: int,
+    *,
+    component: str | None = None,
+    scheme: str = "local-fixture",
+    identity: str | None = None,
+    placements: list[dict] | None = None,
+) -> dict:
+    if placements is None:
+        placements = (
+            []
+            if role in ("build_tool", "kernel_trusted_cert_bundle")
+            else [_literal_placement(input_id, "/fixture/" + input_id)]
+        )
+    return {
+        "id": input_id,
+        "role": role,
+        "component": component or input_id,
+        "sha256": digest,
+        "size_bytes": size,
+        "source_local_path": "fixtures/" + input_id,
+        "source_retrieval_scheme": scheme,
+        "source_retrieval_identity": identity or "fixture:" + input_id,
+        "source_retrieval_immutable_ref": "sha256:" + digest,
+        "derivation_kind": "fixture",
+        "derivation_recipe_id": "literal-recipe-v1",
+        "derivation_parent_ids": [],
+        "derivation_parameters_sha256": _sha(90),
+        "placements": placements,
+    }
+
+
+def _literal_lock_bytes(
+    content_sha: str = _sha(1),
+    *,
+    builder_source_bytes: bytes = b"literal-builder-source-v1",
+    policy_bytes: bytes | None = None,
+) -> bytes:
+    if policy_bytes is None:
+        policy_bytes = _literal_policy_bytes()
+    builder_sha = hashlib.sha256(builder_source_bytes).hexdigest()
+    policy_sha = hashlib.sha256(policy_bytes).hexdigest()
+    inputs = [
+        _literal_input(
+            "builder",
+            "conf_proc_source",
+            builder_sha,
+            len(builder_source_bytes),
+            component="conf-proc-builder",
+            scheme="git",
+            identity="conf-proc",
+            placements=[_literal_placement("builder", "/opt/conf-proc/conf_proc_build.py")],
+        ),
+        _literal_input(
+            "policy",
+            "policy_tree_input",
+            policy_sha,
+            len(policy_bytes),
+            component="process-policy",
+            scheme="generated",
+            identity="policy",
+            placements=[_literal_placement("policy", "/etc/spp/policy.json")],
+        ),
+        _literal_input("python", "build_tool", content_sha, 12, component="python3"),
+    ]
+    for index, role in enumerate(_SINGLE_ROLES, start=10):
+        inputs.append(_literal_input(role, role, _sha(index), 1))
+    for index, tool in enumerate(("mksquashfs", "openssl", "unsquashfs", "veritysetup"), start=30):
+        inputs.append(_literal_input("tool-" + tool, "build_tool", _sha(index), 1, component=tool))
+    inputs.sort(key=lambda item: item["id"])
+    return canonical_dumps(
+        {
+            "schema": "conf-proc-lock/v1",
+            "lock_version": 1,
+            "base_image_record": {
+                "kind": "vhd",
+                "provider": "fixture",
+                "identity_namespace": "literal",
+                "identity_name": "base",
+                "identity_immutable_revision": "sha256:" + _sha(40),
+                "content_sha256": _sha(40),
+                "content_size_bytes": 1,
+                "content_media_type": "application/octet-stream",
+                "availability": "record-only",
+                "recorded_retrieval_scheme": "local-fixture",
+                "recorded_retrieval_identity": "fixture:base",
+                "recorded_retrieval_immutable_ref": "sha256:" + _sha(40),
+            },
+            "future_cmdline": "console=ttyS0",
+            "inputs": inputs,
+            "authorized_module_signers": [],
+            "image_specs": {"models": {}, "runtime-policy": {}},
+            "policy_input_id": "policy",
+            "tool_ids": sorted(
+                ["python"]
+                + ["tool-" + tool for tool in ("mksquashfs", "openssl", "unsquashfs", "veritysetup")]
+            ),
+        }
+    )
+
+
+def _literal_closure_bytes(
+    content_sha: str = _sha(1),
+    *,
+    builder_source_bytes: bytes = b"literal-builder-source-v1",
+) -> bytes:
+    builder_sha = hashlib.sha256(builder_source_bytes).hexdigest()
+    return canonical_dumps(
+        {
+            "schema": "conf-proc-runtime-closure/v1",
+            "status": "declared_unverified",
+            "entries": [
+                {
+                    "path": "/opt/conf-proc/conf_proc_build.py",
+                    "node_type": "file",
+                    "mode": 420,
+                    "uid": 0,
+                    "gid": 0,
+                    "size_bytes": len(builder_source_bytes),
+                    "sha256": builder_sha,
+                    "symlink_target": None,
+                    "hardlink_group": None,
+                    "xattrs": [],
+                    "capabilities": [],
+                    "logical_role": "conf_proc_source",
+                    "provenance": {
+                        "scheme": "git",
+                        "identity": "conf-proc",
+                        "immutable_ref": "sha256:" + builder_sha,
+                    },
+                    "root_lock_input_id": "builder",
+                },
+                {
+                    "path": "/usr/bin/python3",
+                    "node_type": "file",
+                    "mode": 493,
+                    "uid": 0,
+                    "gid": 0,
+                    "size_bytes": 12,
+                    "sha256": content_sha,
+                    "symlink_target": None,
+                    "hardlink_group": None,
+                    "xattrs": [],
+                    "capabilities": [],
+                    "logical_role": "build_tool",
+                    "provenance": {
+                        "scheme": "local-fixture",
+                        "identity": "fixture:python",
+                        "immutable_ref": "sha256:" + content_sha,
+                    },
+                    "root_lock_input_id": "python",
+                },
+            ],
+        }
+    )
+
+
+def _literal_tcb_bytes(digest: str = _sha(2)) -> bytes:
+    return canonical_dumps(
+        {
+            "schema": "conf-proc-pre-sandbox-tcb/v1",
+            "status": "declared_unverified",
+            "caller": _executable("caller", digest),
+            "launcher": _executable("launcher", _sha(3)),
+            "sandbox": {
+                "backend": "bubblewrap",
+                "executable": _executable("bwrap", _sha(4)),
+                "helper": None,
+            },
+            "kernel_feature_contract": {"schema": "conf-proc-kernel-features/v1", "sha256": _sha(5)},
+        }
+    )
+
+
+def _literal_derive(
+    *,
+    builder_source_bytes: bytes = b"literal-builder-source-v1",
+    policy_bytes: bytes | None = None,
+) -> provenance.ProvenanceInputs:
+    if policy_bytes is None:
+        policy_bytes = _literal_policy_bytes()
+    return provenance.derive_inputs(
+        root_lock_bytes=_literal_lock_bytes(
+            builder_source_bytes=builder_source_bytes,
+            policy_bytes=policy_bytes,
+        ),
+        runtime_closure_bytes=_literal_closure_bytes(builder_source_bytes=builder_source_bytes),
+        verity_rules_bytes=_rules_bytes(),
+        tcb_identity_bytes=_literal_tcb_bytes(),
+        builder_source_bytes=builder_source_bytes,
+        policy_bytes=policy_bytes,
+    )
+
+
+def _leaf_paths(value: object, prefix: tuple[object, ...] = ()) -> list[tuple[object, ...]]:
+    if type(value) is dict:
+        paths: list[tuple[object, ...]] = []
+        for key in sorted(value):
+            paths.extend(_leaf_paths(value[key], prefix + (key,)))
+        return paths
+    if type(value) is list:
+        paths = []
+        for index, item in enumerate(value):
+            paths.extend(_leaf_paths(item, prefix + (index,)))
+        return paths
+    return [prefix]
+
+
+def _mutate_leaf(root: object, path: tuple[object, ...]) -> None:
+    parent = root
+    for coordinate in path[:-1]:
+        parent = parent[coordinate]  # type: ignore[index]
+    coordinate = path[-1]
+    value = parent[coordinate]  # type: ignore[index]
+    if type(value) is bool:
+        replacement = not value
+    elif type(value) is int:
+        replacement = value + 1
+    elif type(value) is str:
+        replacement = value + "-mutated"
+    else:
+        raise AssertionError(f"unsupported verity-rules leaf at {path!r}: {value!r}")
+    parent[coordinate] = replacement  # type: ignore[index]
+
+
 def _derive(**overrides) -> provenance.ProvenanceInputs:
     values = _authority_bundle()
     values.update(overrides)
@@ -368,22 +626,78 @@ class ProvenanceV2Tests(unittest.TestCase):
         self.assertEqual(result.execution_provenance_sha256, hashlib.sha256(canonical_dumps(envelope)).hexdigest())
         self.assertEqual(provenance.supported_verity_rules_bytes(), values["verity_rules_bytes"])
 
+    def test_matches_frozen_cross_implementation_literal_vectors(self) -> None:
+        inputs = _literal_derive()
+        self.assertEqual(inputs.artifact_input_sha256, "4b125d64245bb15977d274df6c71bb40f79a3ba1fe9baebb358bf968b278b2d6")
+        self.assertEqual(inputs.runtime_closure_sha256, "bcaa6ad7f1a76e1dd7a712a5837cd76737b5d4bcd274e244135fa99c04409423")
+        self.assertEqual(inputs.verity_rules_sha256, "aece6264c1666c9b83f80756842ace68a9ed74a9cad42a9758699d961605e059")
+        self.assertEqual(inputs.tcb_identity_sha256, "2edbe10694ed9914152a2b98ab357a1906f6a1ca2fda15fed71926ee34e479eb")
+        self.assertEqual(inputs.builder_source_sha256, "9654bf8dfd2eccdce8dc5928f89d6c07402efffdd438fdeaeb2c8aa2955a08c1")
+        self.assertEqual(inputs.policy_sha256, "0e6f3b9e7fc837e0af8a83ca78cc3537d24158c45686c2963b9e9560ad95ca86")
+        self.assertEqual(inputs.execution_provenance_sha256, "b8db8d23981bfe474b4480508da7a911488b79cf79fd30e68950f727760de1b7")
+
+        left = _literal_derive(builder_source_bytes=b"ab", policy_bytes=_literal_policy_bytes())
+        right = _literal_derive(builder_source_bytes=b"a", policy_bytes=_literal_policy_bytes("variant"))
+        self.assertEqual(left.execution_provenance_sha256, "b4a19d5c98c26811cef74c1b5dbc49f8ba6f083f10295536573122c413539364")
+        self.assertEqual(right.execution_provenance_sha256, "8b8b7913c05aff0a83193c52ee6ec75a817676be3acc5f1defd4c5208a5e9c6f")
+        self.assertNotEqual(left.execution_provenance_sha256, right.execution_provenance_sha256)
+
     def test_rejects_skeletal_or_mutated_root_lock_authority(self) -> None:
         for mutate in (
             lambda raw: raw.update(schema="conf-proc-lock/v2"),
             lambda raw: raw.update(lock_version=2),
             lambda raw: raw.pop("base_image_record"),
             lambda raw: raw.update(image_specs={"models": {"block_size": 4096}, "runtime-policy": {}}),
+            lambda raw: raw.update(image_specs={"models": {}}),
+            lambda raw: raw.update(image_specs={"models": {}, "runtime-policy": {}, "extra": {}}),
+            lambda raw: raw.update(image_specs={"models": [], "runtime-policy": {}}),
             lambda raw: raw["tool_ids"].pop(),
+            lambda raw: raw["tool_ids"].append("kernel"),
+            lambda raw: raw["tool_ids"].append("missing-tool"),
             lambda raw: next(item for item in raw["inputs"] if item["id"] == "tool-unsquashfs").update(component="mksquashfs"),
             lambda raw: raw.update(inputs=[item for item in raw["inputs"] if item["role"] != "kernel"]),
         ):
             raw = canonical_loads(_authority_bundle()["root_lock_bytes"])
             mutate(raw)
+            raw["tool_ids"].sort()
             self.assert_rejected(
                 lambda raw=raw: _derive(root_lock_bytes=canonical_dumps(raw)),
                 "CP_PROVENANCE_AUTHORITY",
             )
+
+        for invalid_path in ("//fixture/kernel", "/fixture/kernel/./payload", "/fixture/kernel\x00suffix"):
+            raw = canonical_loads(_authority_bundle()["root_lock_bytes"])
+            kernel = next(item for item in raw["inputs"] if item["role"] == "kernel")
+            kernel["placements"][0]["path"] = invalid_path
+            self.assert_rejected(
+                lambda raw=raw: _derive(root_lock_bytes=canonical_dumps(raw)),
+                "CP_PROVENANCE_AUTHORITY",
+            )
+
+        raw = canonical_loads(_authority_bundle()["root_lock_bytes"])
+        next(item for item in raw["inputs"] if item["role"] == "kernel")["source_local_path"] = "fixtures/kernel\x00suffix"
+        self.assert_rejected(
+            lambda: _derive(root_lock_bytes=canonical_dumps(raw)),
+            "CP_PROVENANCE_AUTHORITY",
+        )
+
+        raw = canonical_loads(_authority_bundle()["root_lock_bytes"])
+        raw["inputs"].append(
+            _lock_input("tool-python", "build_tool", _sha(209), 1, component="python3", placements=[])
+        )
+        raw["inputs"].sort(key=lambda item: item["id"])
+        self.assert_rejected(
+            lambda: _derive(root_lock_bytes=canonical_dumps(raw)),
+            "CP_PROVENANCE_AUTHORITY",
+        )
+
+        raw = canonical_loads(_authority_bundle()["root_lock_bytes"])
+        raw["tool_ids"].remove("tool-openssl")
+        raw["inputs"] = [item for item in raw["inputs"] if item["id"] != "tool-openssl"]
+        self.assert_rejected(
+            lambda: _derive(root_lock_bytes=canonical_dumps(raw)),
+            "CP_PROVENANCE_AUTHORITY",
+        )
 
     def test_rejects_policy_authority_mismatch_or_unsupported_schema(self) -> None:
         values = _authority_bundle()
@@ -417,6 +731,18 @@ class ProvenanceV2Tests(unittest.TestCase):
             lambda: _derive(runtime_closure_bytes=canonical_dumps(raw)),
             "CP_PROVENANCE_AUTHORITY",
         )
+
+        for mutate in (
+            lambda entry: entry.update(root_lock_input_id=None),
+            lambda entry: entry.update(sha256=_sha(210)),
+            lambda entry: entry.update(root_lock_input_id="policy"),
+        ):
+            raw = canonical_loads(_authority_bundle()["runtime_closure_bytes"])
+            mutate(raw["entries"][0])
+            self.assert_rejected(
+                lambda raw=raw: _derive(runtime_closure_bytes=canonical_dumps(raw)),
+                "CP_PROVENANCE_AUTHORITY",
+            )
 
         raw = canonical_loads(_authority_bundle()["runtime_closure_bytes"])
         duplicate = dict(raw["entries"][0])
@@ -479,6 +805,15 @@ class ProvenanceV2Tests(unittest.TestCase):
                 "CP_RUNTIME_CLOSURE_SCHEMA",
             )
 
+        for invalid_path in ("relative/path", "//opt/path", "/opt/../escape", "/opt/path\x00suffix"):
+            raw = canonical_loads(_authority_bundle()["runtime_closure_bytes"])
+            raw["entries"][0]["path"] = invalid_path
+            raw["entries"].sort(key=lambda entry: entry["path"])
+            self.assert_rejected(
+                lambda raw=raw: provenance.parse_runtime_closure(canonical_dumps(raw)),
+                "CP_RUNTIME_CLOSURE_SCHEMA",
+            )
+
     def test_rejects_empty_or_non_declared_runtime_closure(self) -> None:
         raw = canonical_loads(_authority_bundle()["runtime_closure_bytes"])
         raw["entries"] = []
@@ -495,15 +830,12 @@ class ProvenanceV2Tests(unittest.TestCase):
         )
 
     def test_rejects_nested_verity_rule_mutations(self) -> None:
-        for mutate in (
-            lambda raw: raw["squashfs"].update(processors=2),
-            lambda raw: raw["squashfs"]["gzip"].update(compression_level=8),
-            lambda raw: raw["verity"].update(hash_offset_bytes=4096),
-        ):
+        baseline = canonical_loads(_rules_bytes())
+        for path in _leaf_paths(baseline):
             raw = canonical_loads(_rules_bytes())
-            mutate(raw)
+            _mutate_leaf(raw, path)
             self.assert_rejected(
-                lambda raw=raw: provenance.parse_verity_rules(canonical_dumps(raw)),
+                lambda raw=raw, path=path: provenance.parse_verity_rules(canonical_dumps(raw)),
                 "CP_VERITY_RULES_SCHEMA",
             )
 
@@ -514,6 +846,31 @@ class ProvenanceV2Tests(unittest.TestCase):
             lambda: provenance.parse_tcb_identity(canonical_dumps(raw)),
             "CP_TCB_IDENTITY_SCHEMA",
         )
+
+        raw = canonical_loads(_tcb_bytes())
+        raw["sandbox"]["backend"] = "unsupported"
+        self.assert_rejected(
+            lambda: provenance.parse_tcb_identity(canonical_dumps(raw)),
+            "CP_TCB_IDENTITY_SCHEMA",
+        )
+
+    def test_rejects_extra_and_noncanonical_contract_documents(self) -> None:
+        cases = []
+        closure = canonical_loads(_authority_bundle()["runtime_closure_bytes"])
+        closure["extra"] = True
+        cases.append((provenance.parse_runtime_closure, canonical_dumps(closure), "CP_RUNTIME_CLOSURE_SCHEMA"))
+
+        rules = canonical_loads(_rules_bytes())
+        rules["extra"] = True
+        cases.append((provenance.parse_verity_rules, canonical_dumps(rules), "CP_VERITY_RULES_SCHEMA"))
+
+        tcb = canonical_loads(_tcb_bytes())
+        tcb["extra"] = True
+        cases.append((provenance.parse_tcb_identity, canonical_dumps(tcb), "CP_TCB_IDENTITY_SCHEMA"))
+
+        for parser, document, reason in cases:
+            self.assert_rejected(lambda parser=parser, document=document: parser(document), reason)
+            self.assert_rejected(lambda parser=parser, document=document: parser(document + b"\n"), "CP_JSON_NONCANONICAL")
 
         raw = canonical_loads(_tcb_bytes())
         raw["kernel_feature_contract"]["schema"] = "conf-proc-kernel-features/v2"

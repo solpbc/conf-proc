@@ -42,6 +42,9 @@ class BuildStageArgv:
 @dataclass(frozen=True)
 class VerifyStageArgv:
     veritysetup_verify_argv: tuple[str, ...]
+    build_epoch: int
+    salt: str
+    uuid: str
 
 
 def render_build_stage(
@@ -146,8 +149,19 @@ def render_verify_stage(
     _validate_geometry_inputs(artifact_input_sha256, image_id)
     if not _is_sha256(root_hash):
         raise ApplianceError(CP_VERITY_ROOT_MISMATCH, "root_hash must be a lowercase sha256 digest")
+    lock_digest = bytes.fromhex(artifact_input_sha256)
     return VerifyStageArgv(
-        veritysetup_verify_argv=(veritysetup_path, "verify", squashfs_path, hash_device_path, root_hash)
+        veritysetup_verify_argv=(
+            veritysetup_path,
+            "verify",
+            squashfs_path,
+            hash_device_path,
+            root_hash,
+            "--hash-offset=0",
+        ),
+        build_epoch=derive_build_epoch(lock_digest),
+        salt=derive_verity_salt(lock_digest, image_id),
+        uuid=derive_verity_uuid(lock_digest, image_id),
     )
 
 

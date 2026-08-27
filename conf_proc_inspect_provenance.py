@@ -1425,6 +1425,7 @@ def _absolute_normal_path(value: object) -> bool:
         type(value) is str
         and "\x00" not in value
         and value.startswith("/")
+        and not value.startswith("//")
         and value != "/"
         and posixpath.normpath(value) == value
     )
@@ -1435,6 +1436,7 @@ def _lock_absolute_path(value: object) -> bool:
         type(value) is str
         and "\x00" not in value
         and value.startswith("/")
+        and not value.startswith("//")
         and not (value != "/" and value.endswith("/"))
         and posixpath.normpath(value) == value
     )

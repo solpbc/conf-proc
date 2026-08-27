@@ -446,6 +446,20 @@ def verify_root_lock_authority(
     except ApplianceError as exc:
         raise ApplianceError(CP_PROVENANCE_AUTHORITY, f"root lock failed structural validation: {exc}") from exc
 
+    root_raw = canonical_loads(root_lock_bytes)
+    for input_raw in root_raw["inputs"]:
+        _require(
+            _relative_normal_path(input_raw["source_local_path"]),
+            CP_PROVENANCE_AUTHORITY,
+            "root-lock source_local_path must be NUL-free and relative",
+        )
+        for placement in input_raw["placements"]:
+            _require(
+                _lock_absolute_path(placement["path"]),
+                CP_PROVENANCE_AUTHORITY,
+                "root-lock placement path must be NUL-free, absolute, and normalized",
+            )
+
     _require(
         lock.image_specs == {"models": {}, "runtime-policy": {}},
         CP_PROVENANCE_AUTHORITY,
@@ -556,8 +570,30 @@ def _absolute_normal_path(value: object) -> bool:
         type(value) is str
         and "\x00" not in value
         and value.startswith("/")
+        and not value.startswith("//")
         and value != "/"
         and posixpath.normpath(value) == value
+    )
+
+
+def _lock_absolute_path(value: object) -> bool:
+    return (
+        type(value) is str
+        and "\x00" not in value
+        and value.startswith("/")
+        and not value.startswith("//")
+        and not (value != "/" and value.endswith("/"))
+        and posixpath.normpath(value) == value
+    )
+
+
+def _relative_normal_path(value: object) -> bool:
+    return (
+        type(value) is str
+        and value
+        and "\x00" not in value
+        and not value.startswith("/")
+        and all(segment not in ("", "..") for segment in value.split("/"))
     )
 
 
