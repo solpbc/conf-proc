@@ -21,6 +21,7 @@ from dataclasses import dataclass
 
 from conf_proc_guard import HermeticGuard
 from conf_proc_lock import Lock
+from conf_proc_prohibited import check_content_markers, check_prohibited_path
 from conf_proc_reasons import (
     CP_SQUASHFS_EXTRACT,
     CP_TREE_METADATA,
@@ -86,6 +87,7 @@ def build_inventory(
     for path, mode, uid, gid, size, symlink_target in entries:
         if path == "/":
             continue
+        check_prohibited_path(path)
         node_type = _classify(path, mode)
         # unsquashfs -lln does not report a link count, so hard-link
         # rejection cannot be independently re-derived from the packed
@@ -103,6 +105,8 @@ def build_inventory(
             xattrs = tuple(name for name in xattr_names if name in ALLOWED_XATTRS)
             if node_type == NODE_TYPE_FILE:
                 sha256 = _sha256_file(extracted_path)
+                with open(extracted_path, "rb") as content_handle:
+                    check_content_markers(path, content_handle.read())
         elif node_type == NODE_TYPE_SYMLINK:
             validate_symlink_target(path, symlink_target or "")
 

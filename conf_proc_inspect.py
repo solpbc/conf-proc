@@ -34,6 +34,7 @@ from conf_proc_lock import parse_lock
 from conf_proc_manifest import parse_manifest
 from conf_proc_module_authority import check_authorized_signers_match_bundle
 from conf_proc_policy import parse_policy
+from conf_proc_prohibited import check_future_cmdline
 from conf_proc_reasons import CP_LOCK_DIGEST_MISMATCH, CP_LOCK_ROLE, CP_SBOM_DIFF, ApplianceError
 from conf_proc_sbom import parse_sbom
 
@@ -46,6 +47,7 @@ def inspect(*, lock_path: str, policy_path: str, input_root: str, tool_root: str
     lock_data = Path(lock_path).read_bytes()
     lock = parse_lock(lock_data)
     lock_digest = hashlib.sha256(lock_data).digest()
+    check_future_cmdline(lock.future_cmdline)
 
     policy_lock_input = next((i for i in lock.inputs if i.id == lock.policy_input_id), None)
     if policy_lock_input is None:

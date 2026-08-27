@@ -19,6 +19,7 @@ import os
 
 from conf_proc_guard import HermeticGuard
 from conf_proc_lock import Lock, LockInput, Placement
+from conf_proc_prohibited import check_content_markers, check_prohibited_path
 from conf_proc_reasons import CP_LOCK_DIGEST_MISMATCH, CP_TREE_UNEXPECTED, CP_TREE_XATTR, ApplianceError
 from conf_proc_tree_rules import (
     ALLOWED_XATTRS,
@@ -64,6 +65,7 @@ def _materialize(
     input_root: str,
     staging_root: str,
 ) -> None:
+    check_prohibited_path(placement.path)
     dest = os.path.join(staging_root, placement.path.lstrip("/"))
 
     if placement.node_type == "directory":
@@ -84,6 +86,7 @@ def _materialize(
                 CP_LOCK_DIGEST_MISMATCH,
                 f"{lock_input.id}: source content digest {actual_sha256} does not match locked {lock_input.sha256}",
             )
+        check_content_markers(placement.path, content)
         with open(dest, "wb") as handle:
             handle.write(content)
 

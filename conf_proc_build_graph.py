@@ -17,6 +17,7 @@ import os
 import stat
 
 from conf_proc_elf import is_elf, parse_elf
+from conf_proc_prohibited import check_prohibited_unit
 from conf_proc_reasons import CP_POLICY_UNSUPPORTED_ACTIVATION, ApplianceError
 from conf_proc_unit_parser import (
     parse_crontab_lines,
@@ -84,6 +85,7 @@ def _read_all_units(tree_root: str) -> dict[str, dict]:
 
 
 def _add_unit_node_and_edges(unit_name: str, sections: dict, tree_root: str, nodes: dict, edges: list) -> None:
+    check_prohibited_unit(unit_name)
     unit_id = f"unit:{unit_name}"
     service = sections.get("Service", {})
     network_scope = _network_scope_from_service(service)

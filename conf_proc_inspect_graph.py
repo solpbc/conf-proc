@@ -18,6 +18,7 @@ import hashlib
 import os
 
 from conf_proc_elf import is_elf, parse_elf
+from conf_proc_prohibited import check_prohibited_unit
 from conf_proc_reasons import CP_POLICY_UNSUPPORTED_ACTIVATION, ApplianceError
 from conf_proc_unit_parser import (
     parse_crontab_lines,
@@ -102,6 +103,7 @@ def _walk_relative(tree_root: str):
 
 
 def _process_unit(acc: _GraphAccumulator, basename: str, absolute_path: str) -> None:
+    check_prohibited_unit(basename)
     with open(absolute_path, "r", encoding="utf-8") as handle:
         sections = parse_systemd_unit(handle.read())
     unit_id = f"unit:{basename}"
