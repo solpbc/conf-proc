@@ -218,7 +218,11 @@ def parse_lock(data: bytes) -> Lock:
     _require(type(raw) is dict, CP_LOCK_SCHEMA, "lock document must be a JSON object")
     _require(set(raw) == _LOCK_TOP_KEYS, CP_LOCK_SCHEMA, "lock document has unexpected top-level fields")
     _require(raw["schema"] == LOCK_SCHEMA_ID, CP_LOCK_SCHEMA, "unexpected lock schema identifier")
-    _require(raw["lock_version"] == LOCK_VERSION, CP_LOCK_SCHEMA, "unexpected lock version")
+    _require(
+        type(raw["lock_version"]) is int and raw["lock_version"] == LOCK_VERSION,
+        CP_LOCK_SCHEMA,
+        "unexpected lock version",
+    )
 
     base_image_record = _parse_base_image_record(raw["base_image_record"])
 
@@ -276,6 +280,18 @@ def parse_lock(data: bytes) -> Lock:
             raise ApplianceError(CP_LOCK_INPUT_MISSING, "tool_ids references an unknown input")
         if inputs_by_id[tool_id].role != ROLE_BUILD_TOOL:
             raise ApplianceError(CP_LOCK_ROLE, "tool_ids must reference build_tool inputs")
+    build_tool_ids = sorted(entry.id for entry in inputs if entry.role == ROLE_BUILD_TOOL)
+    _require(
+        list(raw_tool_ids) == build_tool_ids,
+        CP_LOCK_PROVENANCE,
+        "tool_ids must exhaust the build_tool inputs",
+    )
+    build_tool_components = [inputs_by_id[tool_id].component for tool_id in raw_tool_ids]
+    _require(
+        len(build_tool_components) == len(set(build_tool_components)),
+        CP_LOCK_PROVENANCE,
+        "build_tool components must be unique",
+    )
 
     _check_cardinality(inputs)
 

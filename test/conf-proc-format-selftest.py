@@ -343,6 +343,32 @@ class LockSchemaTests(unittest.TestCase):
             lk.parse_lock(cj.canonical_dumps(lock))
         self.assertEqual(ctx.exception.reason_code, "CP_LOCK_SCHEMA")
 
+    def test_reject_boolean_lock_version(self) -> None:
+        lock = _minimal_lock()
+        lock["lock_version"] = True
+        with self.assertRaises(ApplianceError) as ctx:
+            lk.parse_lock(cj.canonical_dumps(lock))
+        self.assertEqual(ctx.exception.reason_code, "CP_LOCK_SCHEMA")
+
+    def test_reject_unlisted_build_tool(self) -> None:
+        lock = _minimal_lock()
+        lock["tool_ids"].remove("tool-veritysetup")
+        with self.assertRaises(ApplianceError) as ctx:
+            lk.parse_lock(cj.canonical_dumps(lock))
+        self.assertEqual(ctx.exception.reason_code, "CP_LOCK_PROVENANCE")
+
+    def test_reject_duplicate_build_tool_component(self) -> None:
+        lock = _minimal_lock()
+        lock["inputs"].append(
+            _lock_input("tool-extra", "build_tool", component="mksquashfs", placements=[])
+        )
+        lock["inputs"].sort(key=lambda item: item["id"])
+        lock["tool_ids"].append("tool-extra")
+        lock["tool_ids"].sort()
+        with self.assertRaises(ApplianceError) as ctx:
+            lk.parse_lock(cj.canonical_dumps(lock))
+        self.assertEqual(ctx.exception.reason_code, "CP_LOCK_PROVENANCE")
+
     def test_reject_duplicate_id(self) -> None:
         lock = _minimal_lock()
         lock["inputs"].append(dict(lock["inputs"][0]))

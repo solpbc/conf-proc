@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import ast
+import dataclasses
 import hashlib
 import os
 import subprocess
@@ -28,47 +29,148 @@ def _sha(value: int) -> str:
     return format(value, "064x")
 
 
+def _root_placement(input_id: str, path: str) -> dict:
+    return {
+        "image": "runtime-policy",
+        "path": path,
+        "node_type": "file",
+        "mode": 420,
+        "uid": 0,
+        "gid": 0,
+        "xattrs": [],
+        "source_input_id": input_id,
+        "target": None,
+    }
+
+
+def _root_input(
+    input_id: str,
+    role: str,
+    digest: str,
+    size: int,
+    *,
+    component: str | None = None,
+    scheme: str = "local-fixture",
+    identity: str | None = None,
+    placements: list[dict] | None = None,
+) -> dict:
+    if placements is None:
+        placements = (
+            []
+            if role in ("build_tool", "kernel_trusted_cert_bundle")
+            else [_root_placement(input_id, "/fixture/" + input_id)]
+        )
+    return {
+        "id": input_id,
+        "role": role,
+        "component": component or input_id,
+        "sha256": digest,
+        "size_bytes": size,
+        "source_local_path": "fixtures/" + input_id,
+        "source_retrieval_scheme": scheme,
+        "source_retrieval_identity": identity or "fixture:" + input_id,
+        "source_retrieval_immutable_ref": "sha256:" + digest,
+        "derivation_kind": "fixture",
+        "derivation_recipe_id": "literal-recipe-v1",
+        "derivation_parent_ids": [],
+        "derivation_parameters_sha256": _sha(90),
+        "placements": placements,
+    }
+
+
+def _policy_bytes(boot_root: str | None = None) -> bytes:
+    return canonical_dumps(
+        {
+            "schema": "conf-proc-policy/v1",
+            "policy_version": 1,
+            "images": {"models": {"nodes": []}, "runtime-policy": {"nodes": []}},
+            "boot_roots": [] if boot_root is None else [boot_root],
+            "process_nodes": [],
+            "process_edges": [],
+            "mounts": [],
+            "network_policy": {},
+            "capability_policy": {},
+        }
+    )
+
+
 def _lock_bytes(
     content_sha: str = _sha(1),
     *,
     builder_source_bytes: bytes = b"literal-builder-source-v1",
-    policy_bytes: bytes = b"literal-policy-v1",
+    policy_bytes: bytes | None = None,
 ) -> bytes:
+    if policy_bytes is None:
+        policy_bytes = _policy_bytes()
     builder_sha = hashlib.sha256(builder_source_bytes).hexdigest()
     policy_sha = hashlib.sha256(policy_bytes).hexdigest()
+    inputs = [
+        _root_input(
+            "builder",
+            "conf_proc_source",
+            builder_sha,
+            len(builder_source_bytes),
+            component="conf-proc-builder",
+            scheme="git",
+            identity="conf-proc",
+            placements=[_root_placement("builder", "/opt/conf-proc/conf_proc_build.py")],
+        ),
+        _root_input(
+            "policy",
+            "policy_tree_input",
+            policy_sha,
+            len(policy_bytes),
+            component="process-policy",
+            scheme="generated",
+            identity="policy",
+            placements=[_root_placement("policy", "/etc/spp/policy.json")],
+        ),
+        _root_input("python", "build_tool", content_sha, 12, component="python3"),
+    ]
+    for index, role in enumerate(
+        (
+            "kernel",
+            "kernel_trusted_cert_bundle",
+            "final_systemd_stub",
+            "final_systemd_unit",
+            "nvidia_cc_driver",
+            "nvidia_cc_firmware",
+            "sglang_image",
+            "inference_model",
+            "asr_model",
+            "gateway_dependency_lock",
+            "asr_dependency_lock",
+        ),
+        start=10,
+    ):
+        inputs.append(_root_input(role, role, _sha(index), 1))
+    for index, tool in enumerate(("mksquashfs", "openssl", "unsquashfs", "veritysetup"), start=30):
+        inputs.append(_root_input("tool-" + tool, "build_tool", _sha(index), 1, component=tool))
+    inputs.sort(key=lambda item: item["id"])
     return canonical_dumps(
         {
-            "inputs": [
-                {
-                    "id": "builder",
-                    "role": "conf_proc_source",
-                    "sha256": builder_sha,
-                    "size_bytes": len(builder_source_bytes),
-                    "source_retrieval_scheme": "git",
-                    "source_retrieval_identity": "conf-proc",
-                    "source_retrieval_immutable_ref": "sha256:" + builder_sha,
-                },
-                {
-                    "id": "policy",
-                    "role": "policy_tree_input",
-                    "sha256": policy_sha,
-                    "size_bytes": len(policy_bytes),
-                    "source_retrieval_scheme": "generated",
-                    "source_retrieval_identity": "policy",
-                    "source_retrieval_immutable_ref": "sha256:" + policy_sha,
-                },
-                {
-                    "id": "python",
-                    "role": "build_tool",
-                    "sha256": content_sha,
-                    "size_bytes": 12,
-                    "source_retrieval_scheme": "package",
-                    "source_retrieval_identity": "python3",
-                    "source_retrieval_immutable_ref": "sha256:" + content_sha,
-                },
-            ],
+            "schema": "conf-proc-lock/v1",
+            "lock_version": 1,
+            "base_image_record": {
+                "kind": "vhd",
+                "provider": "fixture",
+                "identity_namespace": "literal",
+                "identity_name": "base",
+                "identity_immutable_revision": "sha256:" + _sha(40),
+                "content_sha256": _sha(40),
+                "content_size_bytes": 1,
+                "content_media_type": "application/octet-stream",
+                "availability": "record-only",
+                "recorded_retrieval_scheme": "local-fixture",
+                "recorded_retrieval_identity": "fixture:base",
+                "recorded_retrieval_immutable_ref": "sha256:" + _sha(40),
+            },
+            "future_cmdline": "console=ttyS0",
+            "inputs": inputs,
+            "authorized_module_signers": [],
+            "image_specs": {"models": {}, "runtime-policy": {}},
             "policy_input_id": "policy",
-            "schema": "literal-root-lock/v1",
+            "tool_ids": sorted(["python"] + ["tool-" + tool for tool in ("mksquashfs", "openssl", "unsquashfs", "veritysetup")]),
         }
     )
 
@@ -117,7 +219,7 @@ def _closure_bytes(
                     "xattrs": [],
                     "capabilities": [],
                     "logical_role": "build_tool",
-                    "provenance": {"scheme": "package", "identity": "python3", "immutable_ref": "sha256:" + content_sha},
+                    "provenance": {"scheme": "local-fixture", "identity": "fixture:python", "immutable_ref": "sha256:" + content_sha},
                     "root_lock_input_id": "python",
                 }
             ],
@@ -156,7 +258,7 @@ def _derive(**overrides) -> oracle.ProvenanceInputs:
         "verity_rules_bytes": oracle.supported_verity_rules_bytes(),
         "tcb_identity_bytes": _tcb_bytes(),
         "builder_source_bytes": b"literal-builder-source-v1",
-        "policy_bytes": b"literal-policy-v1",
+        "policy_bytes": _policy_bytes(),
     }
     values.update(overrides)
     if "root_lock_bytes" not in overrides and (
@@ -174,6 +276,34 @@ def _derive(**overrides) -> oracle.ProvenanceInputs:
 
 
 def _manifest(inputs: oracle.ProvenanceInputs) -> bytes:
+    root = oracle.canonical_loads(inputs.root_lock_bytes)
+    root_inputs = {item["id"]: item for item in root["inputs"]}
+    manifest_inputs = [
+        {key: value for key, value in item.items() if key not in {"component", "source_local_path"}}
+        for item in root["inputs"]
+    ]
+    inventory = {"models": [], "runtime-policy": []}
+    for item in root["inputs"]:
+        for placement in item["placements"]:
+            inventory[placement["image"]].append(
+                {
+                    "path": placement["path"],
+                    "node_type": placement["node_type"],
+                    "mode": placement["mode"],
+                    "uid": placement["uid"],
+                    "gid": placement["gid"],
+                    "xattrs": placement["xattrs"],
+                    "sha256": item["sha256"] if placement["node_type"] == "file" else None,
+                    "size_bytes": item["size_bytes"] if placement["node_type"] == "file" else None,
+                    "symlink_target": placement["target"],
+                    "source_input_id": placement["source_input_id"],
+                }
+            )
+    for records in inventory.values():
+        records.sort(key=lambda record: record["path"])
+    trusted_bundle_id = next(
+        item["id"] for item in root["inputs"] if item["role"] == "kernel_trusted_cert_bundle"
+    )
     image = {
         "squashfs_sha256": _sha(10),
         "squashfs_size_bytes": 4096,
@@ -191,44 +321,40 @@ def _manifest(inputs: oracle.ProvenanceInputs) -> bytes:
         {
             "schema": "conf-proc-appliance-manifest/v2",
             "manifest_version": 2,
-            "lock_schema": "literal-root-lock/v1",
+            "lock_schema": inputs.artifact_input_schema,
             "lock_sha256": inputs.artifact_input_sha256,
             "reproducibility": {
                 "build_epoch": oracle._build_epoch(inputs.artifact_input_sha256),
                 "sort_order": "byte-wise-path",
                 "codec": "conf-proc-canonical-json/v1",
             },
-            "base_image_record": {
-                "kind": "vhd",
-                "provider": "fixture",
-                "identity_namespace": "fixture",
-                "identity_name": "base",
-                "identity_immutable_revision": "sha256:" + _sha(20),
-                "content_sha256": _sha(20),
-                "content_size_bytes": 1,
-                "content_media_type": "application/octet-stream",
-                "availability": "record-only",
-                "recorded_retrieval_scheme": "local-fixture",
-                "recorded_retrieval_identity": "fixture:base",
-                "recorded_retrieval_immutable_ref": "sha256:" + _sha(20),
-            },
-            "future_cmdline": "console=ttyS0",
+            "base_image_record": root["base_image_record"],
+            "future_cmdline": root["future_cmdline"],
             "images": {"models": image, "runtime-policy": image},
-            "inputs": [],
-            "inventory": {"models": [], "runtime-policy": []},
+            "inputs": manifest_inputs,
+            "inventory": inventory,
             "bindings": {"models": empty_bindings, "runtime-policy": empty_bindings},
             "policy": {
-                "policy_input_id": "policy",
-                "policy_schema": "conf-proc-policy/v1",
+                "policy_input_id": root["policy_input_id"],
+                "policy_schema": oracle.canonical_loads(inputs.policy_bytes)["schema"],
                 "process_policy_sha256": inputs.policy_sha256,
             },
             "module_authority": {
-                "trusted_bundle_input_id": "trusted-bundle",
-                "authorized_signer_certificate_sha256": [],
+                "trusted_bundle_input_id": trusted_bundle_id,
+                "authorized_signer_certificate_sha256": [
+                    signer["certificate_sha256"] for signer in root["authorized_module_signers"]
+                ],
                 "module_inventory": [],
                 "firmware_inventory": [],
             },
-            "toolchain": [],
+            "toolchain": [
+                {
+                    "tool_id": tool_id,
+                    "component": root_inputs[tool_id]["component"],
+                    "resolved_path_sha256": root_inputs[tool_id]["sha256"],
+                }
+                for tool_id in root["tool_ids"]
+            ],
             "sbom": {
                 "filename": "appliance.spdx.json",
                 "sha256": hashlib.sha256(_sbom(inputs)).hexdigest(),
@@ -298,13 +424,13 @@ def _sbom(inputs: oracle.ProvenanceInputs) -> bytes:
 class ProvenanceOracleTests(unittest.TestCase):
     def test_literal_digest_vectors(self) -> None:
         inputs = _derive()
-        self.assertEqual(inputs.artifact_input_sha256, "d9ffc9c74eaa93d4e3f70710e8ef3cb50fc5ebb9b2e1016aeda42cd6b8606572")
-        self.assertEqual(inputs.runtime_closure_sha256, "24443b321ba60bfbed17c74858def0d6cd371ac88e81a4870315e5a3eb43d53c")
+        self.assertEqual(inputs.artifact_input_sha256, "4b125d64245bb15977d274df6c71bb40f79a3ba1fe9baebb358bf968b278b2d6")
+        self.assertEqual(inputs.runtime_closure_sha256, "bcaa6ad7f1a76e1dd7a712a5837cd76737b5d4bcd274e244135fa99c04409423")
         self.assertEqual(inputs.verity_rules_sha256, "aece6264c1666c9b83f80756842ace68a9ed74a9cad42a9758699d961605e059")
         self.assertEqual(inputs.tcb_identity_sha256, "2edbe10694ed9914152a2b98ab357a1906f6a1ca2fda15fed71926ee34e479eb")
         self.assertEqual(inputs.builder_source_sha256, "9654bf8dfd2eccdce8dc5928f89d6c07402efffdd438fdeaeb2c8aa2955a08c1")
-        self.assertEqual(inputs.policy_sha256, "08d682587e22c75261b7466108dac1bc7ac486bf03835f986fcdb7f486587f1b")
-        self.assertEqual(inputs.execution_provenance_sha256, "1da3f668ad10ab72ea7c90f4030b26d278986f1cf3d51e503b1acd1a8f1f177e")
+        self.assertEqual(inputs.policy_sha256, "0e6f3b9e7fc837e0af8a83ca78cc3537d24158c45686c2963b9e9560ad95ca86")
+        self.assertEqual(inputs.execution_provenance_sha256, "b8db8d23981bfe474b4480508da7a911488b79cf79fd30e68950f727760de1b7")
 
     def test_artifact_and_execution_identity_truth_table(self) -> None:
         baseline = _derive()
@@ -315,14 +441,14 @@ class ProvenanceOracleTests(unittest.TestCase):
         self.assertEqual(changed_tcb.artifact_input_sha256, baseline.artifact_input_sha256)
         self.assertNotEqual(changed_tcb.execution_provenance_sha256, baseline.execution_provenance_sha256)
 
-    def test_second_literal_vector_proves_named_framing(self) -> None:
-        # Both raw component pairs concatenate to b"abc".  The named,
-        # digest-valued canonical envelope nevertheless gives distinct
-        # execution identities; these are independently pinned literals.
-        left = _derive(builder_source_bytes=b"ab", policy_bytes=b"c")
-        right = _derive(builder_source_bytes=b"a", policy_bytes=b"bc")
-        self.assertEqual(left.execution_provenance_sha256, "b0b137bfe8faad501be023f54b2dffc2c1ed316aeeb4c3d37c685fd98e9b8da6")
-        self.assertEqual(right.execution_provenance_sha256, "96730dfded57febd45c530eadc47f77748261ec5363585177009b05befcf0423")
+    def test_second_literal_vector_proves_named_components(self) -> None:
+        # Independent literals pin changes to two separately named components;
+        # neither raw concatenation nor positional framing can substitute for
+        # the canonical, field-named execution envelope.
+        left = _derive(builder_source_bytes=b"ab", policy_bytes=_policy_bytes())
+        right = _derive(builder_source_bytes=b"a", policy_bytes=_policy_bytes("variant"))
+        self.assertEqual(left.execution_provenance_sha256, "b4a19d5c98c26811cef74c1b5dbc49f8ba6f083f10295536573122c413539364")
+        self.assertEqual(right.execution_provenance_sha256, "8b8b7913c05aff0a83193c52ee6ec75a817676be3acc5f1defd4c5208a5e9c6f")
         self.assertNotEqual(left.execution_provenance_sha256, right.execution_provenance_sha256)
 
     def test_reject_root_lock_authority_disagreement(self) -> None:
@@ -333,11 +459,29 @@ class ProvenanceOracleTests(unittest.TestCase):
     def test_reject_policy_or_builder_bytes_outside_root_lock_authority(self) -> None:
         root = _lock_bytes()
         for override in (
-            {"root_lock_bytes": root, "policy_bytes": b"different-policy"},
+            {"root_lock_bytes": root, "policy_bytes": _policy_bytes("different")},
             {"root_lock_bytes": root, "builder_source_bytes": b"different-builder"},
         ):
             with self.assertRaises(ApplianceError) as ctx:
                 _derive(**override)
+            self.assertEqual(ctx.exception.reason_code, "CP_PROVENANCE_AUTHORITY")
+
+    def test_reject_skeletal_or_ambiguous_root_lock_authority(self) -> None:
+        for mutate in (
+            lambda raw: raw.update(schema="literal-root-lock/v1"),
+            lambda raw: raw.update(lock_version=True),
+            lambda raw: raw.pop("base_image_record"),
+            lambda raw: raw.update(image_specs={"models": {"block_size": 4096}, "runtime-policy": {}}),
+            lambda raw: raw["inputs"][0].pop("component"),
+            lambda raw: raw["inputs"][0].update(role=[]),
+            lambda raw: raw["inputs"][0]["placements"][0].update(image={}),
+            lambda raw: raw["tool_ids"].pop(),
+            lambda raw: next(item for item in raw["inputs"] if item["id"] == "python").update(component="mksquashfs"),
+        ):
+            raw = oracle.canonical_loads(_lock_bytes())
+            mutate(raw)
+            with self.assertRaises(ApplianceError) as ctx:
+                _derive(root_lock_bytes=canonical_dumps(raw))
             self.assertEqual(ctx.exception.reason_code, "CP_PROVENANCE_AUTHORITY")
 
     def test_reject_root_lock_role_or_provenance_disagreement(self) -> None:
@@ -445,12 +589,22 @@ class ProvenanceOracleTests(unittest.TestCase):
 
     def test_reject_contradictory_output_authorities(self) -> None:
         inputs = _derive()
-        for path in ("lock", "policy"):
+        for path in ("lock", "policy", "base", "input", "inventory", "module", "toolchain"):
             manifest = oracle.canonical_loads(_manifest(inputs))
             if path == "lock":
                 manifest["lock_sha256"] = _sha(45)
-            else:
+            elif path == "policy":
                 manifest["policy"]["process_policy_sha256"] = _sha(46)
+            elif path == "base":
+                manifest["base_image_record"]["identity_name"] = "other"
+            elif path == "input":
+                manifest["inputs"][0]["sha256"] = _sha(49)
+            elif path == "inventory":
+                manifest["inventory"]["runtime-policy"][0]["mode"] ^= 1
+            elif path == "module":
+                manifest["module_authority"]["trusted_bundle_input_id"] = "other"
+            else:
+                manifest["toolchain"][0]["resolved_path_sha256"] = _sha(48)
             with self.assertRaises(ApplianceError):
                 oracle.inspect_bindings(manifest_bytes=canonical_dumps(manifest), sbom_bytes=_sbom(inputs), inputs=inputs)
         sbom = oracle.canonical_loads(_sbom(inputs))
@@ -459,6 +613,46 @@ class ProvenanceOracleTests(unittest.TestCase):
         manifest["sbom"]["sha256"] = hashlib.sha256(canonical_dumps(sbom)).hexdigest()
         with self.assertRaises(ApplianceError):
             oracle.inspect_bindings(manifest_bytes=canonical_dumps(manifest), sbom_bytes=canonical_dumps(sbom), inputs=inputs)
+
+    def test_reject_mutated_retained_root_authority(self) -> None:
+        inputs = _derive()
+        changed_root = oracle.canonical_loads(inputs.root_lock_bytes)
+        changed_root["future_cmdline"] = "console=ttyS1"
+        changed = dataclasses.replace(inputs, root_lock_bytes=canonical_dumps(changed_root))
+        with self.assertRaises(ApplianceError) as ctx:
+            oracle.inspect_bindings(
+                manifest_bytes=_manifest(changed),
+                sbom_bytes=_sbom(changed),
+                inputs=changed,
+            )
+        self.assertEqual(ctx.exception.reason_code, "CP_PROVENANCE_AUTHORITY")
+
+    def test_reject_coordinated_cached_authority_rewrite(self) -> None:
+        inputs = _derive()
+        changed_root = oracle.canonical_loads(inputs.root_lock_bytes)
+        changed_root["future_cmdline"] = "console=ttyS1"
+        changed_root_bytes = canonical_dumps(changed_root)
+        changed_policy_bytes = _policy_bytes("changed")
+        for changed in (
+            dataclasses.replace(
+                inputs,
+                root_lock_bytes=changed_root_bytes,
+                artifact_input_sha256=hashlib.sha256(changed_root_bytes).hexdigest(),
+            ),
+            dataclasses.replace(
+                inputs,
+                policy_bytes=changed_policy_bytes,
+                policy_sha256=hashlib.sha256(changed_policy_bytes).hexdigest(),
+            ),
+            dataclasses.replace(inputs, artifact_input_schema="conf-proc-lock/other"),
+        ):
+            with self.assertRaises(ApplianceError) as ctx:
+                oracle.inspect_bindings(
+                    manifest_bytes=_manifest(changed),
+                    sbom_bytes=_sbom(changed),
+                    inputs=changed,
+                )
+            self.assertEqual(ctx.exception.reason_code, "CP_PROVENANCE_AUTHORITY")
 
     def test_reject_semantically_invalid_manifest_or_spdx(self) -> None:
         inputs = _derive()
@@ -505,8 +699,11 @@ class ProvenanceOracleTests(unittest.TestCase):
                 "placements": [],
             }
         ]
+        collection_image = oracle.canonical_loads(_manifest(inputs))
+        collection_image["inputs"][0]["placements"][0]["image"] = []
         for mutated in (
             manifest,
+            collection_image,
             {**oracle.canonical_loads(_manifest(inputs)), "bindings": {"models": {"executables": [{}], "configs": [], "models": [], "runtime_inputs": []}, "runtime-policy": {"executables": [], "configs": [], "models": [], "runtime_inputs": []}}},
             {**oracle.canonical_loads(_manifest(inputs)), "module_authority": {"trusted_bundle_input_id": "bundle", "authorized_signer_certificate_sha256": [{}], "module_inventory": [], "firmware_inventory": []}},
         ):
@@ -531,7 +728,7 @@ class ProvenanceOracleTests(unittest.TestCase):
             "verity-rules.json": oracle.supported_verity_rules_bytes(),
             "tcb.json": _tcb_bytes(),
             "builder.py": b"literal-builder-source-v1",
-            "policy.json": b"literal-policy-v1",
+            "policy.json": _policy_bytes(),
             "manifest.json": _manifest(inputs),
             "sbom.json": _sbom(inputs),
         }

@@ -177,6 +177,96 @@ _ENTRY_KEYS: Final = frozenset(
 _PROVENANCE_KEYS: Final = frozenset({"scheme", "identity", "immutable_ref"})
 _XATTR_KEYS: Final = frozenset({"name", "value_sha256"})
 
+_LOCK_TOP_KEYS: Final = frozenset(
+    {
+        "schema",
+        "lock_version",
+        "base_image_record",
+        "future_cmdline",
+        "inputs",
+        "authorized_module_signers",
+        "image_specs",
+        "policy_input_id",
+        "tool_ids",
+    }
+)
+_LOCK_BASE_KEYS: Final = frozenset(
+    {
+        "kind",
+        "provider",
+        "identity_namespace",
+        "identity_name",
+        "identity_immutable_revision",
+        "content_sha256",
+        "content_size_bytes",
+        "content_media_type",
+        "availability",
+        "recorded_retrieval_scheme",
+        "recorded_retrieval_identity",
+        "recorded_retrieval_immutable_ref",
+    }
+)
+_LOCK_INPUT_KEYS: Final = frozenset(
+    {
+        "id",
+        "role",
+        "component",
+        "sha256",
+        "size_bytes",
+        "source_local_path",
+        "source_retrieval_scheme",
+        "source_retrieval_identity",
+        "source_retrieval_immutable_ref",
+        "derivation_kind",
+        "derivation_recipe_id",
+        "derivation_parent_ids",
+        "derivation_parameters_sha256",
+        "placements",
+    }
+)
+_LOCK_PLACEMENT_KEYS: Final = frozenset(
+    {"image", "path", "node_type", "mode", "uid", "gid", "xattrs", "source_input_id", "target"}
+)
+_LOCK_SIGNER_KEYS: Final = frozenset({"certificate_sha256", "spki_sha256", "subject_sha256", "usage"})
+_LOCK_ROLES: Final = frozenset(
+    {
+        "kernel",
+        "kernel_trusted_cert_bundle",
+        "final_systemd_stub",
+        "final_systemd_unit",
+        "nvidia_cc_driver",
+        "nvidia_cc_firmware",
+        "conf_proc_source",
+        "sglang_image",
+        "inference_model",
+        "asr_model",
+        "gateway_dependency_lock",
+        "asr_dependency_lock",
+        "runtime_tree_input",
+        "policy_tree_input",
+        "models_tree_input",
+        "build_tool",
+    }
+)
+_LOCK_SINGLE_ROLES: Final = frozenset(
+    {
+        "kernel",
+        "kernel_trusted_cert_bundle",
+        "final_systemd_stub",
+        "final_systemd_unit",
+        "nvidia_cc_driver",
+        "nvidia_cc_firmware",
+        "sglang_image",
+        "inference_model",
+        "asr_model",
+        "gateway_dependency_lock",
+        "asr_dependency_lock",
+    }
+)
+_LOCK_TREE_ROLES: Final = frozenset({"runtime_tree_input", "policy_tree_input", "models_tree_input"})
+_LOCK_REQUIRED_TOOLS: Final = frozenset({"mksquashfs", "unsquashfs", "veritysetup", "openssl"})
+_LOCK_IMAGES: Final = frozenset({"models", "runtime-policy"})
+
 _RULES_TOP_KEYS: Final = frozenset(
     {
         "schema",
@@ -429,6 +519,12 @@ class ProvenanceInputs:
     builder_source_sha256: str
     policy_sha256: str
     execution_provenance_sha256: str
+    root_lock_bytes: bytes
+    runtime_closure_bytes: bytes
+    verity_rules_bytes: bytes
+    tcb_identity_bytes: bytes
+    builder_source_bytes: bytes
+    policy_bytes: bytes
 
 
 def supported_verity_rules_bytes() -> bytes:
@@ -588,11 +684,18 @@ def derive_inputs(
     parse_tcb_identity(tcb_identity_bytes)
     builder_source_sha256 = _digest(builder_source_bytes)
     policy_sha256 = _digest(policy_bytes)
+    policy = canonical_loads(policy_bytes)
+    _require(
+        type(policy) is dict and policy.get("schema") == "conf-proc-policy/v1",
+        CP_PROVENANCE_AUTHORITY,
+        "policy bytes do not carry the supported canonical policy schema",
+    )
     root_lock = _verify_root_lock_authority(
         root_lock_bytes,
         closure,
         builder_source_sha256=builder_source_sha256,
         policy_sha256=policy_sha256,
+        policy_size_bytes=len(policy_bytes),
     )
     fields = {
         "schema": EXECUTION_PROVENANCE_SCHEMA,
@@ -613,6 +716,12 @@ def derive_inputs(
         builder_source_sha256=fields["builder_source_sha256"],
         policy_sha256=fields["policy_sha256"],
         execution_provenance_sha256=execution_digest,
+        root_lock_bytes=root_lock_bytes,
+        runtime_closure_bytes=runtime_closure_bytes,
+        verity_rules_bytes=verity_rules_bytes,
+        tcb_identity_bytes=tcb_identity_bytes,
+        builder_source_bytes=builder_source_bytes,
+        policy_bytes=policy_bytes,
     )
 
 
@@ -622,23 +731,16 @@ def _verify_root_lock_authority(
     *,
     builder_source_sha256: str,
     policy_sha256: str,
+    policy_size_bytes: int,
 ) -> dict:
-    lock = canonical_loads(root_lock_bytes)
-    _require(
-        type(lock) is dict
-        and type(lock.get("schema")) is str
-        and lock["schema"]
-        and type(lock.get("inputs")) is list,
-        CP_PROVENANCE_AUTHORITY,
-        "root lock has no schema or authoritative inputs",
-    )
-    inputs = {item.get("id"): item for item in lock["inputs"] if type(item) is dict and type(item.get("id")) is str}
-    _require(len(inputs) == len(lock["inputs"]), CP_PROVENANCE_AUTHORITY, "root-lock authoritative input IDs must be present and unique")
-    policy_input_id = lock.get("policy_input_id")
+    lock = _parse_root_lock_authority(root_lock_bytes)
+    inputs = {item["id"]: item for item in lock["inputs"]}
+    policy_input_id = lock["policy_input_id"]
     _require(
         type(policy_input_id) is str
         and policy_input_id in inputs
-        and inputs[policy_input_id].get("sha256") == policy_sha256,
+        and inputs[policy_input_id].get("sha256") == policy_sha256
+        and inputs[policy_input_id].get("size_bytes") == policy_size_bytes,
         CP_PROVENANCE_AUTHORITY,
         "policy bytes disagree with the root-lock authority",
     )
@@ -672,12 +774,251 @@ def _verify_root_lock_authority(
     return lock
 
 
+def _parse_root_lock_authority(data: bytes) -> dict:
+    raw = canonical_loads(data)
+    _require(
+        type(raw) is dict and set(raw) == _LOCK_TOP_KEYS,
+        CP_PROVENANCE_AUTHORITY,
+        "root lock has unexpected top-level fields",
+    )
+    _require(
+        raw["schema"] == "conf-proc-lock/v1"
+        and type(raw["lock_version"]) is int
+        and raw["lock_version"] == 1,
+        CP_PROVENANCE_AUTHORITY,
+        "root lock schema or version is unsupported",
+    )
+
+    base = raw["base_image_record"]
+    _require(
+        type(base) is dict and set(base) == _LOCK_BASE_KEYS,
+        CP_PROVENANCE_AUTHORITY,
+        "root lock base-image record has unexpected fields",
+    )
+    _require(base["kind"] in ("vhd", "vmi"), CP_PROVENANCE_AUTHORITY, "root lock base-image kind is unsupported")
+    for key in (
+        "provider",
+        "identity_namespace",
+        "identity_name",
+        "identity_immutable_revision",
+        "content_media_type",
+        "recorded_retrieval_identity",
+        "recorded_retrieval_immutable_ref",
+    ):
+        _require(type(base[key]) is str and base[key], CP_PROVENANCE_AUTHORITY, "root lock base-image identity is incomplete")
+    _require(_is_sha256(base["content_sha256"]), CP_PROVENANCE_AUTHORITY, "root lock base-image digest is invalid")
+    _require(
+        type(base["content_size_bytes"]) is int and base["content_size_bytes"] >= 0,
+        CP_PROVENANCE_AUTHORITY,
+        "root lock base-image size is invalid",
+    )
+    _require(base["availability"] == "record-only", CP_PROVENANCE_AUTHORITY, "root lock base-image availability is unsupported")
+    _require(
+        base["recorded_retrieval_scheme"] in ("https", "oci", "git", "local-fixture", "other"),
+        CP_PROVENANCE_AUTHORITY,
+        "root lock base-image retrieval scheme is unsupported",
+    )
+
+    cmdline = raw["future_cmdline"]
+    _require(
+        type(cmdline) is str and cmdline and not any(marker in cmdline for marker in ("${", "{{", "%(")),
+        CP_PROVENANCE_AUTHORITY,
+        "root lock future cmdline is invalid",
+    )
+
+    raw_inputs = raw["inputs"]
+    _require(type(raw_inputs) is list and raw_inputs, CP_PROVENANCE_AUTHORITY, "root lock inputs must be nonempty")
+    for item in raw_inputs:
+        _parse_root_lock_input(item)
+    ids = [item["id"] for item in raw_inputs]
+    _require(ids == sorted(ids) and len(ids) == len(set(ids)), CP_PROVENANCE_AUTHORITY, "root lock input IDs must be sorted and unique")
+    inputs = {item["id"]: item for item in raw_inputs}
+    _require(
+        all(parent in inputs for item in raw_inputs for parent in item["derivation_parent_ids"]),
+        CP_PROVENANCE_AUTHORITY,
+        "root lock derivation cites an unknown parent",
+    )
+
+    signers = raw["authorized_module_signers"]
+    _require(type(signers) is list, CP_PROVENANCE_AUTHORITY, "root lock signers must be an array")
+    for signer in signers:
+        _require(
+            type(signer) is dict and set(signer) == _LOCK_SIGNER_KEYS,
+            CP_PROVENANCE_AUTHORITY,
+            "root lock signer has unexpected fields",
+        )
+        _require(
+            all(_is_sha256(signer[key]) for key in ("certificate_sha256", "spki_sha256", "subject_sha256"))
+            and signer["usage"] == "kernel-module-signing",
+            CP_PROVENANCE_AUTHORITY,
+            "root lock signer identity is invalid",
+        )
+    signer_ids = [signer["certificate_sha256"] for signer in signers]
+    _require(
+        signer_ids == sorted(signer_ids) and len(signer_ids) == len(set(signer_ids)),
+        CP_PROVENANCE_AUTHORITY,
+        "root lock signers must be sorted and unique",
+    )
+
+    _require(
+        raw["image_specs"] == {"models": {}, "runtime-policy": {}},
+        CP_PROVENANCE_AUTHORITY,
+        "root lock image_specs must be the exact empty geometry-free object",
+    )
+    policy_input_id = raw["policy_input_id"]
+    _require(
+        type(policy_input_id) is str
+        and policy_input_id in inputs
+        and inputs[policy_input_id]["role"] == "policy_tree_input",
+        CP_PROVENANCE_AUTHORITY,
+        "root lock policy authority is invalid",
+    )
+
+    tool_ids = raw["tool_ids"]
+    build_tool_ids = sorted(item["id"] for item in raw_inputs if item["role"] == "build_tool")
+    _require(
+        type(tool_ids) is list
+        and all(type(item) is str for item in tool_ids)
+        and tool_ids == build_tool_ids
+        and len(tool_ids) == len(set(tool_ids))
+        and all(item in inputs and inputs[item]["role"] == "build_tool" for item in tool_ids),
+        CP_PROVENANCE_AUTHORITY,
+        "root lock tool IDs must exhaust the build-tool authority",
+    )
+    role_counts = {role: sum(item["role"] == role for item in raw_inputs) for role in _LOCK_ROLES}
+    _require(
+        all(role_counts[role] == 1 for role in _LOCK_SINGLE_ROLES)
+        and role_counts["conf_proc_source"] >= 1
+        and sum(role_counts[role] for role in _LOCK_TREE_ROLES) >= 1,
+        CP_PROVENANCE_AUTHORITY,
+        "root lock role cardinality is invalid",
+    )
+    tool_component_list = [inputs[tool_id]["component"] for tool_id in tool_ids]
+    _require(
+        len(tool_component_list) == len(set(tool_component_list))
+        and _LOCK_REQUIRED_TOOLS <= set(tool_component_list),
+        CP_PROVENANCE_AUTHORITY,
+        "root lock build-tool components must be unique and complete",
+    )
+    return raw
+
+
+def _parse_root_lock_input(raw: object) -> None:
+    _require(
+        type(raw) is dict and set(raw) == _LOCK_INPUT_KEYS,
+        CP_PROVENANCE_AUTHORITY,
+        "root lock input has unexpected fields",
+    )
+    input_id = raw["id"]
+    _require(
+        type(input_id) is str and input_id and input_id.isascii() and not any(character.isspace() for character in input_id),
+        CP_PROVENANCE_AUTHORITY,
+        "root lock input ID is invalid",
+    )
+    _require(
+        type(raw["role"]) is str and raw["role"] in _LOCK_ROLES,
+        CP_PROVENANCE_AUTHORITY,
+        "root lock input role is invalid",
+    )
+    _require(type(raw["component"]) is str and raw["component"], CP_PROVENANCE_AUTHORITY, "root lock component is empty")
+    _require(_is_sha256(raw["sha256"]), CP_PROVENANCE_AUTHORITY, "root lock input digest is invalid")
+    _require(type(raw["size_bytes"]) is int and raw["size_bytes"] >= 0, CP_PROVENANCE_AUTHORITY, "root lock input size is invalid")
+    _require(_relative_normal_path(raw["source_local_path"]), CP_PROVENANCE_AUTHORITY, "root lock source path is invalid")
+    _require(
+        raw["source_retrieval_scheme"] in ("https", "oci", "git", "local-fixture", "generated", "other"),
+        CP_PROVENANCE_AUTHORITY,
+        "root lock input retrieval scheme is invalid",
+    )
+    _require(
+        all(type(raw[key]) is str and raw[key] for key in ("source_retrieval_identity", "source_retrieval_immutable_ref", "derivation_recipe_id")),
+        CP_PROVENANCE_AUTHORITY,
+        "root lock input provenance is incomplete",
+    )
+    derivation_kind = raw["derivation_kind"]
+    _require(derivation_kind in ("fetched", "built", "extracted", "fixture"), CP_PROVENANCE_AUTHORITY, "root lock derivation kind is invalid")
+    parents = raw["derivation_parent_ids"]
+    _require(
+        type(parents) is list
+        and all(type(item) is str for item in parents)
+        and parents == sorted(parents)
+        and len(parents) == len(set(parents)),
+        CP_PROVENANCE_AUTHORITY,
+        "root lock derivation parents are invalid",
+    )
+    _require(
+        bool(parents) or derivation_kind == "fixture" or raw["role"] == "build_tool",
+        CP_PROVENANCE_AUTHORITY,
+        "root lock derivation is missing parents",
+    )
+    _require(_is_sha256(raw["derivation_parameters_sha256"]), CP_PROVENANCE_AUTHORITY, "root lock derivation digest is invalid")
+    placements = raw["placements"]
+    _require(type(placements) is list, CP_PROVENANCE_AUTHORITY, "root lock placements must be an array")
+    for placement in placements:
+        _parse_root_lock_placement(placement, input_id)
+    placement_keys = [(placement["image"], placement["path"]) for placement in placements]
+    _require(
+        placement_keys == sorted(placement_keys) and len(placement_keys) == len(set(placement_keys)),
+        CP_PROVENANCE_AUTHORITY,
+        "root lock placements must be sorted and unique",
+    )
+    _require(
+        bool(placements) or raw["role"] in ("build_tool", "kernel_trusted_cert_bundle"),
+        CP_PROVENANCE_AUTHORITY,
+        "root lock input is missing a placement",
+    )
+
+
+def _parse_root_lock_placement(raw: object, owning_input_id: str) -> None:
+    _require(
+        type(raw) is dict and set(raw) == _LOCK_PLACEMENT_KEYS,
+        CP_PROVENANCE_AUTHORITY,
+        "root lock placement has unexpected fields",
+    )
+    _require(
+        type(raw["image"]) is str and raw["image"] in _LOCK_IMAGES and _lock_absolute_path(raw["path"]),
+        CP_PROVENANCE_AUTHORITY,
+        "root lock placement path is invalid",
+    )
+    _require(raw["node_type"] in ("file", "directory", "symlink"), CP_PROVENANCE_AUTHORITY, "root lock placement node type is invalid")
+    _require(type(raw["mode"]) is int and 0 <= raw["mode"] <= 0o7777, CP_PROVENANCE_AUTHORITY, "root lock placement mode is invalid")
+    _require(type(raw["uid"]) is int and raw["uid"] >= 0 and type(raw["gid"]) is int and raw["gid"] >= 0, CP_PROVENANCE_AUTHORITY, "root lock placement ownership is invalid")
+    _require(
+        type(raw["xattrs"]) is list
+        and all(item in ("system.posix_acl_access", "system.posix_acl_default") for item in raw["xattrs"]),
+        CP_PROVENANCE_AUTHORITY,
+        "root lock placement xattrs are invalid",
+    )
+    if raw["node_type"] == "file":
+        valid_binding = raw["source_input_id"] == owning_input_id and raw["target"] is None
+    elif raw["node_type"] == "symlink":
+        valid_binding = raw["source_input_id"] is None and type(raw["target"]) is str and bool(raw["target"])
+    else:
+        valid_binding = raw["source_input_id"] is None and raw["target"] is None
+    _require(valid_binding, CP_PROVENANCE_AUTHORITY, "root lock placement source binding is invalid")
+
+
 def inspect_bindings(
     *,
     manifest_bytes: bytes,
     sbom_bytes: bytes,
     inputs: ProvenanceInputs,
 ) -> None:
+    rederived = derive_inputs(
+        root_lock_bytes=inputs.root_lock_bytes,
+        runtime_closure_bytes=inputs.runtime_closure_bytes,
+        verity_rules_bytes=inputs.verity_rules_bytes,
+        tcb_identity_bytes=inputs.tcb_identity_bytes,
+        builder_source_bytes=inputs.builder_source_bytes,
+        policy_bytes=inputs.policy_bytes,
+    )
+    _require(
+        inputs == rederived,
+        CP_PROVENANCE_AUTHORITY,
+        "retained authorities no longer match the derived provenance identity",
+    )
+    inputs = rederived
+    root_lock = _parse_root_lock_authority(inputs.root_lock_bytes)
+    policy = canonical_loads(inputs.policy_bytes)
     manifest = canonical_loads(manifest_bytes)
     _validate_manifest_v2_shape(manifest)
     actual = manifest["provenance"]
@@ -690,10 +1031,16 @@ def inspect_bindings(
         CP_PROVENANCE_BINDING,
         "manifest root-lock identity does not match trusted bytes",
     )
+    _verify_manifest_root_authorities(manifest, inputs, root_lock)
     _require(
-        manifest["policy"]["process_policy_sha256"] == inputs.policy_sha256,
+        manifest["policy"]
+        == {
+            "policy_input_id": root_lock["policy_input_id"],
+            "policy_schema": policy["schema"],
+            "process_policy_sha256": inputs.policy_sha256,
+        },
         CP_PROVENANCE_BINDING,
-        "manifest policy identity does not match trusted bytes",
+        "manifest policy authority does not match trusted bytes",
     )
     _require(
         manifest["reproducibility"]["build_epoch"] == _build_epoch(inputs.artifact_input_sha256),
@@ -728,6 +1075,61 @@ def inspect_bindings(
         sbom["creationInfo"]["created"] == _build_timestamp(inputs.artifact_input_sha256),
         CP_PROVENANCE_BINDING,
         "SPDX creation timestamp does not match artifact-input build epoch",
+    )
+
+
+def _verify_manifest_root_authorities(manifest: dict, inputs: ProvenanceInputs, root: dict) -> None:
+    expected_inputs = [
+        {key: item[key] for key in _MANIFEST_INPUT_KEYS}
+        for item in root["inputs"]
+    ]
+    expected_inventory = {image_id: [] for image_id in _LOCK_IMAGES}
+    for item in root["inputs"]:
+        for placement in item["placements"]:
+            expected_inventory[placement["image"]].append(
+                {
+                    "path": placement["path"],
+                    "node_type": placement["node_type"],
+                    "mode": placement["mode"],
+                    "uid": placement["uid"],
+                    "gid": placement["gid"],
+                    "xattrs": placement["xattrs"],
+                    "sha256": item["sha256"] if placement["node_type"] == "file" else None,
+                    "size_bytes": item["size_bytes"] if placement["node_type"] == "file" else None,
+                    "symlink_target": placement["target"],
+                    "source_input_id": placement["source_input_id"],
+                }
+            )
+    for records in expected_inventory.values():
+        records.sort(key=lambda record: record["path"])
+    root_inputs = {item["id"]: item for item in root["inputs"]}
+    expected_toolchain = [
+        {
+            "tool_id": tool_id,
+            "component": root_inputs[tool_id]["component"],
+            "resolved_path_sha256": root_inputs[tool_id]["sha256"],
+        }
+        for tool_id in root["tool_ids"]
+    ]
+    trusted_bundle_ids = [
+        item["id"] for item in root["inputs"] if item["role"] == "kernel_trusted_cert_bundle"
+    ]
+    _require(
+        manifest["base_image_record"] == root["base_image_record"]
+        and manifest["future_cmdline"] == root["future_cmdline"]
+        and manifest["inputs"] == expected_inputs
+        and manifest["inventory"] == expected_inventory
+        and manifest["toolchain"] == expected_toolchain,
+        CP_PROVENANCE_BINDING,
+        "manifest duplicates disagree with root-lock authority",
+    )
+    module_authority = manifest["module_authority"]
+    _require(
+        trusted_bundle_ids == [module_authority["trusted_bundle_input_id"]]
+        and module_authority["authorized_signer_certificate_sha256"]
+        == [signer["certificate_sha256"] for signer in root["authorized_module_signers"]],
+        CP_PROVENANCE_BINDING,
+        "manifest module authority disagrees with root-lock authority",
     )
 
 
@@ -794,7 +1196,8 @@ def _validate_manifest_v2_shape(raw: object) -> None:
         for placement in item["placements"]:
             _require(type(placement) is dict and set(placement) == _PLACEMENT_KEYS, CP_PROVENANCE_BINDING, "manifest placement shape is invalid")
             _require(
-                placement["image"] in _IMAGE_IDS
+                type(placement["image"]) is str
+                and placement["image"] in _IMAGE_IDS
                 and _absolute_normal_path(placement["path"])
                 and placement["node_type"] in ("file", "directory", "symlink")
                 and all(_nonnegative_int(placement[key]) for key in ("mode", "uid", "gid"))
@@ -1024,6 +1427,26 @@ def _absolute_normal_path(value: object) -> bool:
         and value.startswith("/")
         and value != "/"
         and posixpath.normpath(value) == value
+    )
+
+
+def _lock_absolute_path(value: object) -> bool:
+    return (
+        type(value) is str
+        and "\x00" not in value
+        and value.startswith("/")
+        and not (value != "/" and value.endswith("/"))
+        and posixpath.normpath(value) == value
+    )
+
+
+def _relative_normal_path(value: object) -> bool:
+    return (
+        type(value) is str
+        and value
+        and "\x00" not in value
+        and not value.startswith("/")
+        and all(segment not in ("", "..") for segment in value.split("/"))
     )
 
 
