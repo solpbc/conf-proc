@@ -17,23 +17,134 @@ completeness, already-running TCB identity, or operating-system isolation.
 from __future__ import annotations
 
 import hashlib
+import json
 import posixpath
 import uuid
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Final
 
-from conf_proc_json import canonical_dumps, canonical_loads
-from conf_proc_reasons import (
-    CP_EXECUTION_PROVENANCE,
-    CP_PROVENANCE_AUTHORITY,
-    CP_PROVENANCE_BINDING,
-    CP_PROVENANCE_STATUS,
-    CP_RUNTIME_CLOSURE_SCHEMA,
-    CP_TCB_IDENTITY_SCHEMA,
-    CP_VERITY_RULES_SCHEMA,
-    ApplianceError,
-)
+
+CP_EXECUTION_PROVENANCE: Final = "CP_EXECUTION_PROVENANCE"
+CP_PROVENANCE_AUTHORITY: Final = "CP_PROVENANCE_AUTHORITY"
+CP_PROVENANCE_BINDING: Final = "CP_PROVENANCE_BINDING"
+CP_PROVENANCE_STATUS: Final = "CP_PROVENANCE_STATUS"
+CP_RUNTIME_CLOSURE_SCHEMA: Final = "CP_RUNTIME_CLOSURE_SCHEMA"
+CP_TCB_IDENTITY_SCHEMA: Final = "CP_TCB_IDENTITY_SCHEMA"
+CP_VERITY_RULES_SCHEMA: Final = "CP_VERITY_RULES_SCHEMA"
+CP_JSON_INVALID_UTF8: Final = "CP_JSON_INVALID_UTF8"
+CP_JSON_INVALID: Final = "CP_JSON_INVALID"
+CP_JSON_NONCANONICAL: Final = "CP_JSON_NONCANONICAL"
+CP_JSON_DUPLICATE_KEY: Final = "CP_JSON_DUPLICATE_KEY"
+CP_JSON_UNSUPPORTED_NUMBER: Final = "CP_JSON_UNSUPPORTED_NUMBER"
+CP_JSON_UNSUPPORTED_TYPE: Final = "CP_JSON_UNSUPPORTED_TYPE"
+
+_JSON_SAFE_INTEGER_MIN: Final = -(2**53 - 1)
+_JSON_SAFE_INTEGER_MAX: Final = 2**53 - 1
+
+
+class ApplianceError(RuntimeError):
+    """Self-contained oracle failure with a stable reason code."""
+
+    def __init__(self, reason_code: str, message: str) -> None:
+        self.reason_code = reason_code
+        super().__init__(f"{reason_code}: {message}")
+
+
+def canonical_dumps(value: object) -> bytes:
+    """Encode the oracle's strict RFC 8785-compatible integer subset."""
+
+    return _json_encode_value(value).encode("utf-8")
+
+
+def canonical_loads(data: bytes) -> object:
+    """Decode exact canonical bytes without importing product codecs."""
+
+    if type(data) is not bytes:
+        raise ApplianceError(CP_JSON_UNSUPPORTED_TYPE, "canonical JSON input must be bytes")
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ApplianceError(CP_JSON_INVALID_UTF8, "JSON is not valid UTF-8") from exc
+    try:
+        value = json.loads(
+            text,
+            object_pairs_hook=_json_object_without_duplicates,
+            parse_float=_json_reject_float,
+            parse_constant=_json_reject_constant,
+        )
+    except ApplianceError:
+        raise
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise ApplianceError(CP_JSON_INVALID, "invalid JSON") from exc
+    if canonical_dumps(value) != data:
+        raise ApplianceError(CP_JSON_NONCANONICAL, "JSON is not canonically encoded")
+    return value
+
+
+def _json_object_without_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ApplianceError(CP_JSON_DUPLICATE_KEY, "duplicate JSON object key")
+        result[key] = value
+    return result
+
+
+def _json_reject_float(value: str) -> object:
+    raise ApplianceError(CP_JSON_UNSUPPORTED_NUMBER, "floating-point JSON is unsupported")
+
+
+def _json_reject_constant(value: str) -> object:
+    raise ApplianceError(CP_JSON_UNSUPPORTED_NUMBER, "non-finite JSON number is unsupported")
+
+
+def _json_encode_value(value: object) -> str:
+    value_type = type(value)
+    if value_type is dict:
+        keys = list(value)
+        if any(type(key) is not str for key in keys):
+            raise ApplianceError(CP_JSON_UNSUPPORTED_TYPE, "JSON object keys must be strings")
+        ordered = sorted(keys, key=_json_utf16_sort_key)
+        return "{" + ",".join(f"{_json_encode_string(key)}:{_json_encode_value(value[key])}" for key in ordered) + "}"
+    if value_type is list:
+        return "[" + ",".join(_json_encode_value(item) for item in value) + "]"
+    if value_type is str:
+        return _json_encode_string(value)
+    if value_type is bool:
+        return "true" if value else "false"
+    if value is None:
+        return "null"
+    if value_type is int:
+        if not _JSON_SAFE_INTEGER_MIN <= value <= _JSON_SAFE_INTEGER_MAX:
+            raise ApplianceError(CP_JSON_UNSUPPORTED_NUMBER, "integer is outside the safe range")
+        return str(value)
+    raise ApplianceError(CP_JSON_UNSUPPORTED_TYPE, "unsupported JSON value type")
+
+
+def _json_utf16_sort_key(value: str) -> bytes:
+    _json_validate_unicode(value)
+    return value.encode("utf-16-be")
+
+
+def _json_encode_string(value: str) -> str:
+    _json_validate_unicode(value)
+    escapes = {"\b": "\\b", "\t": "\\t", "\n": "\\n", "\f": "\\f", "\r": "\\r", '"': '\\"', "\\": "\\\\"}
+    out = ['"']
+    for character in value:
+        if character in escapes:
+            out.append(escapes[character])
+        elif ord(character) <= 0x1F:
+            out.append(f"\\u{ord(character):04x}")
+        else:
+            out.append(character)
+    out.append('"')
+    return "".join(out)
+
+
+def _json_validate_unicode(value: str) -> None:
+    if any(0xD800 <= ord(character) <= 0xDFFF for character in value):
+        raise ApplianceError(CP_JSON_UNSUPPORTED_TYPE, "string contains an unpaired surrogate")
 
 
 RUNTIME_CLOSURE_SCHEMA: Final = "conf-proc-runtime-closure/v1"

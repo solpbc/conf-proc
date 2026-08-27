@@ -5,8 +5,12 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
+import os
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -15,8 +19,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import conf_proc_inspect_provenance as oracle  # noqa: E402
-from conf_proc_json import canonical_dumps  # noqa: E402
-from conf_proc_reasons import ApplianceError  # noqa: E402
+import conf_proc_reasons as reasons  # noqa: E402
+canonical_dumps = oracle.canonical_dumps
+ApplianceError = oracle.ApplianceError
 
 
 def _sha(value: int) -> str:
@@ -480,6 +485,85 @@ class ProvenanceOracleTests(unittest.TestCase):
         with self.assertRaises(ApplianceError) as ctx:
             oracle.inspect_bindings(manifest_bytes=canonical_dumps(manifest), sbom_bytes=canonical_dumps(sbom), inputs=inputs)
         self.assertEqual(ctx.exception.reason_code, "CP_PROVENANCE_BINDING")
+
+    def test_pinned_subprocess_adapter_accepts_and_rejects_content_safely(self) -> None:
+        inputs = _derive()
+        documents = {
+            "root-lock.json": _lock_bytes(),
+            "runtime-closure.json": _closure_bytes(),
+            "verity-rules.json": oracle.supported_verity_rules_bytes(),
+            "tcb.json": _tcb_bytes(),
+            "builder.py": b"literal-builder-source-v1",
+            "policy.json": b"literal-policy-v1",
+            "manifest.json": _manifest(inputs),
+            "sbom.json": _sbom(inputs),
+        }
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as base:
+            for name, data in documents.items():
+                Path(base, name).write_bytes(data)
+            command = [
+                sys.executable,
+                str(ROOT / "conf_proc_inspect_provenance_cli.py"),
+                "--root-lock", str(Path(base, "root-lock.json")),
+                "--runtime-closure", str(Path(base, "runtime-closure.json")),
+                "--verity-rules", str(Path(base, "verity-rules.json")),
+                "--tcb-identity", str(Path(base, "tcb.json")),
+                "--builder-source", str(Path(base, "builder.py")),
+                "--policy", str(Path(base, "policy.json")),
+                "--manifest", str(Path(base, "manifest.json")),
+                "--sbom", str(Path(base, "sbom.json")),
+            ]
+            accepted = subprocess.run(command, capture_output=True, check=False)
+            self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
+            self.assertTrue(oracle.canonical_loads(accepted.stdout.rstrip(b"\n"))["accepted"])
+
+            Path(base, "manifest.json").write_bytes(canonical_dumps({"schema": "tampered"}))
+            rejected = subprocess.run(command, capture_output=True, check=False)
+            self.assertEqual(rejected.returncode, 1)
+            result = oracle.canonical_loads(rejected.stdout.rstrip(b"\n"))
+            self.assertFalse(result["accepted"])
+            self.assertNotIn(base.encode(), rejected.stdout + rejected.stderr)
+
+            unknown = subprocess.run(
+                [sys.executable, str(ROOT / "conf_proc_inspect_provenance_cli.py"), "--unexpected", "/secret/example"],
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(unknown.returncode, 1)
+            self.assertEqual(unknown.stderr, b"")
+            self.assertEqual(oracle.canonical_loads(unknown.stdout.rstrip(b"\n"))["reason_code"], "CP_PROVENANCE_ARGUMENTS")
+            self.assertNotIn(b"/secret/example", unknown.stdout + unknown.stderr)
+
+            Path(base, "manifest.json").unlink()
+            os.symlink(str(Path(base, "sbom.json")), str(Path(base, "manifest.json")))
+            symlinked = subprocess.run(command, capture_output=True, check=False)
+            self.assertEqual(symlinked.returncode, 1)
+            self.assertEqual(oracle.canonical_loads(symlinked.stdout.rstrip(b"\n"))["reason_code"], "CP_PROVENANCE_INPUT_READ")
+
+    def test_subprocess_only_import_dag_and_reason_registry(self) -> None:
+        forbidden = {"conf_proc_inspect_provenance", "conf_proc_inspect_provenance_cli"}
+        for path in ROOT.glob("*.py"):
+            if path.name in {"conf_proc_inspect_provenance.py", "conf_proc_inspect_provenance_cli.py"}:
+                continue
+            tree = ast.parse(path.read_text(), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imported = {alias.name for alias in node.names}
+                elif isinstance(node, ast.ImportFrom):
+                    imported = {node.module} if node.module is not None else set()
+                else:
+                    continue
+                self.assertTrue(imported.isdisjoint(forbidden), f"{path.name} imports sealed provenance code")
+        adapter_codes = {
+            "CP_PROVENANCE_INPUT_SIZE",
+            "CP_PROVENANCE_INPUT_READ",
+            "CP_PROVENANCE_INPUT_CHANGED",
+            "CP_PROVENANCE_ORACLE_DIGEST",
+            "CP_PROVENANCE_ORACLE_LOAD",
+            "CP_PROVENANCE_ORACLE_INTERNAL",
+            "CP_PROVENANCE_ARGUMENTS",
+        }
+        self.assertTrue(adapter_codes <= reasons.ALL_REASON_CODES)
 
 
 if __name__ == "__main__":
