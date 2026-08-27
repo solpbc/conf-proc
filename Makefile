@@ -7,7 +7,7 @@ install:
 	.venv/bin/python -m pip install -r requirements.txt
 
 check:
-	$(PYTHON) -m compileall -q verifier.py ratls_contract.py ratls_collector.py ratls_gateway.py spp_health.py asr_shim.py strict_wav.py conf_proc_reasons.py conf_proc_json.py conf_proc_acl.py conf_proc_module_sig.py conf_proc_lock.py conf_proc_policy.py test/python-verifier-selftest.py test/fake-ratls-collector.py test/ratls-gateway-selftest.py test/spp-health-selftest.py test/asr-shim-selftest.py test/conf-proc-format-selftest.py
+	$(PYTHON) -m compileall -q verifier.py ratls_contract.py ratls_collector.py ratls_gateway.py spp_health.py asr_shim.py strict_wav.py conf_proc_reasons.py conf_proc_json.py conf_proc_acl.py conf_proc_module_sig.py conf_proc_lock.py conf_proc_policy.py conf_proc_guard.py test/python-verifier-selftest.py test/fake-ratls-collector.py test/ratls-gateway-selftest.py test/spp-health-selftest.py test/asr-shim-selftest.py test/conf-proc-format-selftest.py test/conf-proc-guard-selftest.py
 	$(PYTHON) ratls_contract.py check
 	bash -n run-collector.sh
 
@@ -17,6 +17,7 @@ test:
 	$(PYTHON) test/spp-health-selftest.py
 	$(PYTHON) test/asr-shim-selftest.py
 	$(PYTHON) test/conf-proc-format-selftest.py
+	$(PYTHON) test/conf-proc-guard-selftest.py
 
 ci: check test
 
