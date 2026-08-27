@@ -186,8 +186,7 @@ class AclCodecTests(unittest.TestCase):
         except ApplianceError as exc:
             if "ENOTSUP" not in str(exc) and not isinstance(exc.__cause__, OSError):
                 raise
-            self.skipTest("filesystem does not support xattrs")
-            return
+            self.fail("required filesystem POSIX ACL/xattr support is unavailable")
         self.assertEqual(acl.read_acl(target_file), entries)
 
         acl.write_acl(base, entries, default=True)

@@ -29,7 +29,7 @@ def _find_tool(*candidates: str) -> str:
     for candidate in candidates:
         if os.path.exists(candidate):
             return candidate
-    raise unittest.SkipTest(f"none of {candidates} present on this host")
+    raise AssertionError(f"required real tool missing: none of {candidates} is present")
 
 
 MKSQUASHFS = _find_tool("/usr/bin/mksquashfs", "/sbin/mksquashfs")

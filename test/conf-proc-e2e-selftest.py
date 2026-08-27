@@ -275,7 +275,7 @@ class _Fixture:
             candidate = os.path.join(prefix, component)
             if os.path.isfile(candidate):
                 return candidate
-        raise unittest.SkipTest(f"required tool {component!r} not present on this host")
+        raise AssertionError(f"required real tool {component!r} is not present on this host")
 
 
 class EndToEndTests(unittest.TestCase):
