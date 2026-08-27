@@ -23,9 +23,11 @@ from conf_proc_guard import HermeticGuard
 from conf_proc_lock import Lock
 from conf_proc_prohibited import check_content_markers, check_prohibited_path
 from conf_proc_reasons import (
+    CP_LOCK_SIZE_MISMATCH,
     CP_SQUASHFS_EXTRACT,
     CP_TREE_METADATA,
     CP_TREE_MISSING,
+    CP_TREE_NODE_TYPE,
     CP_TREE_SOURCE_BINDING,
     CP_TREE_SYMLINK,
     CP_TREE_UNEXPECTED,
@@ -144,7 +146,7 @@ def compare_against_lock(inventory: dict[str, InventoryNode], lock: Lock, *, ima
 
         if node.node_type != placement.node_type:
             raise ApplianceError(
-                CP_TREE_UNSUPPORTED_NODE,
+                CP_TREE_NODE_TYPE,
                 f"{path}: built node_type {node.node_type!r} does not match declared {placement.node_type!r}",
             )
         if node.mode != placement.mode or node.uid != placement.uid or node.gid != placement.gid:
@@ -157,6 +159,11 @@ def compare_against_lock(inventory: dict[str, InventoryNode], lock: Lock, *, ima
             raise ApplianceError(CP_TREE_METADATA, f"{path}: built xattrs {node.xattrs} do not match declared {placement.xattrs}")
 
         if placement.node_type == "file":
+            if node.size != lock_input.size_bytes:
+                raise ApplianceError(
+                    CP_LOCK_SIZE_MISMATCH,
+                    f"{path}: built size {node.size} does not match locked size_bytes {lock_input.size_bytes} for input {lock_input.id}",
+                )
             if node.sha256 != lock_input.sha256:
                 raise ApplianceError(
                     CP_TREE_SOURCE_BINDING,

@@ -14,9 +14,10 @@ internally coherent.
 from __future__ import annotations
 
 from conf_proc_lock import Lock
-from conf_proc_reasons import CP_SBOM_DIFF, ApplianceError
+from conf_proc_reasons import CP_SBOM_DIFF, CP_SBOM_MAPPING, ApplianceError
 from conf_proc_sbom import (
     APPLIANCE_PACKAGE_ID,
+    PACKAGE_PURPOSE_BY_ROLE,
     RELATIONSHIP_BUILD_TOOL_OF,
     RELATIONSHIP_CONTAINS,
     RELATIONSHIP_GENERATED_FROM,
@@ -39,6 +40,7 @@ def compare_sbom(sbom: Sbom, lock: Lock) -> None:
     raw = sbom.raw
     actual_package_ids = {entry["SPDXID"] for entry in raw["packages"]}
     actual_package_checksum = {entry["SPDXID"]: entry["checksums"][0]["checksumValue"] for entry in raw["packages"]}
+    actual_package_purpose = {entry["SPDXID"]: entry["primaryPackagePurpose"] for entry in raw["packages"]}
     actual_file_ids = {entry["SPDXID"] for entry in raw["files"]}
     actual_file_checksum = {entry["SPDXID"]: entry["checksums"][0]["checksumValue"] for entry in raw["files"]}
     actual_relationships = {
@@ -51,6 +53,13 @@ def compare_sbom(sbom: Sbom, lock: Lock) -> None:
             raise ApplianceError(CP_SBOM_DIFF, f"missing SPDX package for locked input {lock_input.id!r}")
         if actual_package_checksum[pid] != lock_input.sha256:
             raise ApplianceError(CP_SBOM_DIFF, f"SPDX package {pid} checksum does not match locked sha256 for {lock_input.id!r}")
+        expected_purpose = PACKAGE_PURPOSE_BY_ROLE[lock_input.role]
+        if actual_package_purpose[pid] != expected_purpose:
+            raise ApplianceError(
+                CP_SBOM_MAPPING,
+                f"SPDX package {pid} primaryPackagePurpose {actual_package_purpose[pid]!r} does not match the "
+                f"expected mapping {expected_purpose!r} for role {lock_input.role!r}",
+            )
 
         expected_relationship_type = (
             RELATIONSHIP_BUILD_TOOL_OF

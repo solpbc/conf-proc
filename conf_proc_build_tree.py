@@ -20,7 +20,7 @@ import os
 from conf_proc_guard import HermeticGuard
 from conf_proc_lock import Lock, LockInput, Placement
 from conf_proc_prohibited import check_content_markers, check_prohibited_path
-from conf_proc_reasons import CP_LOCK_DIGEST_MISMATCH, CP_TREE_UNEXPECTED, CP_TREE_XATTR, ApplianceError
+from conf_proc_reasons import CP_LOCK_DIGEST_MISMATCH, CP_LOCK_SIZE_MISMATCH, CP_TREE_UNEXPECTED, CP_TREE_XATTR, ApplianceError
 from conf_proc_tree_rules import (
     ALLOWED_XATTRS,
     classify_node_type,
@@ -80,6 +80,11 @@ def _materialize(
         node_type = classify_node_type(source_stat.st_mode)
         validate_node_metadata(source_path, mode=source_stat.st_mode, node_type=node_type, nlink=source_stat.st_nlink)
         content = guard.read_bytes(source_path)
+        if len(content) != lock_input.size_bytes:
+            raise ApplianceError(
+                CP_LOCK_SIZE_MISMATCH,
+                f"{lock_input.id}: source content is {len(content)} bytes, locked size_bytes is {lock_input.size_bytes}",
+            )
         actual_sha256 = hashlib.sha256(content).hexdigest()
         if actual_sha256 != lock_input.sha256:
             raise ApplianceError(

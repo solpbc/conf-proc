@@ -36,7 +36,7 @@ from conf_proc_module_authority import check_authorized_signers_match_bundle
 from conf_proc_policy import parse_policy
 from conf_proc_prohibited import check_future_cmdline
 from conf_proc_promote import promote
-from conf_proc_reasons import CP_LOCK_DIGEST_MISMATCH, CP_LOCK_ROLE, CP_PROMOTE_INSPECTION, ApplianceError
+from conf_proc_reasons import CP_LOCK_DIGEST_MISMATCH, CP_LOCK_ROLE, CP_PROMOTE_INSPECTION, CP_PROMOTE_STAGING, ApplianceError
 
 IMAGES = ("runtime-policy", "models")
 
@@ -70,7 +70,10 @@ def build(
     fault_hook("post_guard_built")
 
     staging_root = os.path.join(promote_root, ".staging", f"{lock_digest.hex()[:16]}-{uuid.uuid4().hex[:8]}")
-    os.makedirs(staging_root)
+    try:
+        os.makedirs(staging_root)
+    except OSError as exc:
+        raise ApplianceError(CP_PROMOTE_STAGING, f"could not create staging directory {staging_root!r}: {exc}") from exc
     fault_hook("post_staging_created")
 
     trusted_bundle_input = next(i for i in lock.inputs if i.role == "kernel_trusted_cert_bundle")

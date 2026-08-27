@@ -213,7 +213,7 @@ class ModuleVerificationTests(unittest.TestCase):
                 self.guard, openssl_path=OPENSSL, lock=self.lock, trusted_bundle_pem_path=self.trusted_bundle_pem_path,
                 staging_root=self.staging_root, image="runtime-policy", work_dir=self.base,
             )
-        self.assertEqual(ctx.exception.reason_code, "CP_TOOL_INVOCATION_FAILED")
+        self.assertEqual(ctx.exception.reason_code, "CP_MODULE_CMS_VERIFY")
 
     def test_authorized_signers_must_exactly_match_bundle(self) -> None:
         module_authority.check_authorized_signers_match_bundle(self.lock, self.trusted_bundle_bytes)

@@ -62,20 +62,23 @@ def rederive_verity(
     expected_build_epoch = derive_build_epoch(lock_digest)
 
     fresh_hash_path = os.path.join(work_dir, f"{image_id}.recomputed.verity")
-    result = guard.run_tool(
-        [
-            veritysetup_path,
-            "format",
-            candidate_squashfs_path,
-            fresh_hash_path,
-            f"--data-block-size={VERITY_DATA_BLOCK_SIZE}",
-            f"--hash-block-size={VERITY_HASH_BLOCK_SIZE}",
-            f"--hash={VERITY_HASH_ALGORITHM}",
-            f"--salt={expected_salt}",
-            f"--uuid={expected_uuid}",
-        ],
-        cwd=work_dir,
-    )
+    try:
+        result = guard.run_tool(
+            [
+                veritysetup_path,
+                "format",
+                candidate_squashfs_path,
+                fresh_hash_path,
+                f"--data-block-size={VERITY_DATA_BLOCK_SIZE}",
+                f"--hash-block-size={VERITY_HASH_BLOCK_SIZE}",
+                f"--hash={VERITY_HASH_ALGORITHM}",
+                f"--salt={expected_salt}",
+                f"--uuid={expected_uuid}",
+            ],
+            cwd=work_dir,
+        )
+    except ApplianceError as exc:
+        raise ApplianceError(CP_VERITY_FORMAT, f"independent re-derivation of {image_id!r} failed: {exc}") from exc
     recomputed_root_hash = _parse_root_hash(result.stdout.decode("utf-8"))
 
     return VerityRederivation(

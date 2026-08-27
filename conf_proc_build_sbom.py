@@ -20,6 +20,7 @@ from conf_proc_sbom import (
     CREATOR_TOOL,
     DATA_LICENSE,
     DOCUMENT_SPDX_ID,
+    PACKAGE_PURPOSE_BY_ROLE,
     RELATIONSHIP_BUILD_TOOL_OF,
     RELATIONSHIP_CONTAINS,
     RELATIONSHIP_GENERATED_FROM,
@@ -34,24 +35,6 @@ from conf_proc_sbom import (
 )
 
 
-_PACKAGE_PURPOSE_BY_ROLE = {
-    "kernel": "OPERATING-SYSTEM",
-    "kernel_trusted_cert_bundle": "FILE",
-    "final_systemd_stub": "APPLICATION",
-    "final_systemd_unit": "APPLICATION",
-    "nvidia_cc_driver": "DEVICE",
-    "nvidia_cc_firmware": "FIRMWARE",
-    "conf_proc_source": "FILE",
-    "sglang_image": "APPLICATION",
-    "inference_model": "APPLICATION",
-    "asr_model": "APPLICATION",
-    "gateway_dependency_lock": "APPLICATION",
-    "asr_dependency_lock": "APPLICATION",
-    "runtime_tree_input": "FILE",
-    "policy_tree_input": "FILE",
-    "models_tree_input": "FILE",
-    "build_tool": "APPLICATION",
-}
 _RUNTIME_DEPENDENCY_ROLES = frozenset(
     {"sglang_image", "inference_model", "asr_model", "gateway_dependency_lock", "asr_dependency_lock"}
 )
@@ -93,7 +76,7 @@ def build_sbom_bytes(lock: Lock, lock_digest: bytes) -> bytes:
                 "supplier": "NOASSERTION",
                 "originator": "NOASSERTION",
                 "checksums": [{"algorithm": "SHA256", "checksumValue": lock_input.sha256}],
-                "primaryPackagePurpose": _PACKAGE_PURPOSE_BY_ROLE[lock_input.role],
+                "primaryPackagePurpose": PACKAGE_PURPOSE_BY_ROLE[lock_input.role],
             }
         )
         if lock_input.role == "build_tool":

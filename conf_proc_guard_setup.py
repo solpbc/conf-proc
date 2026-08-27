@@ -17,7 +17,7 @@ from typing import Final
 from conf_proc_geometry import derive_build_epoch
 from conf_proc_guard import HermeticGuard, ToolDeclaration
 from conf_proc_lock import Lock
-from conf_proc_reasons import CP_TOOL_MISSING, ApplianceError
+from conf_proc_reasons import CP_TOOL_MISSING, CP_TOOL_PATH_ESCAPE, ApplianceError
 
 
 _TOOL_SEARCH_SUBDIRS: Final = ("usr/sbin", "usr/bin", "sbin", "bin")
@@ -27,6 +27,8 @@ _FIXED_ENV: Final = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C", "TZ
 def resolve_tool_absolute_path(tool_root: str, component: str) -> str:
     """Resolve a build tool's real installed path under standard bin dirs."""
 
+    if not component or "/" in component or component in (".", ".."):
+        raise ApplianceError(CP_TOOL_PATH_ESCAPE, f"build tool component must be a bare executable name, got {component!r}")
     for subdir in _TOOL_SEARCH_SUBDIRS:
         candidate = os.path.join(tool_root, subdir, component)
         if os.path.isfile(candidate):

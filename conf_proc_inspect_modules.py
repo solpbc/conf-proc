@@ -18,7 +18,14 @@ from conf_proc_guard import HermeticGuard
 from conf_proc_lock import Lock
 from conf_proc_module_authority import check_authorized_signers_match_bundle, decode_certificate_bundle  # noqa: F401
 from conf_proc_module_sig import PKEY_ID_PKCS7, split_module_signature
-from conf_proc_reasons import CP_MODULE_KEYRING, CP_MODULE_SIGNER, ApplianceError
+from conf_proc_reasons import (
+    CP_FIRMWARE_INVENTORY,
+    CP_MODULE_CMS_VERIFY,
+    CP_MODULE_COMPRESSED_UNSUPPORTED,
+    CP_MODULE_KEYRING,
+    CP_MODULE_SIGNER,
+    ApplianceError,
+)
 
 
 def rederive_module_authority(
@@ -44,6 +51,11 @@ def rederive_module_authority(
             path = placement.path
             extracted_path = os.path.join(extract_dir, path.lstrip("/"))
 
+            if path.endswith(".ko.zst"):
+                raise ApplianceError(
+                    CP_MODULE_COMPRESSED_UNSUPPORTED,
+                    f"{path}: .ko.zst modules require a declared zstdcat build tool, which is not yet supported",
+                )
             if path.endswith(".ko"):
                 signer_sha256 = _reverify_module(
                     guard, openssl_path=openssl_path, module_path=extracted_path,
@@ -68,7 +80,7 @@ def compare_module_authority(
     if rederived_modules != claimed_module_authority["module_inventory"]:
         raise ApplianceError(CP_MODULE_KEYRING, "emitted module_inventory does not match independent re-verification")
     if rederived_firmware != claimed_module_authority["firmware_inventory"]:
-        raise ApplianceError(CP_MODULE_KEYRING, "emitted firmware_inventory does not match independent inventory")
+        raise ApplianceError(CP_FIRMWARE_INVENTORY, "emitted firmware_inventory does not match independent inventory")
 
 
 def _reverify_module(
@@ -96,14 +108,17 @@ def _reverify_module(
     with open(sig_path, "wb") as handle:
         handle.write(signature_data)
 
-    guard.run_tool(
-        [
-            openssl_path, "cms", "-verify", "-binary", "-inform", "DER",
-            "-in", sig_path, "-content", content_path,
-            "-noverify", "-signer", extracted_signer_path, "-out", os.devnull,
-        ],
-        cwd=work_dir,
-    )
+    try:
+        guard.run_tool(
+            [
+                openssl_path, "cms", "-verify", "-binary", "-inform", "DER",
+                "-in", sig_path, "-content", content_path,
+                "-noverify", "-signer", extracted_signer_path, "-out", os.devnull,
+            ],
+            cwd=work_dir,
+        )
+    except ApplianceError as exc:
+        raise ApplianceError(CP_MODULE_CMS_VERIFY, f"{module_path}: CMS signature is not internally valid: {exc}") from exc
     with open(extracted_signer_path, "rb") as handle:
         extracted_signer_bytes = handle.read()
     fingerprints = decode_certificate_bundle(extracted_signer_bytes)
@@ -113,12 +128,15 @@ def _reverify_module(
     if signer_sha256 not in authorized:
         raise ApplianceError(CP_MODULE_SIGNER, f"{module_path}: signer {signer_sha256} is not in the lock's authorized signer set")
 
-    guard.run_tool(
-        [
-            openssl_path, "cms", "-verify", "-binary", "-inform", "DER",
-            "-in", sig_path, "-content", content_path,
-            "-CAfile", trusted_bundle_pem_path, "-no-CApath", "-purpose", "any", "-out", os.devnull,
-        ],
-        cwd=work_dir,
-    )
+    try:
+        guard.run_tool(
+            [
+                openssl_path, "cms", "-verify", "-binary", "-inform", "DER",
+                "-in", sig_path, "-content", content_path,
+                "-CAfile", trusted_bundle_pem_path, "-no-CApath", "-purpose", "any", "-out", os.devnull,
+            ],
+            cwd=work_dir,
+        )
+    except ApplianceError as exc:
+        raise ApplianceError(CP_MODULE_CMS_VERIFY, f"{module_path}: CMS trust-path verification against the locked bundle failed: {exc}") from exc
     return signer_sha256

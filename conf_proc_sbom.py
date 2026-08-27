@@ -31,6 +31,27 @@ RELATIONSHIP_GENERATED_FROM: Final = "GENERATED_FROM"
 RELATIONSHIP_BUILD_TOOL_OF: Final = "BUILD_TOOL_OF"
 RELATIONSHIP_RUNTIME_DEPENDENCY_OF: Final = "RUNTIME_DEPENDENCY_OF"
 
+# Deterministic role -> SPDX primaryPackagePurpose mapping. A pure lookup
+# table, shared by builder and inspector so both classify identically.
+PACKAGE_PURPOSE_BY_ROLE: Final = {
+    "kernel": "OPERATING-SYSTEM",
+    "kernel_trusted_cert_bundle": "FILE",
+    "final_systemd_stub": "APPLICATION",
+    "final_systemd_unit": "APPLICATION",
+    "nvidia_cc_driver": "DEVICE",
+    "nvidia_cc_firmware": "FIRMWARE",
+    "conf_proc_source": "FILE",
+    "sglang_image": "APPLICATION",
+    "inference_model": "APPLICATION",
+    "asr_model": "APPLICATION",
+    "gateway_dependency_lock": "APPLICATION",
+    "asr_dependency_lock": "APPLICATION",
+    "runtime_tree_input": "FILE",
+    "policy_tree_input": "FILE",
+    "models_tree_input": "FILE",
+    "build_tool": "APPLICATION",
+}
+
 _TOP_KEYS: Final = frozenset(
     {
         "spdxVersion",

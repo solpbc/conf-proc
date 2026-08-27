@@ -26,7 +26,7 @@ from conf_proc_geometry import (
     pad_file_to_block_size,
 )
 from conf_proc_guard import HermeticGuard
-from conf_proc_reasons import CP_VERITY_FORMAT, CP_VERITY_VERIFY, ApplianceError
+from conf_proc_reasons import CP_SQUASHFS_BUILD, CP_VERITY_FORMAT, CP_VERITY_VERIFY, ApplianceError
 
 
 @dataclass(frozen=True)
@@ -96,24 +96,30 @@ def build_image(
     ]
     if pseudo_file_path is not None:
         argv.extend(["-pf", pseudo_file_path])
-    guard.run_tool(argv, cwd=staging_dir)
+    try:
+        guard.run_tool(argv, cwd=staging_dir)
+    except ApplianceError as exc:
+        raise ApplianceError(CP_SQUASHFS_BUILD, f"mksquashfs failed for image {image_id!r}: {exc}") from exc
     pad_file_to_block_size(squashfs_path, VERITY_DATA_BLOCK_SIZE)
 
     hash_device_path = os.path.join(staging_dir, f"{image_id}.verity")
-    result = guard.run_tool(
-        [
-            veritysetup_path,
-            "format",
-            squashfs_path,
-            hash_device_path,
-            f"--data-block-size={VERITY_DATA_BLOCK_SIZE}",
-            f"--hash-block-size={VERITY_HASH_BLOCK_SIZE}",
-            f"--hash={VERITY_HASH_ALGORITHM}",
-            f"--salt={salt}",
-            f"--uuid={uuid_str}",
-        ],
-        cwd=staging_dir,
-    )
+    try:
+        result = guard.run_tool(
+            [
+                veritysetup_path,
+                "format",
+                squashfs_path,
+                hash_device_path,
+                f"--data-block-size={VERITY_DATA_BLOCK_SIZE}",
+                f"--hash-block-size={VERITY_HASH_BLOCK_SIZE}",
+                f"--hash={VERITY_HASH_ALGORITHM}",
+                f"--salt={salt}",
+                f"--uuid={uuid_str}",
+            ],
+            cwd=staging_dir,
+        )
+    except ApplianceError as exc:
+        raise ApplianceError(CP_VERITY_FORMAT, f"veritysetup format failed for image {image_id!r}: {exc}") from exc
     root_hash = _parse_root_hash(result.stdout.decode("utf-8"))
 
     try:
