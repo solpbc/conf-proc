@@ -73,12 +73,37 @@ def _lock_bytes(
     )
 
 
-def _closure_bytes(content_sha: str = _sha(1)) -> bytes:
+def _closure_bytes(
+    content_sha: str = _sha(1),
+    *,
+    builder_source_bytes: bytes = b"literal-builder-source-v1",
+) -> bytes:
+    builder_sha = hashlib.sha256(builder_source_bytes).hexdigest()
     return canonical_dumps(
         {
             "schema": "conf-proc-runtime-closure/v1",
             "status": "declared_unverified",
             "entries": [
+                {
+                    "path": "/opt/conf-proc/conf_proc_build.py",
+                    "node_type": "file",
+                    "mode": 420,
+                    "uid": 0,
+                    "gid": 0,
+                    "size_bytes": len(builder_source_bytes),
+                    "sha256": builder_sha,
+                    "symlink_target": None,
+                    "hardlink_group": None,
+                    "xattrs": [],
+                    "capabilities": [],
+                    "logical_role": "conf_proc_source",
+                    "provenance": {
+                        "scheme": "git",
+                        "identity": "conf-proc",
+                        "immutable_ref": "sha256:" + builder_sha,
+                    },
+                    "root_lock_input_id": "builder",
+                },
                 {
                     "path": "/usr/bin/python3",
                     "node_type": "file",
@@ -140,6 +165,10 @@ def _derive(**overrides) -> oracle.ProvenanceInputs:
         values["root_lock_bytes"] = _lock_bytes(
             builder_source_bytes=values["builder_source_bytes"],
             policy_bytes=values["policy_bytes"],
+        )
+    if "runtime_closure_bytes" not in overrides and "builder_source_bytes" in overrides:
+        values["runtime_closure_bytes"] = _closure_bytes(
+            builder_source_bytes=values["builder_source_bytes"]
         )
     return oracle.derive_inputs(**values)
 
@@ -270,12 +299,12 @@ class ProvenanceOracleTests(unittest.TestCase):
     def test_literal_digest_vectors(self) -> None:
         inputs = _derive()
         self.assertEqual(inputs.artifact_input_sha256, "d9ffc9c74eaa93d4e3f70710e8ef3cb50fc5ebb9b2e1016aeda42cd6b8606572")
-        self.assertEqual(inputs.runtime_closure_sha256, "6d16ba7030d006121a1ccfd02594b1e0961cc6a63a290d75c9125987f8c73b8a")
+        self.assertEqual(inputs.runtime_closure_sha256, "24443b321ba60bfbed17c74858def0d6cd371ac88e81a4870315e5a3eb43d53c")
         self.assertEqual(inputs.verity_rules_sha256, "aece6264c1666c9b83f80756842ace68a9ed74a9cad42a9758699d961605e059")
         self.assertEqual(inputs.tcb_identity_sha256, "2edbe10694ed9914152a2b98ab357a1906f6a1ca2fda15fed71926ee34e479eb")
         self.assertEqual(inputs.builder_source_sha256, "9654bf8dfd2eccdce8dc5928f89d6c07402efffdd438fdeaeb2c8aa2955a08c1")
         self.assertEqual(inputs.policy_sha256, "08d682587e22c75261b7466108dac1bc7ac486bf03835f986fcdb7f486587f1b")
-        self.assertEqual(inputs.execution_provenance_sha256, "2a7b52b091c0bb6c0aa077d353883c8fde1d7d6072771350724eb2c0f1d9d33f")
+        self.assertEqual(inputs.execution_provenance_sha256, "1da3f668ad10ab72ea7c90f4030b26d278986f1cf3d51e503b1acd1a8f1f177e")
 
     def test_artifact_and_execution_identity_truth_table(self) -> None:
         baseline = _derive()
@@ -292,8 +321,8 @@ class ProvenanceOracleTests(unittest.TestCase):
         # execution identities; these are independently pinned literals.
         left = _derive(builder_source_bytes=b"ab", policy_bytes=b"c")
         right = _derive(builder_source_bytes=b"a", policy_bytes=b"bc")
-        self.assertEqual(left.execution_provenance_sha256, "f397c8c661561461be2ed8eb097dbe21eabc6b27e63ec80db368254c937cdf5e")
-        self.assertEqual(right.execution_provenance_sha256, "1ced6de9e102fe411498d6d0363030289a6c7ba4a542522a83580d359096e911")
+        self.assertEqual(left.execution_provenance_sha256, "b0b137bfe8faad501be023f54b2dffc2c1ed316aeeb4c3d37c685fd98e9b8da6")
+        self.assertEqual(right.execution_provenance_sha256, "96730dfded57febd45c530eadc47f77748261ec5363585177009b05befcf0423")
         self.assertNotEqual(left.execution_provenance_sha256, right.execution_provenance_sha256)
 
     def test_reject_root_lock_authority_disagreement(self) -> None:
@@ -319,6 +348,14 @@ class ProvenanceOracleTests(unittest.TestCase):
                 _derive(runtime_closure_bytes=canonical_dumps(raw))
             self.assertEqual(ctx.exception.reason_code, "CP_PROVENANCE_AUTHORITY")
 
+    def test_reject_multiple_designated_builder_sources(self) -> None:
+        raw = oracle.canonical_loads(_closure_bytes())
+        duplicate = {**raw["entries"][0], "path": "/opt/conf-proc/other.py"}
+        raw["entries"] = [raw["entries"][0], duplicate, raw["entries"][1]]
+        with self.assertRaises(ApplianceError) as ctx:
+            _derive(runtime_closure_bytes=canonical_dumps(raw))
+        self.assertEqual(ctx.exception.reason_code, "CP_PROVENANCE_AUTHORITY")
+
     def test_reject_impossible_hardlink_metadata(self) -> None:
         raw = oracle.canonical_loads(_closure_bytes())
         first = {
@@ -327,7 +364,7 @@ class ProvenanceOracleTests(unittest.TestCase):
             "hardlink_group": _sha(31),
             "root_lock_input_id": None,
         }
-        second = {**first, "path": "/b", "mode": 420}
+        second = {**first, "path": "/b", "uid": 1}
         raw["entries"] = [first, second]
         with self.assertRaises(ApplianceError) as ctx:
             oracle.parse_runtime_closure(canonical_dumps(raw))

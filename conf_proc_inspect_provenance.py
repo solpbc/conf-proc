@@ -642,15 +642,15 @@ def _verify_root_lock_authority(
         CP_PROVENANCE_AUTHORITY,
         "policy bytes disagree with the root-lock authority",
     )
-    source_digests = [
-        item.get("sha256")
-        for item in inputs.values()
-        if item.get("role") == "conf_proc_source" and _is_sha256(item.get("sha256"))
+    designated_builder_entries = [
+        entry for entry in closure["entries"] if entry["logical_role"] == "conf_proc_source"
     ]
     _require(
-        builder_source_sha256 in source_digests,
+        len(designated_builder_entries) == 1
+        and designated_builder_entries[0]["root_lock_input_id"] is not None
+        and designated_builder_entries[0]["sha256"] == builder_source_sha256,
         CP_PROVENANCE_AUTHORITY,
-        "builder source bytes are absent from the root-lock authority",
+        "runtime closure must designate exactly one root-lock-authorized builder source",
     )
     for entry in closure["entries"]:
         input_id = entry["root_lock_input_id"]
