@@ -329,6 +329,29 @@ class EndToEndTests(unittest.TestCase):
         second_digests = {name: _sha256_file(os.path.join(second, name)) for name in PROMOTED_BUNDLE_FILES}
         self.assertEqual(first_digests, second_digests)
 
+    def test_reproducible_under_different_timezone_and_locale(self) -> None:
+        first = self._build()
+        first_digests = {name: _sha256_file(os.path.join(first, name)) for name in PROMOTED_BUNDLE_FILES}
+        shutil.rmtree(first)
+
+        old_tz = os.environ.get("TZ")
+        old_locale = os.environ.get("LC_ALL")
+        os.environ["TZ"] = "Pacific/Kiritimati"
+        os.environ["LC_ALL"] = "C.UTF-8"
+        try:
+            second = self._build()
+        finally:
+            if old_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old_tz
+            if old_locale is None:
+                os.environ.pop("LC_ALL", None)
+            else:
+                os.environ["LC_ALL"] = old_locale
+        second_digests = {name: _sha256_file(os.path.join(second, name)) for name in PROMOTED_BUNDLE_FILES}
+        self.assertEqual(first_digests, second_digests)
+
     def test_concurrent_builds_same_digest_produce_exactly_one_bundle(self) -> None:
         results = [None, None]
         errors = [None, None]
@@ -401,6 +424,21 @@ class EndToEndTests(unittest.TestCase):
         # The original destination must be untouched.
         after_digests = {name: _sha256_file(os.path.join(first, name)) for name in PROMOTED_BUNDLE_FILES}
         self.assertEqual(first_digests, after_digests)
+
+    def test_missing_required_tool_fails_loud_not_skips(self) -> None:
+        # AC15: absence of a required tool must be a hard, reason-coded
+        # failure -- never a silently-skipped green run.
+        empty_tool_root = os.path.join(self.base, "empty-tool-root")
+        os.makedirs(empty_tool_root)
+        with self.assertRaises(ApplianceError) as ctx:
+            build_cli.build(
+                lock_path=self.fixture.lock_path, policy_path=self.fixture.policy_path,
+                input_root=self.fixture.input_root, tool_root=empty_tool_root,
+                promote_root=self.fixture.promote_root,
+            )
+        self.assertEqual(ctx.exception.reason_code, "CP_TOOL_MISSING")
+        promoted_root = os.path.join(self.fixture.promote_root, "promoted")
+        self.assertFalse(os.path.isdir(promoted_root) and os.listdir(promoted_root))
 
 
 if __name__ == "__main__":
