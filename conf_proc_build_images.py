@@ -56,31 +56,47 @@ def build_image(
     image_id: str,
     lock_digest: bytes,
     staging_dir: str,
+    pseudo_file_path: str | None = None,
+    root_mode: int = 0o755,
+    root_uid: int = 0,
+    root_gid: int = 0,
 ) -> ImageArtifact:
-    """Build one deterministic squashfs + dm-verity image pair."""
+    """Build one deterministic squashfs + dm-verity image pair.
+
+    ``pseudo_file_path``, when given, is a mksquashfs pseudo-file definition
+    list forcing every declared node's mode/uid/gid regardless of the
+    (rootless) building user's own ambient ownership -- see
+    conf_proc_build_tree.py, which is the only caller expected to set it.
+    """
 
     build_epoch = derive_build_epoch(lock_digest)
     salt = derive_verity_salt(lock_digest, image_id)
     uuid_str = derive_verity_uuid(lock_digest, image_id)
 
     squashfs_path = os.path.join(staging_dir, f"{image_id}.squashfs")
-    guard.run_tool(
-        [
-            mksquashfs_path,
-            tree_dir,
-            squashfs_path,
-            "-noappend",
-            "-quiet",
-            "-no-progress",
-            "-all-time",
-            str(build_epoch),
-            "-mkfs-time",
-            str(build_epoch),
-            "-comp",
-            SQUASHFS_COMPRESSION,
-        ],
-        cwd=staging_dir,
-    )
+    argv = [
+        mksquashfs_path,
+        tree_dir,
+        squashfs_path,
+        "-noappend",
+        "-quiet",
+        "-no-progress",
+        "-all-time",
+        str(build_epoch),
+        "-mkfs-time",
+        str(build_epoch),
+        "-comp",
+        SQUASHFS_COMPRESSION,
+        "-root-mode",
+        oct(root_mode)[2:],
+        "-root-uid",
+        str(root_uid),
+        "-root-gid",
+        str(root_gid),
+    ]
+    if pseudo_file_path is not None:
+        argv.extend(["-pf", pseudo_file_path])
+    guard.run_tool(argv, cwd=staging_dir)
     pad_file_to_block_size(squashfs_path, VERITY_DATA_BLOCK_SIZE)
 
     hash_device_path = os.path.join(staging_dir, f"{image_id}.verity")
