@@ -15,7 +15,7 @@ import hashlib
 import posixpath
 import threading
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Final, Protocol
 
@@ -164,7 +164,7 @@ class KernelFeatureContract:
 
 @dataclass(frozen=True)
 class BootContract:
-    predecessor_sha256: dict[str, str]
+    predecessor_sha256: tuple[tuple[str, str], ...]
     image_order: tuple[str, str]
     boot_modules: tuple[ModuleIdentity, ...]
     serving_modules: tuple[ModuleIdentity, ...]
@@ -214,6 +214,9 @@ class PredictedPartition:
     role: str
     type_guid: str
     partuuid: str
+    start_lba: int
+    end_lba: int
+    size_bytes: int
     image_id: str
     payload: str
     expected_bytes: int
@@ -231,6 +234,72 @@ class PredictedGPTPlan:
     partitions: tuple[PredictedPartition, ...]
     prediction_status: str = "predicted"
     physical_qualification: str = "not_physical_qualified"
+
+
+@dataclass(frozen=True)
+class PartitionLocator:
+    """One predicted partition locator, including its exact logical range."""
+
+    ordinal: int
+    type_guid: str
+    partuuid: str
+    start_lba: int
+    end_lba: int
+    size_bytes: int
+
+
+@dataclass(frozen=True)
+class VerityPair:
+    """All immutable inputs required to map and verify one verity image pair."""
+
+    image_id: str
+    data_partition: PartitionLocator
+    hash_partition: PartitionLocator
+    data_sha256: str
+    data_size_bytes: int
+    hash_sha256: str
+    hash_size_bytes: int
+    root_hash: str
+    verity_uuid: str
+    salt: str
+    data_block_size: int
+    hash_block_size: int
+
+
+@dataclass(frozen=True)
+class _ManifestImageSnapshot:
+    image_id: str
+    squashfs_sha256: str
+    squashfs_size_bytes: int
+    hash_device_sha256: str
+    hash_device_size_bytes: int
+    root_hash: str
+    verity_uuid: str
+    salt: str
+    data_block_size: int
+    hash_block_size: int
+
+
+@dataclass(frozen=True)
+class _PolicyRuntimeSnapshot:
+    runtime_policy_destination: str
+    models_destination: str
+    executable_paths: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _BootRuntimeSnapshot:
+    cmdline: str
+    disk_locators: tuple[PartitionLocator, ...]
+    runtime_policy_verity: VerityPair
+    models_verity: VerityPair
+    runtime_policy_destination: str
+    models_destination: str
+    executable_paths: tuple[str, ...]
+    tmpfs_mounts: tuple[TmpfsDescription, ...]
+    module_entries: tuple[ModulePlanEntry, ...]
+    mutable_control_order: tuple[str, ...]
+    mutable_controls: tuple[KernelFeatureControl, ...]
 
 
 _OBSERVATION_SHAPE: Final = {
@@ -312,7 +381,11 @@ def parse_boot_contract(data: bytes) -> BootContract:
     _require(raw["mutable_control_order"] == list(_CONTROL_ORDER), CP_BOOT_SCHEMA, "mutable control order is invalid")
     _require(raw["observation_contract_sha256"] == OBSERVATION_CONTRACT_SHA256, CP_BOOT_SCHEMA, "observation shape digest is not engine-owned")
     _require(_sha(raw["gpt_layout_rules_sha256"]), CP_BOOT_SCHEMA, "GPT rules digest is invalid")
-    return BootContract(dict(digests), tuple(raw["image_order"]), boot, serving, non_runtime, tuple(parsed_mounts), tuple(raw["mutable_control_order"]), raw["observation_contract_sha256"], raw["gpt_layout_rules_sha256"])
+    return BootContract(
+        tuple(sorted(digests.items())), tuple(raw["image_order"]), boot, serving,
+        non_runtime, tuple(parsed_mounts), tuple(raw["mutable_control_order"]),
+        raw["observation_contract_sha256"], raw["gpt_layout_rules_sha256"],
+    )
 
 
 def parse_module_load_plan(data: bytes) -> ModuleLoadPlan:
@@ -341,7 +414,16 @@ def parse_gpt_layout_rules(data: bytes) -> GPTLayoutRules:
     _require(raw["schema"] == GPT_LAYOUT_RULES_SCHEMA and raw["rules_version"] == 1, CP_BOOT_GPT, "GPT layout schema is invalid")
     geometry = raw["geometry"]
     _require(type(geometry) is dict and set(geometry) == {"logical_sector_bytes", "first_partition_lba", "alignment_lba"}, CP_BOOT_GPT, "GPT geometry fields are invalid")
-    _require(geometry["logical_sector_bytes"] in (512, 4096) and type(geometry["first_partition_lba"]) is int and geometry["first_partition_lba"] > 0 and type(geometry["alignment_lba"]) is int and geometry["alignment_lba"] > 0, CP_BOOT_GPT, "GPT geometry is invalid")
+    _require(
+        geometry["logical_sector_bytes"] in (512, 4096)
+        and type(geometry["first_partition_lba"]) is int
+        and geometry["first_partition_lba"] > 0
+        and type(geometry["alignment_lba"]) is int
+        and geometry["alignment_lba"] > 0
+        and geometry["first_partition_lba"] % geometry["alignment_lba"] == 0,
+        CP_BOOT_GPT,
+        "GPT geometry is invalid",
+    )
     derivation = raw["guid_derivation"]
     _require(type(derivation) is dict and set(derivation) == {"algorithm", "disk_domain", "partuuid_domain"}, CP_BOOT_GPT, "GPT derivation fields are invalid")
     _require(derivation["algorithm"] == "sha256-rfc4122-v5-shaped/v1" and all(type(derivation[key]) is str and derivation[key] and derivation[key].isascii() for key in ("disk_domain", "partuuid_domain")), CP_BOOT_GPT, "GPT derivation is invalid")
@@ -366,25 +448,55 @@ def derive_sha256_v5_guid(root_lock_sha256: str, rules_sha256: str, domain: str,
     return str(uuid.UUID(bytes=bytes(digest)))
 
 
-def _derive_gpt_plan(root_lock_sha256: str, rules_sha256: str, rules: GPTLayoutRules, images: dict) -> PredictedGPTPlan:
+def _align_lba(value: int, alignment_lba: int) -> int:
+    return ((value + alignment_lba - 1) // alignment_lba) * alignment_lba
+
+
+def _derive_gpt_plan(
+    root_lock_sha256: str,
+    rules_sha256: str,
+    rules: GPTLayoutRules,
+    images: tuple[_ManifestImageSnapshot, ...],
+) -> PredictedGPTPlan:
     disk_guid = derive_sha256_v5_guid(root_lock_sha256, rules_sha256, rules.disk_domain, 0)
+    image_by_id = {image.image_id: image for image in images}
+    _require(set(image_by_id) == set(_IMAGE_ORDER), CP_BOOT_GPT, "manifest image coverage is unusable")
     partitions: list[PredictedPartition] = []
+    next_lba = rules.first_partition_lba
     for rule in rules.partitions:
-        image = images[rule.image_id]
+        image = image_by_id[rule.image_id]
         is_data = rule.payload == "data"
+        size_bytes = image.squashfs_size_bytes if is_data else image.hash_device_size_bytes
+        sectors = (size_bytes + rules.logical_sector_bytes - 1) // rules.logical_sector_bytes
+        _require(sectors > 0, CP_BOOT_GPT, "partition size is unusable")
+        start_lba = _align_lba(next_lba, rules.alignment_lba)
+        end_lba = start_lba + sectors - 1
+        _require(start_lba % rules.alignment_lba == 0 and end_lba >= start_lba, CP_BOOT_GPT, "partition logical alignment is invalid")
         partitions.append(PredictedPartition(
             rule.ordinal, rule.role, rule.type_guid,
             derive_sha256_v5_guid(root_lock_sha256, rules_sha256, rules.partuuid_domain, rule.ordinal),
-            rule.image_id, rule.payload,
-            image["squashfs_size_bytes"] if is_data else image["hash_device_size_bytes"],
-            image["squashfs_sha256"] if is_data else image["hash_device_sha256"],
-            image["root_hash"], image["uuid"], image["salt"], image["data_block_size"], image["hash_block_size"],
+            start_lba, end_lba, size_bytes, rule.image_id, rule.payload,
+            size_bytes, image.squashfs_sha256 if is_data else image.hash_device_sha256,
+            image.root_hash, image.verity_uuid, image.salt,
+            image.data_block_size, image.hash_block_size,
         ))
+        next_lba = end_lba + 1
+    _require(
+        all(left.end_lba < right.start_lba for left, right in zip(partitions, partitions[1:], strict=False)),
+        CP_BOOT_GPT,
+        "predicted partitions overlap",
+    )
     return PredictedGPTPlan(disk_guid, tuple(partitions))
 
 
 @dataclass(frozen=True)
 class BootBinding:
+    """Binder-issued immutable source bytes and reducer snapshot.
+
+    Parsed predecessor objects retained for inspection below are never read by
+    the reducer.  The reducer consumes only ``runtime`` and immutable bytes.
+    """
+
     root_lock_bytes: bytes
     runtime_closure_bytes: bytes
     verity_rules_bytes: bytes
@@ -409,18 +521,17 @@ class BootBinding:
     boot_contract_sha256: str
     module_plan_sha256: str
     gpt_layout_rules_sha256: str
-    provenance_inputs: ProvenanceInputs
     lock: Lock
-    runtime_closure: dict
-    verity_rules: dict
-    tcb_identity: dict
-    policy: Policy
-    manifest: ProvenanceV2Manifest
     kernel_feature_contract: KernelFeatureContract
     boot_contract: BootContract
     module_plan: ModuleLoadPlan
     gpt_layout_rules: GPTLayoutRules
     gpt_plan: PredictedGPTPlan
+    runtime: _BootRuntimeSnapshot
+    _seal: object | None = field(default=None, repr=False, compare=False)
+
+
+_BOOT_BINDING_SEAL: Final = object()
 
 
 def _base_record(lock: Lock) -> dict:
@@ -481,14 +592,32 @@ def _bindings(policy: Policy, image_id: str) -> dict[str, list[str]]:
     return result
 
 
-def _validate_policy_usable(policy: Policy) -> tuple[str, ...]:
+def _validate_policy_usable(policy: Policy) -> _PolicyRuntimeSnapshot:
     _require(policy.process_nodes, CP_BOOT_BINDING, "policy has no process graph")
-    known = {node.id for node in policy.process_nodes}
+    known = {node.id: node for node in policy.process_nodes}
+    roots = policy.boot_roots
+    _require(
+        roots and roots == tuple(sorted(roots)) and len(set(roots)) == len(roots) and all(root in known for root in roots),
+        CP_BOOT_BINDING,
+        "policy boot roots are unusable",
+    )
+    adjacency = {node_id: [] for node_id in known}
+    for edge in policy.process_edges:
+        _require(edge.from_id in known and edge.to_id in known, CP_BOOT_BINDING, "policy process edge is unusable")
+        adjacency[edge.from_id].append(edge.to_id)
+    reachable = set(roots)
+    pending = list(roots)
+    while pending:
+        node_id = pending.pop()
+        for target in adjacency[node_id]:
+            if target not in reachable:
+                reachable.add(target)
+                pending.append(target)
     runtime_files = {node.path for node in policy.images["runtime-policy"].nodes if node.node_type == "file"}
     executable_paths: list[str] = []
     for node in policy.process_nodes:
         if node.kind in ("exec", "interpreter", "dynamic_library"):
-            _require(_absolute_path(node.path) and node.path in runtime_files, CP_BOOT_BINDING, "policy executable path is unusable")
+            _require(node.id in reachable and _absolute_path(node.path) and node.path in runtime_files, CP_BOOT_BINDING, "policy executable path is unreachable or unusable")
             executable_paths.append(node.path)
     _require(executable_paths, CP_BOOT_BINDING, "policy has no executable confinement paths")
     _require(len(policy.mounts) == 2, CP_BOOT_BINDING, "policy must declare exactly two image mounts")
@@ -496,13 +625,55 @@ def _validate_policy_usable(policy: Policy) -> tuple[str, ...]:
     mount_destinations = [mount.destination for mount in policy.mounts]
     _require(mount_images == ["models", "runtime-policy"] and len(set(mount_destinations)) == 2, CP_BOOT_BINDING, "policy image mount coverage is unusable")
     for mount in policy.mounts:
-        _require(mount.unit_id in known and _absolute_path(mount.destination) and mount.read_only, CP_BOOT_BINDING, "policy mount identity is unusable")
-    return tuple(sorted(executable_paths))
+        _require(mount.unit_id in reachable and _absolute_path(mount.destination) and mount.read_only, CP_BOOT_BINDING, "policy mount identity is unreachable or unusable")
+    destinations = {mount.image: mount.destination for mount in policy.mounts}
+    return _PolicyRuntimeSnapshot(
+        destinations["runtime-policy"], destinations["models"], tuple(sorted(executable_paths)),
+    )
 
 
-def _policy_mount_destination(policy: Policy, image_id: str) -> str:
-    _validate_policy_usable(policy)
-    return next(mount.destination for mount in policy.mounts if mount.image == image_id)
+def _snapshot_manifest_images(manifest: ProvenanceV2Manifest) -> tuple[_ManifestImageSnapshot, ...]:
+    raw_images = manifest.raw["images"]
+    return tuple(
+        _ManifestImageSnapshot(
+            image_id,
+            raw_images[image_id]["squashfs_sha256"],
+            raw_images[image_id]["squashfs_size_bytes"],
+            raw_images[image_id]["hash_device_sha256"],
+            raw_images[image_id]["hash_device_size_bytes"],
+            raw_images[image_id]["root_hash"],
+            raw_images[image_id]["uuid"],
+            raw_images[image_id]["salt"],
+            raw_images[image_id]["data_block_size"],
+            raw_images[image_id]["hash_block_size"],
+        )
+        for image_id in _IMAGE_ORDER
+    )
+
+
+def _locator(partition: PredictedPartition) -> PartitionLocator:
+    return PartitionLocator(
+        partition.ordinal, partition.type_guid, partition.partuuid,
+        partition.start_lba, partition.end_lba, partition.size_bytes,
+    )
+
+
+def _verity_pair(gpt_plan: PredictedGPTPlan, image_id: str) -> VerityPair:
+    candidates = [item for item in gpt_plan.partitions if item.image_id == image_id]
+    _require(len(candidates) == 2, CP_BOOT_GPT, "predicted verity pair is incomplete")
+    data, hash_partition = candidates
+    _require(data.payload == "data" and hash_partition.payload == "hash", CP_BOOT_GPT, "predicted verity pair order is invalid")
+    _require(
+        (data.root_hash, data.verity_uuid, data.salt, data.data_block_size, data.hash_block_size)
+        == (hash_partition.root_hash, hash_partition.verity_uuid, hash_partition.salt, hash_partition.data_block_size, hash_partition.hash_block_size),
+        CP_BOOT_GPT,
+        "predicted verity pair metadata disagrees",
+    )
+    return VerityPair(
+        image_id, _locator(data), _locator(hash_partition), data.expected_sha256,
+        data.expected_bytes, hash_partition.expected_sha256, hash_partition.expected_bytes,
+        data.root_hash, data.verity_uuid, data.salt, data.data_block_size, data.hash_block_size,
+    )
 
 
 def _validate_manifest(
@@ -559,7 +730,7 @@ def _validate_manifest(
     _require(raw["toolchain"] == [{"tool_id": tool_id, "component": inputs_by_id[tool_id].component, "resolved_path_sha256": inputs_by_id[tool_id].sha256} for tool_id in lock.tool_ids], CP_BOOT_MANIFEST, "manifest toolchain identity disagrees")
 
 
-def bind_spp_boot(
+def bind_boot_inputs(
     *,
     root_lock_bytes: bytes,
     runtime_closure_bytes: bytes,
@@ -580,8 +751,8 @@ def bind_spp_boot(
     _require(all(type(value) is bytes for value in source_values), CP_BOOT_SCHEMA, "all boot authority inputs must be bytes")
     inputs = derive_inputs(root_lock_bytes=root_lock_bytes, runtime_closure_bytes=runtime_closure_bytes, verity_rules_bytes=verity_rules_bytes, tcb_identity_bytes=tcb_identity_bytes, builder_source_bytes=builder_source_bytes, policy_bytes=policy_bytes)
     lock = parse_lock(root_lock_bytes)
-    closure = parse_runtime_closure(runtime_closure_bytes)
-    rules = parse_verity_rules(verity_rules_bytes)
+    parse_runtime_closure(runtime_closure_bytes)
+    parse_verity_rules(verity_rules_bytes)
     tcb = parse_tcb_identity(tcb_identity_bytes)
     policy = parse_policy(policy_bytes)
     manifest = parse_manifest_v2(accepted_manifest_bytes)
@@ -598,13 +769,13 @@ def bind_spp_boot(
         "kernel_feature_contract_sha256": _sha256(kernel_feature_contract_bytes),
         "trusted_certificate_bundle_sha256": _sha256(trusted_certificate_bundle_bytes),
     }
-    _require(contract.predecessor_sha256 == source_digests, CP_BOOT_BINDING, "boot contract predecessor digest set disagrees")
+    _require(dict(contract.predecessor_sha256) == source_digests, CP_BOOT_BINDING, "boot contract predecessor digest set disagrees")
     _require(contract.gpt_layout_rules_sha256 == _sha256(gpt_layout_rules_bytes), CP_BOOT_BINDING, "boot contract GPT rules binding disagrees")
     _require(plan.boot_contract_sha256 == contract_digest, CP_BOOT_MODULE_PLAN, "module plan is not bound to exact boot contract bytes")
     _require(tcb["kernel_feature_contract"] == {"schema": KERNEL_FEATURE_CONTRACT_SCHEMA, "sha256": source_digests["kernel_feature_contract_sha256"]}, CP_BOOT_BINDING, "TCB kernel feature binding disagrees")
     kernel_inputs = [item for item in lock.inputs if item.role == "kernel"]
     _require(len(kernel_inputs) == 1 and kfc.kernel_input_sha256 == kernel_inputs[0].sha256, CP_BOOT_BINDING, "kernel feature contract is not bound to lock kernel input")
-    _validate_policy_usable(policy)
+    policy_snapshot = _validate_policy_usable(policy)
     _validate_manifest(
         manifest=manifest,
         lock=lock,
@@ -613,12 +784,28 @@ def bind_spp_boot(
         trusted_certificate_bundle_bytes=trusted_certificate_bundle_bytes,
     )
     _validate_module_plan_bound(contract, plan, manifest, lock, contract_digest)
-    gpt_plan = _derive_gpt_plan(source_digests["root_lock_sha256"], _sha256(gpt_layout_rules_bytes), gpt_rules, manifest.raw["images"])
+    images = _snapshot_manifest_images(manifest)
+    gpt_plan = _derive_gpt_plan(
+        source_digests["root_lock_sha256"], _sha256(gpt_layout_rules_bytes), gpt_rules, images,
+    )
+    runtime = _BootRuntimeSnapshot(
+        lock.future_cmdline,
+        tuple(_locator(partition) for partition in gpt_plan.partitions),
+        _verity_pair(gpt_plan, "runtime-policy"),
+        _verity_pair(gpt_plan, "models"),
+        policy_snapshot.runtime_policy_destination,
+        policy_snapshot.models_destination,
+        policy_snapshot.executable_paths,
+        contract.tmpfs_mounts,
+        plan.entries,
+        contract.mutable_control_order,
+        kfc.mutable_controls,
+    )
     return BootBinding(
         root_lock_bytes, runtime_closure_bytes, verity_rules_bytes, tcb_identity_bytes, builder_source_bytes, policy_bytes,
         accepted_manifest_bytes, kernel_feature_contract_bytes, trusted_certificate_bundle_bytes, boot_contract_bytes, module_plan_bytes, gpt_layout_rules_bytes,
         source_digests["root_lock_sha256"], source_digests["runtime_closure_sha256"], source_digests["verity_rules_sha256"], source_digests["tcb_identity_sha256"], source_digests["builder_source_sha256"], source_digests["policy_sha256"], source_digests["accepted_manifest_sha256"], source_digests["kernel_feature_contract_sha256"], source_digests["trusted_certificate_bundle_sha256"], contract_digest, _sha256(module_plan_bytes), _sha256(gpt_layout_rules_bytes),
-        inputs, lock, closure, rules, tcb, policy, manifest, kfc, contract, plan, gpt_rules, gpt_plan,
+        lock, kfc, contract, plan, gpt_rules, gpt_plan, runtime, _BOOT_BINDING_SEAL,
     )
 
 
@@ -693,13 +880,6 @@ class Pcr15Readback(BootObservation):
 
 
 @dataclass(frozen=True)
-class PartitionLocator:
-    ordinal: int
-    type_guid: str
-    partuuid: str
-
-
-@dataclass(frozen=True)
 class LocateExpectedDiskEffect(BootEffect):
     disk_guid: str
     locators: tuple[PartitionLocator, ...]
@@ -713,38 +893,36 @@ class DiskLocatorsObservation(BootObservation):
 
 @dataclass(frozen=True)
 class MapVerityEffect(BootEffect):
-    image_id: str
-    root_hash: str
-    verity_uuid: str
+    pair: VerityPair
 
 
 @dataclass(frozen=True)
 class VerityMappedObservation(BootObservation):
-    image_id: str
+    pair: VerityPair
     mapping_identity: str
 
 
 @dataclass(frozen=True)
 class VerifyVerityEffect(BootEffect):
-    image_id: str
-    root_hash: str
+    pair: VerityPair
+    expected_mapping_identity: str
 
 
 @dataclass(frozen=True)
 class VerityVerifiedObservation(BootObservation):
-    image_id: str
-    root_hash: str
+    pair: VerityPair
+    mapping_identity: str
 
 
 @dataclass(frozen=True)
 class ReadMappingIdentityEffect(BootEffect):
-    image_id: str
+    pair: VerityPair
     expected_mapping_identity: str
 
 
 @dataclass(frozen=True)
 class MappingIdentityObservation(BootObservation):
-    image_id: str
+    pair: VerityPair
     mapping_identity: str
 
 
@@ -984,7 +1162,11 @@ class BootTransitionEngine:
     """A monotonic reducer over one immutable ``BootBinding``."""
 
     def __init__(self, binding: BootBinding) -> None:
-        _require(type(binding) is BootBinding, CP_BOOT_BINDING, "boot engine requires a boot binding")
+        _require(
+            type(binding) is BootBinding and binding._seal is _BOOT_BINDING_SEAL,
+            CP_BOOT_BINDING,
+            "boot engine requires a binder-issued sealed binding",
+        )
         self.binding = binding
         self.state = BootTransitionState.CMDLINE
         self._pending: BootEffect | None = None
@@ -1038,44 +1220,41 @@ class BootTransitionEngine:
 
     def _effect_for_state(self) -> BootEffect:
         contract = self.contract_sha256
-        images = self.binding.manifest.raw["images"]
-        partition_locators = tuple(PartitionLocator(item.ordinal, item.type_guid, item.partuuid) for item in self.binding.gpt_plan.partitions)
+        runtime = self.binding.runtime
         if self.state is BootTransitionState.CMDLINE:
-            return CheckCmdlineEffect(contract, self.binding.lock.future_cmdline)
+            return CheckCmdlineEffect(contract, runtime.cmdline)
         if self.state is BootTransitionState.PCR15_ZERO:
             return ReadPcr15Effect(contract, b"\0" * 32)
         if self.state is BootTransitionState.DISK_LOCATORS:
-            return LocateExpectedDiskEffect(contract, self.binding.gpt_plan.disk_guid, partition_locators)
+            return LocateExpectedDiskEffect(contract, self.binding.gpt_plan.disk_guid, runtime.disk_locators)
         if self.state is BootTransitionState.RUNTIME_MAP:
-            image = images["runtime-policy"]
-            return MapVerityEffect(contract, "runtime-policy", image["root_hash"], image["uuid"])
+            return MapVerityEffect(contract, runtime.runtime_policy_verity)
         if self.state is BootTransitionState.RUNTIME_VERIFY:
-            return VerifyVerityEffect(contract, "runtime-policy", images["runtime-policy"]["root_hash"])
+            return VerifyVerityEffect(contract, runtime.runtime_policy_verity, self._mapping("runtime-policy"))
         if self.state is BootTransitionState.RUNTIME_MAPPING_IDENTITY:
-            return ReadMappingIdentityEffect(contract, "runtime-policy", self._mapping("runtime-policy"))
+            return ReadMappingIdentityEffect(contract, runtime.runtime_policy_verity, self._mapping("runtime-policy"))
         if self.state is BootTransitionState.MODELS_MAP:
-            image = images["models"]
-            return MapVerityEffect(contract, "models", image["root_hash"], image["uuid"])
+            return MapVerityEffect(contract, runtime.models_verity)
         if self.state is BootTransitionState.MODELS_VERIFY:
-            return VerifyVerityEffect(contract, "models", images["models"]["root_hash"])
+            return VerifyVerityEffect(contract, runtime.models_verity, self._mapping("models"))
         if self.state is BootTransitionState.MODELS_MAPPING_IDENTITY:
-            return ReadMappingIdentityEffect(contract, "models", self._mapping("models"))
+            return ReadMappingIdentityEffect(contract, runtime.models_verity, self._mapping("models"))
         if self.state is BootTransitionState.RUNTIME_MOUNT:
-            return MountImageEffect(contract, "runtime-policy", _policy_mount_destination(self.binding.policy, "runtime-policy"), ("ro", "nodev", "nosuid"))
+            return MountImageEffect(contract, "runtime-policy", runtime.runtime_policy_destination, ("ro", "nodev", "nosuid"))
         if self.state is BootTransitionState.RUNTIME_EXECUTABLE_CONFINEMENT:
-            return ConfineRuntimeExecutablesEffect(contract, _validate_policy_usable(self.binding.policy))
+            return ConfineRuntimeExecutablesEffect(contract, runtime.executable_paths)
         if self.state is BootTransitionState.MODELS_MOUNT:
-            return MountImageEffect(contract, "models", _policy_mount_destination(self.binding.policy, "models"), ("ro", "nodev", "nosuid", "noexec"))
+            return MountImageEffect(contract, "models", runtime.models_destination, ("ro", "nodev", "nosuid", "noexec"))
         if self.state is BootTransitionState.MUTABLE_ROOTS:
             return CheckMutableRootsEffect(contract)
         if self.state is BootTransitionState.TMPFS:
-            return CreateTmpfsEffect(contract, self.binding.boot_contract.tmpfs_mounts, ("nosuid", "nodev", "noexec"))
+            return CreateTmpfsEffect(contract, runtime.tmpfs_mounts, ("nosuid", "nodev", "noexec"))
         if self.state is BootTransitionState.MODULES:
-            return LoadModulesEffect(contract, self.binding.module_plan.entries)
+            return LoadModulesEffect(contract, runtime.module_entries)
         if self.state is BootTransitionState.MODULES_DISABLED:
             return CloseModulesEffect(contract)
         if self.state is BootTransitionState.MUTABLE_CONTROLS:
-            return CloseMutableControlEffect(contract, self.binding.boot_contract.mutable_control_order[self._control_index])
+            return CloseMutableControlEffect(contract, runtime.mutable_control_order[self._control_index])
         if self.state is BootTransitionState.PCR15_EXTEND:
             if not _issue_extend_request():
                 self._fail(CP_BOOT_LATCH)
@@ -1127,22 +1306,22 @@ class BootTransitionEngine:
         return mapping[type(effect)]
 
     def _accept_normal(self, observation: BootObservation) -> None:
-        images = self.binding.manifest.raw["images"]
+        runtime = self.binding.runtime
         state = self.state
         if state is BootTransitionState.CMDLINE:
             value = observation
-            _require(type(value.cmdline) is str and value.cmdline == self.binding.lock.future_cmdline and type(value.external_companions) is tuple and value.external_companions == (), CP_BOOT_OBSERVATION, "cmdline or external companion check failed")
+            _require(type(value.cmdline) is str and value.cmdline == runtime.cmdline and type(value.external_companions) is tuple and value.external_companions == (), CP_BOOT_OBSERVATION, "cmdline or external companion check failed")
             self.state = BootTransitionState.PCR15_ZERO
         elif state is BootTransitionState.PCR15_ZERO:
             self._require_pcr(observation, b"\0" * 32)
             self.state = BootTransitionState.DISK_LOCATORS
         elif state is BootTransitionState.DISK_LOCATORS:
-            expected = tuple(PartitionLocator(item.ordinal, item.type_guid, item.partuuid) for item in self.binding.gpt_plan.partitions)
-            _require(observation.disk_guid == self.binding.gpt_plan.disk_guid and type(observation.locators) is tuple and observation.locators == expected and len(set(observation.locators)) == 4, CP_BOOT_OBSERVATION, "expected disk locators are not unique and exact")
+            _require(observation.disk_guid == self.binding.gpt_plan.disk_guid and type(observation.locators) is tuple and observation.locators == runtime.disk_locators and len(set(observation.locators)) == 4, CP_BOOT_OBSERVATION, "expected disk locators are not unique and exact")
             self.state = BootTransitionState.RUNTIME_MAP
         elif state in (BootTransitionState.RUNTIME_MAP, BootTransitionState.MODELS_MAP):
             image_id = "runtime-policy" if state is BootTransitionState.RUNTIME_MAP else "models"
-            _require(observation.image_id == image_id and type(observation.mapping_identity) is str and observation.mapping_identity, CP_BOOT_OBSERVATION, "verity mapping observation is invalid")
+            pair = runtime.runtime_policy_verity if image_id == "runtime-policy" else runtime.models_verity
+            _require(observation.pair == pair and type(observation.mapping_identity) is str and observation.mapping_identity, CP_BOOT_OBSERVATION, "verity mapping observation is invalid")
             if image_id == "runtime-policy":
                 self._runtime_mapping = observation.mapping_identity
                 self.state = BootTransitionState.RUNTIME_VERIFY
@@ -1151,43 +1330,45 @@ class BootTransitionEngine:
                 self.state = BootTransitionState.MODELS_VERIFY
         elif state in (BootTransitionState.RUNTIME_VERIFY, BootTransitionState.MODELS_VERIFY):
             image_id = "runtime-policy" if state is BootTransitionState.RUNTIME_VERIFY else "models"
-            _require(observation.image_id == image_id and observation.root_hash == images[image_id]["root_hash"], CP_BOOT_OBSERVATION, "verity verification observation is invalid")
+            pair = runtime.runtime_policy_verity if image_id == "runtime-policy" else runtime.models_verity
+            _require(observation.pair == pair and observation.mapping_identity == self._mapping(image_id), CP_BOOT_OBSERVATION, "verity verification observation is invalid")
             self.state = BootTransitionState.RUNTIME_MAPPING_IDENTITY if image_id == "runtime-policy" else BootTransitionState.MODELS_MAPPING_IDENTITY
         elif state in (BootTransitionState.RUNTIME_MAPPING_IDENTITY, BootTransitionState.MODELS_MAPPING_IDENTITY):
             image_id = "runtime-policy" if state is BootTransitionState.RUNTIME_MAPPING_IDENTITY else "models"
-            _require(observation.image_id == image_id and observation.mapping_identity == self._mapping(image_id), CP_BOOT_OBSERVATION, "mapping identity readback disagrees")
+            pair = runtime.runtime_policy_verity if image_id == "runtime-policy" else runtime.models_verity
+            _require(observation.pair == pair and observation.mapping_identity == self._mapping(image_id), CP_BOOT_OBSERVATION, "mapping identity readback disagrees")
             self.state = BootTransitionState.MODELS_MAP if image_id == "runtime-policy" else BootTransitionState.RUNTIME_MOUNT
         elif state is BootTransitionState.RUNTIME_MOUNT:
-            _require(observation.image_id == "runtime-policy" and observation.destination == _policy_mount_destination(self.binding.policy, "runtime-policy") and observation.flags == ("ro", "nodev", "nosuid"), CP_BOOT_OBSERVATION, "runtime-policy mount readback is invalid")
+            _require(observation.image_id == "runtime-policy" and observation.destination == runtime.runtime_policy_destination and observation.flags == ("ro", "nodev", "nosuid"), CP_BOOT_OBSERVATION, "runtime-policy mount readback is invalid")
             self.state = BootTransitionState.RUNTIME_EXECUTABLE_CONFINEMENT
         elif state is BootTransitionState.RUNTIME_EXECUTABLE_CONFINEMENT:
-            _require(observation.executable_paths == _validate_policy_usable(self.binding.policy), CP_BOOT_OBSERVATION, "runtime executable confinement disagrees with predecessor graph")
+            _require(observation.executable_paths == runtime.executable_paths, CP_BOOT_OBSERVATION, "runtime executable confinement disagrees with predecessor graph")
             self.state = BootTransitionState.MODELS_MOUNT
         elif state is BootTransitionState.MODELS_MOUNT:
-            _require(observation.image_id == "models" and observation.destination == _policy_mount_destination(self.binding.policy, "models") and observation.flags == ("ro", "nodev", "nosuid", "noexec"), CP_BOOT_OBSERVATION, "models mount readback is invalid")
+            _require(observation.image_id == "models" and observation.destination == runtime.models_destination and observation.flags == ("ro", "nodev", "nosuid", "noexec"), CP_BOOT_OBSERVATION, "models mount readback is invalid")
             self.state = BootTransitionState.MUTABLE_ROOTS
         elif state is BootTransitionState.MUTABLE_ROOTS:
             _require(observation.mutable_root_paths == (), CP_BOOT_OBSERVATION, "mutable roots are present")
             self.state = BootTransitionState.TMPFS
         elif state is BootTransitionState.TMPFS:
-            _require(observation.mounts == self.binding.boot_contract.tmpfs_mounts and observation.flags == ("nosuid", "nodev", "noexec"), CP_BOOT_OBSERVATION, "tmpfs readback is not exact")
+            _require(observation.mounts == runtime.tmpfs_mounts and observation.flags == ("nosuid", "nodev", "noexec"), CP_BOOT_OBSERVATION, "tmpfs readback is not exact")
             self.state = BootTransitionState.MODULES
         elif state is BootTransitionState.MODULES:
-            _require(observation.entries == tuple(item.identity for item in self.binding.module_plan.entries), CP_BOOT_OBSERVATION, "module load readback is not exact")
+            _require(observation.entries == tuple(item.identity for item in runtime.module_entries), CP_BOOT_OBSERVATION, "module load readback is not exact")
             self.state = BootTransitionState.MODULES_DISABLED
         elif state is BootTransitionState.MODULES_DISABLED:
             _require(
                 observation.status is ModulesDisabledStatus.SET_TO_1
-                and self.binding.kernel_feature_contract.support_for("module_loading") is KernelControlSupport.REQUIRED,
+                and self._control_support("module_loading") is KernelControlSupport.REQUIRED,
                 CP_BOOT_CONTROL,
                 "kernel.modules_disabled=1 was not read back",
             )
             self.state = BootTransitionState.MUTABLE_CONTROLS
         elif state is BootTransitionState.MUTABLE_CONTROLS:
-            control = self.binding.boot_contract.mutable_control_order[self._control_index]
+            control = runtime.mutable_control_order[self._control_index]
             self._accept_control(observation, control)
             self._control_index += 1
-            if self._control_index == len(self.binding.boot_contract.mutable_control_order):
+            if self._control_index == len(runtime.mutable_control_order):
                 self.state = BootTransitionState.PCR15_EXTEND
         elif state is BootTransitionState.PCR15_EXTEND:
             _require(type(observation.outcome) is Pcr15ExtendOutcome, CP_BOOT_PCR, "PCR extend outcome is invalid")
@@ -1210,10 +1391,16 @@ class BootTransitionEngine:
 
     def _accept_control(self, observation: BootObservation, control: str) -> None:
         _require(observation.control == control and type(observation.status) is ControlReadbackStatus, CP_BOOT_CONTROL, "mutable control readback is invalid")
-        support = self.binding.kernel_feature_contract.support_for(control)
+        support = self._control_support(control)
         if observation.status is ControlReadbackStatus.DISABLED:
             return
         _require(support is KernelControlSupport.CONDITIONAL and observation.status is ControlReadbackStatus.NOT_APPLICABLE_NONEXISTENT, CP_BOOT_CONTROL, "control is neither disabled nor conditionally nonexistent")
+
+    def _control_support(self, control: str) -> KernelControlSupport:
+        for feature in self.binding.runtime.mutable_controls:
+            if feature.name == control:
+                return feature.support
+        raise ApplianceError(CP_BOOT_CONTROL, "boot binding lacks a mutable control snapshot")
 
     def _fail(self, code: str) -> None:
         if self.state is not BootTransitionState.FAILED_NON_SERVING:

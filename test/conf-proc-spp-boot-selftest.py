@@ -10,18 +10,15 @@ is used only for its already accepted raw manifest bytes.
 from __future__ import annotations
 
 import hashlib
-import os
 import subprocess
 import sys
 import unittest
-from datetime import datetime, timedelta, timezone
+from dataclasses import fields, replace
 from functools import lru_cache
 from pathlib import Path
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.x509.oid import NameOID
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -83,26 +80,14 @@ def _placement(image: str, path: str, input_id: str) -> dict:
 
 @lru_cache(maxsize=1)
 def _trusted_certificate_bundle() -> tuple[bytes, str, str, str]:
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "compact SPP signer")])
-    now = datetime.now(timezone.utc)
-    certificate = (
-        x509.CertificateBuilder()
-        .subject_name(subject)
-        .issuer_name(subject)
-        .public_key(key.public_key())
-        .serial_number(1)
-        .not_valid_before(now - timedelta(days=1))
-        .not_valid_after(now + timedelta(days=1))
-        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
-        .sign(key, hashes.SHA256())
-    )
+    bundle = (ROOT / "roots" / "amd" / "Turin" / "ark.pem").read_bytes()
+    certificate = x509.load_pem_x509_certificate(bundle)
     spki = certificate.public_key().public_bytes(
         serialization.Encoding.DER,
         serialization.PublicFormat.SubjectPublicKeyInfo,
     )
     return (
-        certificate.public_bytes(serialization.Encoding.PEM),
+        bundle,
         certificate.fingerprint(hashes.SHA256()).hex(),
         _sha(spki),
         _sha(certificate.subject.public_bytes()),
@@ -132,7 +117,7 @@ def _tcb(kfc_sha256: str) -> bytes:
     )
 
 
-def _policy() -> bytes:
+def _policy(*, strict_subset: bool = False, unreachable_executable: bool = False) -> bytes:
     def node(path: str, source: str, content_class: str) -> dict:
         return {
             "path": path,
@@ -146,45 +131,60 @@ def _policy() -> bytes:
             "content_class": content_class,
         }
 
+    runtime_nodes = [
+        node("/etc/spp/policy.json", "policy", "config"),
+        node("/usr/bin/spp", "stub", "executable"),
+        node("/usr/lib/firmware/spp/fw.bin", "firmware", "runtime_data"),
+        node("/usr/lib/modules/spp/boot.ko", "driver", "runtime_data"),
+    ]
+    if strict_subset:
+        runtime_nodes.append(node("/usr/lib/modules/spp/idle.ko", "driver", "runtime_data"))
+    runtime_nodes.append(node("/usr/lib/modules/spp/serve.ko", "driver", "runtime_data"))
+    if unreachable_executable:
+        runtime_nodes.insert(2, node("/usr/bin/unreachable", "stub", "executable"))
+    process_nodes = [
+        {
+            "id": "exec:/usr/bin/spp",
+            "kind": "exec",
+            "path": "/usr/bin/spp",
+            "sha256": _sha(b"stub"),
+            "argv": ["/usr/bin/spp"],
+            "network_scope": "none",
+            "capabilities": [],
+            "source_input_id": "stub",
+        },
+        {
+            "id": "unit:spp.service",
+            "kind": "unit",
+            "path": "spp.service",
+            "sha256": None,
+            "argv": [],
+            "network_scope": "none",
+            "capabilities": [],
+            "source_input_id": None,
+        },
+    ]
+    if unreachable_executable:
+        process_nodes.insert(1, {
+            "id": "exec:/usr/bin/unreachable",
+            "kind": "exec",
+            "path": "/usr/bin/unreachable",
+            "sha256": _sha(b"stub"),
+            "argv": ["/usr/bin/unreachable"],
+            "network_scope": "none",
+            "capabilities": [],
+            "source_input_id": "stub",
+        })
     return canonical_dumps(
         {
             "schema": "conf-proc-policy/v1",
             "policy_version": 1,
             "images": {
                 "models": {"nodes": [node("/models/inference", "inference", "model")]},
-                "runtime-policy": {
-                    "nodes": [
-                        node("/etc/spp/policy.json", "policy", "config"),
-                        node("/usr/bin/spp", "stub", "executable"),
-                        node("/usr/lib/firmware/spp/fw.bin", "firmware", "runtime_data"),
-                        node("/usr/lib/modules/spp/boot.ko", "driver", "runtime_data"),
-                        node("/usr/lib/modules/spp/serve.ko", "driver", "runtime_data"),
-                    ]
-                },
+                "runtime-policy": {"nodes": runtime_nodes},
             },
-            "boot_roots": [],
-            "process_nodes": [
-                {
-                    "id": "exec:/usr/bin/spp",
-                    "kind": "exec",
-                    "path": "/usr/bin/spp",
-                    "sha256": _sha(b"stub"),
-                    "argv": ["/usr/bin/spp"],
-                    "network_scope": "none",
-                    "capabilities": [],
-                    "source_input_id": "stub",
-                },
-                {
-                    "id": "unit:spp.service",
-                    "kind": "unit",
-                    "path": "spp.service",
-                    "sha256": None,
-                    "argv": [],
-                    "network_scope": "none",
-                    "capabilities": [],
-                    "source_input_id": None,
-                }
-            ],
+            "boot_roots": ["unit:spp.service"],
+            "process_nodes": process_nodes,
             "process_edges": [
                 {"from_id": "unit:spp.service", "to_id": "exec:/usr/bin/spp", "kind": "unit_exec", "origin_path": "spp.service", "origin_key": "ExecStart"}
             ],
@@ -198,10 +198,10 @@ def _policy() -> bytes:
     )
 
 
-def build_compact_fixture() -> dict[str, bytes]:
+def build_compact_fixture(*, strict_subset: bool = False, unreachable_executable: bool = False) -> dict[str, bytes]:
     """Build compact complete predecessor bytes, with KFC made before TCB."""
 
-    policy_bytes = _policy()
+    policy_bytes = _policy(strict_subset=strict_subset, unreachable_executable=unreachable_executable)
     trusted_bundle_bytes, signer, signer_spki, signer_subject = _trusted_certificate_bundle()
     contents = {
         "asrlock": b"asr lock",
@@ -229,6 +229,7 @@ def build_compact_fixture() -> dict[str, bytes]:
         "asrmodel": [_placement("models", "/models/asr", "asrmodel")],
         "driver": [
             _placement("runtime-policy", "/usr/lib/modules/spp/boot.ko", "driver"),
+            *([_placement("runtime-policy", "/usr/lib/modules/spp/idle.ko", "driver")] if strict_subset else []),
             _placement("runtime-policy", "/usr/lib/modules/spp/serve.ko", "driver"),
         ],
         "firmware": [_placement("runtime-policy", "/usr/lib/firmware/spp/fw.bin", "firmware")],
@@ -240,7 +241,10 @@ def build_compact_fixture() -> dict[str, bytes]:
         "runtime": [_placement("runtime-policy", "/runtime.tree", "runtime")],
         "sglang": [_placement("models", "/models/sglang", "sglang")],
         "source": [_placement("runtime-policy", "/opt/conf/source.py", "source")],
-        "stub": [_placement("runtime-policy", "/usr/bin/spp", "stub")],
+        "stub": [
+            _placement("runtime-policy", "/usr/bin/spp", "stub"),
+            *([_placement("runtime-policy", "/usr/bin/unreachable", "stub")] if unreachable_executable else []),
+        ],
         "unit": [_placement("runtime-policy", "/etc/systemd/system/spp.service", "unit")],
     }
     roles = {
@@ -306,6 +310,7 @@ def build_compact_fixture() -> dict[str, bytes]:
         images=image_records,
         module_observations=(
             ProvenanceV2ModuleObservation("/usr/lib/modules/spp/boot.ko", _sha(contents["driver"]), signer),
+            *((ProvenanceV2ModuleObservation("/usr/lib/modules/spp/idle.ko", _sha(contents["driver"]), signer),) if strict_subset else ()),
             ProvenanceV2ModuleObservation("/usr/lib/modules/spp/serve.ko", _sha(contents["driver"]), signer),
         ),
         firmware_observations=(ProvenanceV2FirmwareObservation("/usr/lib/firmware/spp/fw.bin", _sha(contents["firmware"])),),
@@ -325,6 +330,7 @@ def build_compact_fixture() -> dict[str, bytes]:
     )
     identities = [
         {"path": "/usr/lib/modules/spp/boot.ko", "sha256": _sha(contents["driver"]), "signer_certificate_sha256": signer},
+        *([{ "path": "/usr/lib/modules/spp/idle.ko", "sha256": _sha(contents["driver"]), "signer_certificate_sha256": signer}] if strict_subset else []),
         {"path": "/usr/lib/modules/spp/serve.ko", "sha256": _sha(contents["driver"]), "signer_certificate_sha256": signer},
     ]
     predecessor_sha256 = {
@@ -338,8 +344,8 @@ def build_compact_fixture() -> dict[str, bytes]:
         {
             "schema": "conf-proc-spp-boot-contract/v1", "contract_version": 1,
             "predecessor_sha256": predecessor_sha256, "image_order": ["models", "runtime-policy"],
-            "module_roles": {"boot": [identities[0]], "serving": [identities[1]]},
-            "non_runtime_loadable_modules": [],
+            "module_roles": {"boot": [identities[0]], "serving": [identities[-1]]},
+            "non_runtime_loadable_modules": [identities[1]] if strict_subset else [],
             "tmpfs_mounts": [{"path": "/run/spp", "size_bytes": 1048576, "mode": 0o755}],
             "mutable_control_order": list(boot._CONTROL_ORDER),
             "observation_contract_sha256": boot.OBSERVATION_CONTRACT_SHA256,
@@ -352,7 +358,7 @@ def build_compact_fixture() -> dict[str, bytes]:
             "boot_contract_sha256": _sha(boot_contract_bytes), "measurement_scope": "future-pcr4-only",
             "entries": [
                 {"index": 0, **identities[0], "depends_on": []},
-                {"index": 1, **identities[1], "depends_on": [0]},
+                {"index": 1, **identities[-1], "depends_on": [0]},
             ],
         }
     )
@@ -368,7 +374,7 @@ def build_compact_fixture() -> dict[str, bytes]:
 
 
 def _binding() -> boot.BootBinding:
-    return boot.bind_spp_boot(**build_compact_fixture())
+    return boot.bind_boot_inputs(**build_compact_fixture())
 
 
 def _refresh_boot_document_bindings(docs: dict[str, bytes]) -> None:
@@ -399,11 +405,11 @@ def _observation(effect: boot.BootEffect) -> boot.BootObservation:
     if type(effect) is boot.LocateExpectedDiskEffect:
         return boot.DiskLocatorsObservation(contract, effect.disk_guid, effect.locators)
     if type(effect) is boot.MapVerityEffect:
-        return boot.VerityMappedObservation(contract, effect.image_id, effect.image_id + "-map")
+        return boot.VerityMappedObservation(contract, effect.pair, effect.pair.image_id + "-map")
     if type(effect) is boot.VerifyVerityEffect:
-        return boot.VerityVerifiedObservation(contract, effect.image_id, effect.root_hash)
+        return boot.VerityVerifiedObservation(contract, effect.pair, effect.expected_mapping_identity)
     if type(effect) is boot.ReadMappingIdentityEffect:
-        return boot.MappingIdentityObservation(contract, effect.image_id, effect.expected_mapping_identity)
+        return boot.MappingIdentityObservation(contract, effect.pair, effect.expected_mapping_identity)
     if type(effect) is boot.MountImageEffect:
         return boot.MountReadback(contract, effect.image_id, effect.destination, effect.flags)
     if type(effect) is boot.ConfineRuntimeExecutablesEffect:
@@ -476,6 +482,33 @@ def _child_pcr_outcome(outcome: boot.Pcr15ExtendOutcome) -> int:
     return 0
 
 
+_PCR_KAT_MEASUREMENT_HEX = "7b43a98e852edb967653724802022124f08e330c1b8bbc2a033d316253a9e244"
+_PCR_KAT_AFTER_HEX = "c044474b5871d154868a5a0ef411ac6020a837acd4d464ce33b8ac1f24c686ce"
+
+
+def _child_pcr_known_answer() -> int:
+    engine = boot.BootTransitionEngine(_binding())
+    _reach(engine, boot.BootTransitionState.PCR15_EXTEND)
+    effect = engine.next_effect()
+    assert type(effect) is boot.ExtendPcr15Effect
+    assert effect.measurement.hex() == _PCR_KAT_MEASUREMENT_HEX
+    assert engine.predicted_pcr15.hex() == _PCR_KAT_AFTER_HEX
+    return 0
+
+
+def _child_transition_table() -> int:
+    engine = boot.BootTransitionEngine(_binding())
+    for row in boot.BOOT_TRANSITION_TABLE:
+        assert engine.state is row.state
+        while engine.state is row.state:
+            effect = engine.next_effect()
+            assert effect is not None
+            assert type(effect).__name__ == row.effect_name
+            engine.accept(_observation(effect))
+    assert engine.state is boot.BootTransitionState.SERVING
+    return 0
+
+
 class SppBootSelftest(unittest.TestCase):
     def test_a0_vpe_dormant_policy_covers_the_boot_authority_consumer(self) -> None:
         result = subprocess.run(
@@ -488,7 +521,7 @@ class SppBootSelftest(unittest.TestCase):
 
     def test_a_parser_and_source_binding_strictness(self) -> None:
         docs = build_compact_fixture()
-        binding = boot.bind_spp_boot(**docs)
+        binding = boot.bind_boot_inputs(**docs)
         self.assertEqual(binding.kernel_feature_contract.kernel_input_sha256, next(item.sha256 for item in binding.lock.inputs if item.role == "kernel"))
         changed = canonical_loads(docs["boot_contract_bytes"])
         changed["unexpected"] = 1
@@ -498,7 +531,30 @@ class SppBootSelftest(unittest.TestCase):
         changed["predecessor_sha256"]["kernel_feature_contract_sha256"] = "0" * 64
         docs["boot_contract_bytes"] = canonical_dumps(changed)
         with self.assertRaises(ApplianceError):
-            boot.bind_spp_boot(**docs)
+            boot.bind_boot_inputs(**docs)
+
+    def test_a1_binder_seal_and_snapshots_reject_injection_and_source_mutation(self) -> None:
+        docs = build_compact_fixture()
+        decoded_manifest = parse_manifest_v2(docs["accepted_manifest_bytes"])
+        decoded_policy = canonical_loads(docs["policy_bytes"])
+        binding = boot.bind_boot_inputs(**docs)
+        before = boot.BootTransitionEngine(binding)
+        _reach(before, boot.BootTransitionState.RUNTIME_MAP)
+        expected_effect = before.next_effect()
+        self.assertIsInstance(expected_effect, boot.MapVerityEffect)
+        decoded_manifest.raw["images"]["runtime-policy"]["root_hash"] = "0" * 64
+        decoded_policy["images"]["runtime-policy"]["nodes"][1]["path"] = "/mutated"
+        binding.lock.image_specs["runtime-policy"]["caller_mutation"] = True
+        after = boot.BootTransitionEngine(binding)
+        _reach(after, boot.BootTransitionState.RUNTIME_MAP)
+        self.assertEqual(after.next_effect(), expected_effect)
+        manually_constructed = boot.BootBinding(**{
+            member.name: getattr(binding, member.name)
+            for member in fields(boot.BootBinding)
+            if member.name != "_seal"
+        })
+        with self.assertRaises(ApplianceError):
+            boot.BootTransitionEngine(manually_constructed)
 
     def test_a2_canonical_unknown_and_malformed_contract_values_are_rejected(self) -> None:
         docs = build_compact_fixture()
@@ -525,7 +581,7 @@ class SppBootSelftest(unittest.TestCase):
         raw["future_cmdline"] = "console=wrong"
         docs["accepted_manifest_bytes"] = canonical_dumps(raw)
         with self.assertRaises(ApplianceError):
-            boot.bind_spp_boot(**docs)
+            boot.bind_boot_inputs(**docs)
         sys.path.insert(0, str(ROOT / "test"))
         from conf_proc_provenance_v2_inspect_fixture import build_positive_fixture
 
@@ -552,7 +608,7 @@ class SppBootSelftest(unittest.TestCase):
         docs["trusted_certificate_bundle_bytes"] = b"not the locked PEM bundle"
         _refresh_boot_document_bindings(docs)
         with self.assertRaises(ApplianceError):
-            boot.bind_spp_boot(**docs)
+            boot.bind_boot_inputs(**docs)
 
     def test_b2_each_major_predecessor_duplicate_is_cross_checked(self) -> None:
         mutations = (
@@ -576,7 +632,7 @@ class SppBootSelftest(unittest.TestCase):
                 docs["accepted_manifest_bytes"] = canonical_dumps(manifest)
                 _refresh_boot_document_bindings(docs)
                 with self.assertRaises(ApplianceError):
-                    boot.bind_spp_boot(**docs)
+                    boot.bind_boot_inputs(**docs)
 
     def test_c_gpt_prediction_is_fixed_and_contract_independent(self) -> None:
         binding = _binding()
@@ -594,6 +650,68 @@ class SppBootSelftest(unittest.TestCase):
                     partition.partuuid,
                     boot.derive_sha256_v5_guid(binding.root_lock_sha256, binding.gpt_layout_rules_sha256, binding.gpt_layout_rules.partuuid_domain, ordinal),
                 )
+                self.assertEqual(partition.start_lba % binding.gpt_layout_rules.alignment_lba, 0)
+                self.assertEqual(
+                    partition.end_lba,
+                    partition.start_lba + (partition.size_bytes + binding.gpt_layout_rules.logical_sector_bytes - 1) // binding.gpt_layout_rules.logical_sector_bytes - 1,
+                )
+        self.assertEqual(
+            tuple(partition.start_lba for partition in binding.gpt_plan.partitions),
+            tuple(locator.start_lba for locator in binding.runtime.disk_locators),
+        )
+        self.assertTrue(all(
+            left.end_lba < right.start_lba
+            for left, right in zip(binding.gpt_plan.partitions, binding.gpt_plan.partitions[1:])
+        ))
+
+    def test_c2_verity_effects_bind_complete_predicted_pairs(self) -> None:
+        binding = _binding()
+        expected_ordinals = {"runtime-policy": (1, 2), "models": (3, 4)}
+        for pair in (binding.runtime.runtime_policy_verity, binding.runtime.models_verity):
+            with self.subTest(image=pair.image_id):
+                data_partition = binding.gpt_plan.partitions[pair.data_partition.ordinal - 1]
+                hash_partition = binding.gpt_plan.partitions[pair.hash_partition.ordinal - 1]
+                self.assertEqual((pair.data_partition.ordinal, pair.hash_partition.ordinal), expected_ordinals[pair.image_id])
+                self.assertEqual(pair.data_partition, binding.runtime.disk_locators[pair.data_partition.ordinal - 1])
+                self.assertEqual(pair.hash_partition, binding.runtime.disk_locators[pair.hash_partition.ordinal - 1])
+                self.assertEqual(
+                    (pair.data_partition.type_guid, pair.data_partition.partuuid, pair.data_partition.start_lba, pair.data_partition.end_lba),
+                    (data_partition.type_guid, data_partition.partuuid, data_partition.start_lba, data_partition.end_lba),
+                )
+                self.assertEqual(
+                    (pair.hash_partition.type_guid, pair.hash_partition.partuuid, pair.hash_partition.start_lba, pair.hash_partition.end_lba),
+                    (hash_partition.type_guid, hash_partition.partuuid, hash_partition.start_lba, hash_partition.end_lba),
+                )
+                self.assertEqual(pair.data_size_bytes, pair.data_partition.size_bytes)
+                self.assertEqual(pair.hash_size_bytes, pair.hash_partition.size_bytes)
+                self.assertEqual(
+                    (pair.data_sha256, pair.data_size_bytes, pair.hash_sha256, pair.hash_size_bytes),
+                    (data_partition.expected_sha256, data_partition.expected_bytes, hash_partition.expected_sha256, hash_partition.expected_bytes),
+                )
+                self.assertEqual(
+                    (pair.root_hash, pair.verity_uuid, pair.salt, pair.data_block_size, pair.hash_block_size),
+                    (data_partition.root_hash, data_partition.verity_uuid, data_partition.salt, data_partition.data_block_size, data_partition.hash_block_size),
+                )
+        for state in (boot.BootTransitionState.RUNTIME_MAP, boot.BootTransitionState.MODELS_MAP):
+            with self.subTest(state=state):
+                engine = boot.BootTransitionEngine(binding)
+                _reach(engine, state)
+                map_effect = engine.next_effect()
+                self.assertIsInstance(map_effect, boot.MapVerityEffect)
+                bad_pair = replace(map_effect.pair, hash_partition=replace(map_effect.pair.hash_partition, partuuid="00000000-0000-5000-8000-000000000000"))
+                with self.assertRaises(ApplianceError):
+                    engine.accept(boot.VerityMappedObservation(map_effect.contract_sha256, bad_pair, "map"))
+        engine = boot.BootTransitionEngine(binding)
+        _reach(engine, boot.BootTransitionState.RUNTIME_VERIFY)
+        verify_effect = engine.next_effect()
+        self.assertIsInstance(verify_effect, boot.VerifyVerityEffect)
+        self.assertEqual(verify_effect.pair, binding.runtime.runtime_policy_verity)
+        with self.assertRaises(ApplianceError):
+            engine.accept(boot.VerityVerifiedObservation(verify_effect.contract_sha256, replace(verify_effect.pair, root_hash="0" * 64), verify_effect.expected_mapping_identity))
+
+    def test_c3_policy_requires_reachable_boot_graph_executables(self) -> None:
+        with self.assertRaises(ApplianceError):
+            boot.bind_boot_inputs(**build_compact_fixture(unreachable_executable=True))
 
     def test_d_module_subset_order_roles_and_nonruntime_closure(self) -> None:
         docs = build_compact_fixture()
@@ -606,7 +724,14 @@ class SppBootSelftest(unittest.TestCase):
         plan["entries"] = plan["entries"][:1]
         docs["module_plan_bytes"] = canonical_dumps(plan)
         with self.assertRaises(ApplianceError):
-            boot.bind_spp_boot(**docs)
+            boot.bind_boot_inputs(**docs)
+        subset = boot.bind_boot_inputs(**build_compact_fixture(strict_subset=True))
+        self.assertEqual(len(subset.module_plan.entries), 2)
+        self.assertEqual(len(subset.boot_contract.non_runtime_loadable_modules), 1)
+        self.assertNotIn(
+            subset.boot_contract.non_runtime_loadable_modules[0],
+            tuple(item.identity for item in subset.module_plan.entries),
+        )
 
     def test_d2_module_cycle_duplicate_role_and_nonruntime_overlap_are_rejected(self) -> None:
         docs = build_compact_fixture()
@@ -638,7 +763,7 @@ class SppBootSelftest(unittest.TestCase):
 
     def test_f_verity_mount_tmpfs_module_and_control_failures(self) -> None:
         cases = (
-            (boot.BootTransitionState.RUNTIME_VERIFY, lambda e: boot.VerityVerifiedObservation(e.contract_sha256, "runtime-policy", "0" * 64)),
+            (boot.BootTransitionState.RUNTIME_VERIFY, lambda e: boot.VerityVerifiedObservation(e.contract_sha256, e.next_effect().pair, "wrong-mapping")),
             (boot.BootTransitionState.RUNTIME_MOUNT, lambda e: boot.MountReadback(e.contract_sha256, "runtime-policy", "/run/spp/runtime-policy", ("ro",))),
             (boot.BootTransitionState.TMPFS, lambda e: boot.TmpfsReadback(e.contract_sha256, (), ("nosuid", "nodev", "noexec"))),
             (boot.BootTransitionState.MODULES, lambda e: boot.ModuleReadback(e.contract_sha256, ())),
@@ -683,18 +808,12 @@ class SppBootSelftest(unittest.TestCase):
         result = subprocess.run([sys.executable, str(Path(__file__).resolve()), "_child_legal"], check=False, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_g2_transition_table_matches_reducer_effects(self) -> None:
+        result = subprocess.run([sys.executable, str(Path(__file__).resolve()), "_child_transition_table"], check=False, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_h_pcr_known_answer_and_legal_child_path(self) -> None:
-        # These are literal independently derived SHA-256 vectors for b'{"x":1}'.
-        manifest = b'{"x":1}'
-        self.assertEqual(
-            hashlib.sha256(b"sol-spp-appliance-manifest-v1\0" + manifest).hexdigest(),
-            "13d0ab5f554331002fcd4fbef6801ca1d33b23fe5cb9c534d00d788dea5ea1aa",
-        )
-        self.assertEqual(
-            hashlib.sha256(bytes(32) + bytes.fromhex("13d0ab5f554331002fcd4fbef6801ca1d33b23fe5cb9c534d00d788dea5ea1aa")).hexdigest(),
-            "77736a5937e66c734fca3712d7b569bb9409720285479c6526f8240f9e2554ab",
-        )
-        result = subprocess.run([sys.executable, str(Path(__file__).resolve()), "_child_legal"], check=False, capture_output=True, text=True)
+        result = subprocess.run([sys.executable, str(Path(__file__).resolve()), "_child_pcr_known_answer"], check=False, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_h2_ambiguous_and_error_extend_outcomes_resolve_only_by_predicted_readback(self) -> None:
@@ -732,4 +851,8 @@ if __name__ == "__main__":
         raise SystemExit(_child_pcr_outcome(boot.Pcr15ExtendOutcome.TIMEOUT))
     if len(sys.argv) == 2 and sys.argv[1] == "_child_error":
         raise SystemExit(_child_pcr_outcome(boot.Pcr15ExtendOutcome.ERROR))
+    if len(sys.argv) == 2 and sys.argv[1] == "_child_pcr_known_answer":
+        raise SystemExit(_child_pcr_known_answer())
+    if len(sys.argv) == 2 and sys.argv[1] == "_child_transition_table":
+        raise SystemExit(_child_transition_table())
     unittest.main()
