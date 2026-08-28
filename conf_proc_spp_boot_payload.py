@@ -19,12 +19,10 @@ from conf_proc_prohibited import check_content_markers
 from conf_proc_provenance_v2_inspect import InspectionResult, _is_issued_inspection_result
 from conf_proc_reasons import (
     CP_SPP_PAYLOAD_ADDRESS,
-    CP_SPP_PAYLOAD_ARCHIVE,
     CP_SPP_PAYLOAD_AUTHORITY,
     CP_SPP_PAYLOAD_CONSISTENCY,
     CP_SPP_PAYLOAD_IMPORT,
     CP_SPP_PAYLOAD_PLAN,
-    CP_SPP_PAYLOAD_POLICY,
     CP_SPP_PAYLOAD_SOURCE,
     CP_SPP_PAYLOAD_STAGING,
     ApplianceError,
@@ -43,7 +41,6 @@ _RENAME_NOREPLACE: Final = 1
 _CPIO_MAGIC: Final = b"070701"
 _CPIO_TRAILER: Final = b"TRAILER!!!"
 _SOURCE_ROOT_ARCHIVE: Final = "/usr/lib/spp/"
-_AUTHORITY_ROOT: Final = "/etc/spp/authority/"
 _PAYLOAD_NAMES: Final = ("spp-boot-payload.cpio", "spp-boot-payload.package.json")
 
 
@@ -70,9 +67,16 @@ BOOT_PAYLOAD_SOURCE_AUTHORITY: Final = (
     _SourceAuthority("/usr/lib/spp/conf_proc_reasons.py", "support", 0o444, 11847, "ab10f10ffad0702ca26704deeea5579b2100f78f0a0b931fa0da8ce0a4cad5cd"),
     _SourceAuthority("/usr/lib/spp/conf_proc_spp_boot.py", "engine", 0o444, 76307, "1559d69ea4880f859c7fe1f65c8c2ecdf874f06d401602ec785b889a68af1a8e"),
 )
-_LITERAL_SOURCE_ROWS: Final = tuple(
-    (item.archive_path, item.role, item.mode, item.size_bytes, item.sha256)
-    for item in BOOT_PAYLOAD_SOURCE_AUTHORITY
+_EXPECTED_LITERAL_SOURCE_ROWS: Final = (
+    ("/usr/lib/spp/conf_proc_geometry.py", "support", 0o444, 2725, "f8273165758c6460bb10d840cb67097a423df819c449119ad15d57b21e05205a"),
+    ("/usr/lib/spp/conf_proc_json.py", "support", 0o444, 4425, "b18793b443e3ab2dcaf4bb7762d2e9c52f4d88daddf7bfb614b87ac0d8e80e21"),
+    ("/usr/lib/spp/conf_proc_lock.py", "support", 0o444, 21243, "296cdc9ba1238dfa6ac982a33f6b1411a0d7730cbb88edbcfc4492c52c729bba"),
+    ("/usr/lib/spp/conf_proc_module_authority.py", "support", 0o444, 3173, "01e9c44c6221b54d792c6f5ff65a9bb82e0b77a29a397b9932b1a13c7d0efe26"),
+    ("/usr/lib/spp/conf_proc_policy.py", "support", 0o444, 16686, "e2c48f05dd4233bc8267bb53804e25fd948e06e73a80c6d04ac1e3299118c473"),
+    ("/usr/lib/spp/conf_proc_provenance_v2.py", "support", 0o444, 21957, "e94a0818b2d14168190ef7ed490cc147eb18dafd837087eab883630958b59ccd"),
+    ("/usr/lib/spp/conf_proc_provenance_v2_manifest.py", "support", 0o444, 16846, "bd3c3ba87c7f6db52759e9f5dd16a5d447b5521c24f714043492ad713549e399"),
+    ("/usr/lib/spp/conf_proc_reasons.py", "support", 0o444, 11847, "ab10f10ffad0702ca26704deeea5579b2100f78f0a0b931fa0da8ce0a4cad5cd"),
+    ("/usr/lib/spp/conf_proc_spp_boot.py", "engine", 0o444, 76307, "1559d69ea4880f859c7fe1f65c8c2ecdf874f06d401602ec785b889a68af1a8e"),
 )
 _EXPECTED_LOCAL_IMPORTS: Final = {
     "conf_proc_spp_boot": frozenset({"conf_proc_geometry", "conf_proc_json", "conf_proc_lock", "conf_proc_module_authority", "conf_proc_policy", "conf_proc_provenance_v2", "conf_proc_provenance_v2_manifest", "conf_proc_reasons"}),
@@ -119,6 +123,13 @@ class BootPayloadResult:
 @dataclass(frozen=True)
 class _Plan:
     source_paths: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _PayloadAddress:
+    boot_contract_sha256: str
+    cpio_sha256: str
+    package_sha256: str
 
 
 @dataclass(frozen=True)
@@ -170,6 +181,7 @@ class _FrozenSource:
     authority: _SourceAuthority
     relative_path: str
     parent_fd: int
+    parent_identity: _Identity
     leaf_name: str
     descriptor: int
     identity: _Identity
@@ -226,31 +238,36 @@ def _check_component_policy(value: str, code: str) -> None:
 
 def _validate_literal_authority() -> None:
     rows = BOOT_PAYLOAD_SOURCE_AUTHORITY
-    if not 1 <= len(rows) <= 64 or len(rows) != 9:
+    if type(rows) is not tuple or not 1 <= len(rows) <= 64 or len(rows) != 9:
         _error(CP_SPP_PAYLOAD_AUTHORITY)
-    if tuple((item.archive_path, item.role, item.mode, item.size_bytes, item.sha256) for item in rows) != _LITERAL_SOURCE_ROWS:
+    if any(type(item) is not _SourceAuthority for item in rows):
         _error(CP_SPP_PAYLOAD_AUTHORITY)
-    if sum(item.size_bytes for item in rows) != 175209:
+    actual_rows = tuple((item.archive_path, item.role, item.mode, item.size_bytes, item.sha256) for item in rows)
+    if actual_rows != _EXPECTED_LITERAL_SOURCE_ROWS:
         _error(CP_SPP_PAYLOAD_AUTHORITY)
     seen: set[str] = set()
     previous = b""
     engine_count = 0
     for item in rows:
-        if type(item) is not _SourceAuthority or type(item.archive_path) is not str or type(item.role) is not str or type(item.mode) is not int or type(item.size_bytes) is not int or type(item.sha256) is not str:
+        if type(item.archive_path) is not str or type(item.role) is not str or type(item.mode) is not int or type(item.size_bytes) is not int or type(item.sha256) is not str:
             _error(CP_SPP_PAYLOAD_AUTHORITY)
-        if not item.archive_path.startswith(_SOURCE_ROOT_ARCHIVE) or item.archive_path == _SOURCE_ROOT_ARCHIVE or len(item.archive_path.encode("utf-8")) > 255:
+        try:
+            encoded = item.archive_path.encode("utf-8")
+        except UnicodeEncodeError:
+            _error(CP_SPP_PAYLOAD_AUTHORITY)
+        if not item.archive_path.startswith(_SOURCE_ROOT_ARCHIVE) or item.archive_path == _SOURCE_ROOT_ARCHIVE or len(encoded) > 255:
             _error(CP_SPP_PAYLOAD_AUTHORITY)
         _absolute_normalized(item.archive_path, CP_SPP_PAYLOAD_AUTHORITY)
         _check_component_policy(item.archive_path, CP_SPP_PAYLOAD_AUTHORITY)
-        encoded = item.archive_path.encode("utf-8")
         if encoded <= previous or item.archive_path in seen or item.mode not in {0o444, 0o555} or item.mode != 0o444 or not _sha256(item.sha256) or not 1 <= item.size_bytes <= _MAX_SOURCE_BYTES:
             _error(CP_SPP_PAYLOAD_AUTHORITY)
-        previous, seen = encoded, seen | {item.archive_path}
+        previous = encoded
+        seen.add(item.archive_path)
         if item.role == "engine" and item.archive_path == "/usr/lib/spp/conf_proc_spp_boot.py":
             engine_count += 1
         elif item.role != "support":
             _error(CP_SPP_PAYLOAD_AUTHORITY)
-    if engine_count != 1 or sum(item.size_bytes for item in rows) > _MAX_TOTAL_BYTES:
+    if engine_count != 1 or sum(item.size_bytes for item in rows) != 175209 or sum(item.size_bytes for item in rows) > _MAX_TOTAL_BYTES:
         _error(CP_SPP_PAYLOAD_AUTHORITY)
     paths = sorted(seen, key=lambda value: value.encode("utf-8"))
     if any(right.startswith(left + "/") for left, right in zip(paths, paths[1:], strict=False)):
@@ -295,6 +312,9 @@ def _validate_plan(plan_bytes: object, binding: BootBinding) -> _Plan:
         source_paths.append(source_path)
     if len(set(source_paths)) != len(source_paths):
         _error(CP_SPP_PAYLOAD_PLAN)
+    normalized_paths = sorted(casefolded, key=lambda value: value.encode("utf-8"))
+    if any(right.startswith(left + "/") for left, right in zip(normalized_paths, normalized_paths[1:], strict=False)):
+        _error(CP_SPP_PAYLOAD_PLAN)
     return _Plan(tuple(source_paths))
 
 
@@ -338,9 +358,9 @@ def _revalidate_root(root: _PinnedRoot) -> None:
             _error(CP_SPP_PAYLOAD_SOURCE)
     reopened = _open_pinned_root(root.path)
     try:
-        expected, current = root.identities[-1], reopened.identities[-1]
-        if (expected.device, expected.inode, expected.mode, expected.uid, expected.gid) != (current.device, current.inode, current.mode, current.uid, current.gid):
-            _error(CP_SPP_PAYLOAD_SOURCE)
+        for expected, current in zip(root.identities, reopened.identities, strict=True):
+            if (expected.device, expected.inode, expected.mode, expected.uid, expected.gid) != (current.device, current.inode, current.mode, current.uid, current.gid):
+                _error(CP_SPP_PAYLOAD_SOURCE)
     finally:
         reopened.close()
 
@@ -355,7 +375,7 @@ def _read_source(root: _PinnedRoot, authority: _SourceAuthority, relative_path: 
             os.close(parent)
             parent = next_fd
             _trusted_directory(os.fstat(parent), final=False)
-        descriptor = os.open(components[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+        descriptor = os.open(components[-1], os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid() or before.st_nlink != 1 or before.st_size != authority.size_bytes:
             _error(CP_SPP_PAYLOAD_SOURCE)
@@ -370,7 +390,16 @@ def _read_source(root: _PinnedRoot, authority: _SourceAuthority, relative_path: 
         after = os.fstat(descriptor)
         if _identity(after) != _identity(before):
             _error(CP_SPP_PAYLOAD_SOURCE)
-        return _FrozenSource(authority, relative_path, parent, components[-1], descriptor, _identity(before), bytes(data))
+        return _FrozenSource(
+            authority,
+            relative_path,
+            parent,
+            _identity(os.fstat(parent)),
+            components[-1],
+            descriptor,
+            _identity(before),
+            bytes(data),
+        )
     except Exception:
         if descriptor >= 0:
             os.close(descriptor)
@@ -378,16 +407,30 @@ def _read_source(root: _PinnedRoot, authority: _SourceAuthority, relative_path: 
         raise
 
 
-def _revalidate_source(source: _FrozenSource) -> None:
-    if _identity(os.fstat(source.descriptor)) != source.identity:
+def _revalidate_source(root: _PinnedRoot, source: _FrozenSource) -> None:
+    """Recheck the frozen leaf and its descriptor-only route from the pinned root."""
+
+    if _identity(os.fstat(source.descriptor)) != source.identity or _identity(os.fstat(source.parent_fd)) != source.parent_identity:
         _error(CP_SPP_PAYLOAD_SOURCE)
-    reopened = os.open(source.leaf_name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=source.parent_fd)
+    parent = os.dup(root.fd)
     try:
-        value = _identity(os.fstat(reopened))
-        if value != source.identity:
+        for component in source.relative_path.split("/")[:-1]:
+            next_fd = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+            os.close(parent)
+            parent = next_fd
+            _trusted_directory(os.fstat(parent), final=False)
+        if _identity(os.fstat(parent)) != source.parent_identity:
             _error(CP_SPP_PAYLOAD_SOURCE)
+        reopened = os.open(source.leaf_name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+        try:
+            if _identity(os.fstat(reopened)) != source.identity:
+                _error(CP_SPP_PAYLOAD_SOURCE)
+        finally:
+            os.close(reopened)
+    except OSError:
+        _error(CP_SPP_PAYLOAD_SOURCE)
     finally:
-        os.close(reopened)
+        os.close(parent)
 
 
 def _check_source_content(source: _FrozenSource) -> None:
@@ -534,7 +577,18 @@ def _package_bytes(inspection: InspectionResult, binding: BootBinding, cpio: byt
     return canonical_dumps(value)
 
 
-def _check_builder_consistency(cpio: bytes, package: bytes, members: tuple[_Member, ...]) -> None:
+def _payload_address(binding: BootBinding, cpio: bytes, package: bytes) -> _PayloadAddress:
+    return _PayloadAddress(
+        binding.boot_contract_sha256,
+        hashlib.sha256(cpio).hexdigest(),
+        hashlib.sha256(package).hexdigest(),
+    )
+
+
+def _check_builder_consistency(cpio: bytes, package: bytes, members: tuple[_Member, ...], binding: BootBinding, address: _PayloadAddress) -> None:
+    expected_address = _payload_address(binding, cpio, package)
+    if address != expected_address:
+        _error(CP_SPP_PAYLOAD_CONSISTENCY)
     parsed = _parse_newc(cpio)
     expected = tuple((item.path, item.mode, item.data) for item in members)
     if parsed != expected:
@@ -548,23 +602,21 @@ def _check_builder_consistency(cpio: bytes, package: bytes, members: tuple[_Memb
     if value["schema"] != _PACKAGE_SCHEMA or value["state"] != "built_unqualified" or value["builder_consistency"] != "builder_consistent" or value["entries"] != [_entry_record(item) for item in members]:
         _error(CP_SPP_PAYLOAD_CONSISTENCY)
     cpio_value = value["cpio"]
-    if type(cpio_value) is not dict or cpio_value != {"sha256": hashlib.sha256(cpio).hexdigest(), "size_bytes": len(cpio), "status": "builder_consistent"}:
+    if type(cpio_value) is not dict or cpio_value != {"sha256": address.cpio_sha256, "size_bytes": len(cpio), "status": "builder_consistent"}:
         _error(CP_SPP_PAYLOAD_CONSISTENCY)
 
 
-def _open_or_create_directory(parent_fd: int, name: str) -> tuple[int, bool]:
+def _open_or_create_directory(parent_fd: int, name: str) -> int:
     try:
         descriptor = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
-        created = False
     except FileNotFoundError:
         os.mkdir(name, 0o700, dir_fd=parent_fd)
         descriptor = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
-        created = True
     value = os.fstat(descriptor)
     if not stat.S_ISDIR(value.st_mode) or value.st_uid != os.geteuid() or stat.S_IMODE(value.st_mode) != 0o700:
         os.close(descriptor)
         _error(CP_SPP_PAYLOAD_ADDRESS)
-    return descriptor, created
+    return descriptor
 
 
 def _address_parent(output: _PinnedRoot, binding: BootBinding, cpio_digest: str) -> tuple[int, list[int]]:
@@ -572,7 +624,7 @@ def _address_parent(output: _PinnedRoot, binding: BootBinding, cpio_digest: str)
     opened = [current]
     try:
         for name in ("built_unqualified", binding.boot_contract_sha256, cpio_digest):
-            child, _ = _open_or_create_directory(current, name)
+            child = _open_or_create_directory(current, name)
             opened.append(child)
             current = child
         return current, opened
@@ -593,6 +645,7 @@ def _write_leaf(parent_fd: int, name: str, data: bytes) -> None:
             offset += count
         os.fsync(descriptor)
         os.fchmod(descriptor, 0o444)
+        os.fsync(descriptor)
         value = os.fstat(descriptor)
         if not stat.S_ISREG(value.st_mode) or value.st_uid != os.geteuid() or value.st_nlink != 1 or stat.S_IMODE(value.st_mode) != 0o444:
             _error(CP_SPP_PAYLOAD_STAGING)
@@ -601,7 +654,7 @@ def _write_leaf(parent_fd: int, name: str, data: bytes) -> None:
 
 
 def _exact_leaf(parent_fd: int, name: str, expected: bytes) -> None:
-    descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
+    descriptor = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
     try:
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid() or before.st_nlink != 1 or stat.S_IMODE(before.st_mode) != 0o444 or before.st_size != len(expected):
@@ -711,10 +764,16 @@ def _cleanup_stage(output_fd: int, name: str, expected: _Identity | None) -> Non
         pass
 
 
-def _publish(output: _PinnedRoot, binding: BootBinding, cpio: bytes, package: bytes) -> str:
-    cpio_digest = hashlib.sha256(cpio).hexdigest()
-    package_digest = hashlib.sha256(package).hexdigest()
-    parent_fd, opened = _address_parent(output, binding, cpio_digest)
+def _publish(
+    source_root: _PinnedRoot,
+    sources: tuple[_FrozenSource, ...],
+    output: _PinnedRoot,
+    binding: BootBinding,
+    cpio: bytes,
+    package: bytes,
+    address: _PayloadAddress,
+) -> str:
+    parent_fd, opened = _address_parent(output, binding, address.cpio_sha256)
     opened_identities = tuple(_identity(os.fstat(descriptor)) for descriptor in opened)
     parent_identity = _identity(os.fstat(parent_fd))
     stage_name = ".spp-boot-payload-stage-" + os.urandom(16).hex()
@@ -749,14 +808,23 @@ def _publish(output: _PinnedRoot, binding: BootBinding, cpio: bytes, package: by
             parent_identity.mtime_ns, parent_identity.ctime_ns,
         )
         _check_final_parent(parent_fd, parent_expected, check_nlink=True)
+        _revalidate_root(source_root)
+        for source in sources:
+            _revalidate_source(source_root, source)
+        _revalidate_root(output)
+        _check_final_parent(output.fd, output.identities[-1], check_nlink=False)
+        for descriptor, expected in zip(opened[1:-1], opened_identities[1:-1], strict=True):
+            _check_final_parent(descriptor, expected, check_nlink=False)
+        _check_final_parent(parent_fd, parent_expected, check_nlink=True)
         try:
-            _rename_noreplace(parent_fd, stage_name, parent_fd, package_digest)
+            _rename_noreplace(parent_fd, stage_name, parent_fd, address.package_sha256)
             moved = True
         except FileExistsError:
-            _validate_existing(parent_fd, package_digest, cpio, package)
+            _validate_existing(parent_fd, address.package_sha256, cpio, package)
         _revalidate_root(output)
-        _validate_existing(parent_fd, package_digest, cpio, package)
-        return os.path.join(output.path, "built_unqualified", binding.boot_contract_sha256, cpio_digest, package_digest)
+        _check_final_parent(parent_fd, parent_expected, check_nlink=True)
+        _validate_existing(parent_fd, address.package_sha256, cpio, package)
+        return os.path.join(output.path, "built_unqualified", address.boot_contract_sha256, address.cpio_sha256, address.package_sha256)
     finally:
         if stage_fd >= 0:
             os.close(stage_fd)
@@ -789,13 +857,14 @@ def compile_boot_payload(*, inspection: InspectionResult, binding: BootBinding, 
         members = _members(frozen, binding)
         cpio = _newc_archive(members)
         package = _package_bytes(inspection, binding, cpio, members, unresolved)
-        _check_builder_consistency(cpio, package, members)
+        address = _payload_address(binding, cpio, package)
+        _check_builder_consistency(cpio, package, members, binding, address)
         _revalidate_root(source_pin)
         _revalidate_root(output_pin)
         for source in frozen:
-            _revalidate_source(source)
-        final_path = _publish(output_pin, binding, cpio, package)
-        return BootPayloadResult("built_unqualified", hashlib.sha256(cpio).hexdigest(), hashlib.sha256(package).hexdigest(), final_path)
+            _revalidate_source(source_pin, source)
+        final_path = _publish(source_pin, frozen, output_pin, binding, cpio, package, address)
+        return BootPayloadResult("built_unqualified", address.cpio_sha256, address.package_sha256, final_path)
     except ApplianceError:
         raise
     except OSError as exc:
