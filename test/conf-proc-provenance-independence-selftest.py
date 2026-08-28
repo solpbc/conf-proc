@@ -62,6 +62,7 @@ DORMANT_MODULES = frozenset(
         "conf_proc_provenance_v2_build_spdx",
         "conf_proc_provenance_v2_manifest",
         "conf_proc_provenance_v2_build_manifest",
+        "conf_proc_provenance_v2_assemble",
     }
 )
 DORMANT_POLICY_FILES = frozenset(
@@ -72,11 +73,20 @@ DORMANT_POLICY_FILES = frozenset(
         "conf_proc_provenance_v2_build_spdx.py",
         "conf_proc_provenance_v2_manifest.py",
         "conf_proc_provenance_v2_build_manifest.py",
+        "conf_proc_provenance_v2_assemble.py",
         "test/conf-proc-provenance-v2-selftest.py",
         "test/conf-proc-provenance-render-selftest.py",
         "test/conf-proc-provenance-native-kat-selftest.py",
         "test/conf-proc-provenance-v2-spdx-selftest.py",
         "test/conf-proc-provenance-v2-manifest-selftest.py",
+        "test/conf-proc-provenance-v2-assemble-e2e-selftest.py",
+        "test/conf-proc-provenance-v2-assemble-inputs-selftest.py",
+        "test/conf-proc-provenance-v2-assemble-native-selftest.py",
+        "test/conf-proc-provenance-v2-assemble-tree-selftest.py",
+        "test/conf-proc-provenance-v2-assemble-graph-selftest.py",
+        "test/conf-proc-provenance-v2-assemble-modules-selftest.py",
+        "test/conf-proc-provenance-v2-assemble-documents-selftest.py",
+        "test/conf-proc-provenance-v2-assemble-exposure-selftest.py",
     }
 )
 PROHIBITED_RUNTIME_IMPORT_ROOTS = frozenset({"builtins", "importlib", "runpy", "subprocess"})
@@ -768,6 +778,7 @@ class ProvenanceIndependenceTests(unittest.TestCase):
                     "conf_proc_provenance_v2_build_spdx",
                     "conf_proc_provenance_v2_manifest",
                     "conf_proc_provenance_v2_build_manifest",
+                    "conf_proc_provenance_v2_assemble",
                 }
             ),
         )
@@ -781,11 +792,20 @@ class ProvenanceIndependenceTests(unittest.TestCase):
                     "conf_proc_provenance_v2_build_spdx.py",
                     "conf_proc_provenance_v2_manifest.py",
                     "conf_proc_provenance_v2_build_manifest.py",
+                    "conf_proc_provenance_v2_assemble.py",
                     "test/conf-proc-provenance-v2-selftest.py",
                     "test/conf-proc-provenance-render-selftest.py",
                     "test/conf-proc-provenance-native-kat-selftest.py",
                     "test/conf-proc-provenance-v2-spdx-selftest.py",
                     "test/conf-proc-provenance-v2-manifest-selftest.py",
+                    "test/conf-proc-provenance-v2-assemble-e2e-selftest.py",
+                    "test/conf-proc-provenance-v2-assemble-inputs-selftest.py",
+                    "test/conf-proc-provenance-v2-assemble-native-selftest.py",
+                    "test/conf-proc-provenance-v2-assemble-tree-selftest.py",
+                    "test/conf-proc-provenance-v2-assemble-graph-selftest.py",
+                    "test/conf-proc-provenance-v2-assemble-modules-selftest.py",
+                    "test/conf-proc-provenance-v2-assemble-documents-selftest.py",
+                    "test/conf-proc-provenance-v2-assemble-exposure-selftest.py",
                 }
             ),
         )

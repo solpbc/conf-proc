@@ -15,11 +15,12 @@ from __future__ import annotations
 import hashlib
 import os
 import socket
+import stat
 import subprocess
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Iterator
+from typing import Iterable, Iterator
 
 from conf_proc_reasons import (
     CP_HERMETIC_CLOCK,
@@ -31,6 +32,8 @@ from conf_proc_reasons import (
     CP_TOOL_DIGEST_MISMATCH,
     CP_TOOL_INVOCATION_FAILED,
     CP_TOOL_MISSING,
+    CP_TOOL_PIN_CHANGED,
+    CP_TOOL_PIN_UNAVAILABLE,
     ApplianceError,
 )
 
@@ -43,6 +46,13 @@ class ToolDeclaration:
     """A single build-tool binary the guard is permitted to invoke."""
 
     absolute_path: str
+    sha256: str
+
+
+@dataclass(frozen=True)
+class _PinnedTool:
+    descriptor: int
+    identity: tuple[int, int, int, int, int]
     sha256: str
 
 
@@ -67,6 +77,7 @@ class HermeticGuard:
         self._tools = dict(tools)
         self._env = dict(env)
         self._build_epoch = build_epoch
+        self._pinned_tools: dict[str, _PinnedTool] = {}
 
     @property
     def build_epoch(self) -> int:
@@ -115,15 +126,30 @@ class HermeticGuard:
 
         if not argv:
             raise ApplianceError(CP_HERMETIC_UNLISTED_SUBPROCESS, "empty argv")
-        self.resolve_tool(argv[0])
-        result = subprocess.run(
-            argv,
-            cwd=cwd,
-            env=self._env,
-            input=input,
-            capture_output=True,
-            check=False,
-        )
+        pinned = self._pinned_tools.get(argv[0])
+        if pinned is None:
+            self.resolve_tool(argv[0])
+            result = subprocess.run(
+                argv,
+                cwd=cwd,
+                env=self._env,
+                input=input,
+                capture_output=True,
+                check=False,
+            )
+        else:
+            try:
+                result = subprocess.run(
+                    [f"/proc/self/fd/{pinned.descriptor}", *argv[1:]],
+                    cwd=cwd,
+                    env=self._env,
+                    input=input,
+                    capture_output=True,
+                    check=False,
+                    pass_fds=(pinned.descriptor,),
+                )
+            except OSError as exc:
+                raise ApplianceError(CP_TOOL_PIN_UNAVAILABLE, "could not execute the pinned tool inode") from exc
         if check and result.returncode != 0:
             raise ApplianceError(
                 CP_TOOL_INVOCATION_FAILED,
@@ -133,6 +159,85 @@ class HermeticGuard:
 
     def allowed_reads(self) -> frozenset[str]:
         return self._allowed_reads
+
+    @contextmanager
+    def pin_tools(self, absolute_paths: Iterable[str]) -> Iterator[None]:
+        """Execute selected declared tools from their validated open inodes.
+
+        This is opt-in and leaves the ordinary resolve-then-exec behavior of
+        :meth:`run_tool` unchanged outside the context.  Each selected path is
+        opened and verified exactly once, then rechecked on the same descriptor
+        before it is closed.
+        """
+
+        paths = tuple(absolute_paths)
+        if not paths or len(paths) != len(set(paths)):
+            raise ApplianceError(CP_TOOL_PIN_UNAVAILABLE, "pinned tool paths must be a non-empty unique set")
+        if self._pinned_tools:
+            raise ApplianceError(CP_TOOL_PIN_UNAVAILABLE, "nested pinned tool contexts are unsupported")
+
+        pinned: dict[str, _PinnedTool] = {}
+        try:
+            for path in paths:
+                declaration = self._tools.get(path)
+                if declaration is None or not os.path.isabs(path):
+                    raise ApplianceError(CP_TOOL_PIN_UNAVAILABLE, "pinned tool is not a declared absolute path")
+                try:
+                    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+                except OSError as exc:
+                    raise ApplianceError(CP_TOOL_PIN_UNAVAILABLE, "could not open declared tool without following links") from exc
+                try:
+                    before = os.fstat(descriptor)
+                    if not stat.S_ISREG(before.st_mode):
+                        raise ApplianceError(CP_TOOL_PIN_UNAVAILABLE, "declared tool is not a regular file")
+                    digest = _sha256_fd(descriptor)
+                    if digest != declaration.sha256:
+                        raise ApplianceError(CP_TOOL_PIN_CHANGED, "pinned tool digest does not match its declaration")
+                    pinned[path] = _PinnedTool(
+                        descriptor=descriptor,
+                        identity=_stat_identity(before),
+                        sha256=digest,
+                    )
+                except OSError as exc:
+                    os.close(descriptor)
+                    raise ApplianceError(CP_TOOL_PIN_UNAVAILABLE, "could not validate pinned tool inode") from exc
+                except Exception:
+                    os.close(descriptor)
+                    raise
+
+            self._pinned_tools = pinned
+            yield
+        finally:
+            self._pinned_tools = {}
+            pin_error: ApplianceError | None = None
+            for pinned_tool in pinned.values():
+                try:
+                    after = os.fstat(pinned_tool.descriptor)
+                    if _stat_identity(after) != pinned_tool.identity or _sha256_fd(pinned_tool.descriptor) != pinned_tool.sha256:
+                        pin_error = ApplianceError(CP_TOOL_PIN_CHANGED, "pinned tool changed during its pin lifetime")
+                except OSError as exc:
+                    pin_error = ApplianceError(CP_TOOL_PIN_CHANGED, "could not recheck pinned tool")
+                    pin_error.__cause__ = exc
+                finally:
+                    os.close(pinned_tool.descriptor)
+            if pin_error is not None:
+                raise pin_error
+
+
+def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+
+
+def _sha256_fd(descriptor: int) -> str:
+    digest = hashlib.sha256()
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    while True:
+        chunk = os.read(descriptor, 1024 * 1024)
+        if not chunk:
+            break
+        digest.update(chunk)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    return digest.hexdigest()
 
 
 @contextmanager
