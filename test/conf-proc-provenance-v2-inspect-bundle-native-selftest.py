@@ -70,6 +70,18 @@ class H4InspectorBundleNativeTests(unittest.TestCase):
             inspector.inspect_bundle(**{**self.fixture.inspect_kwargs(), "tool_root": str(empty)})
         self.assertEqual(context.exception.reason_code, "CP_TOOL_MISSING")
 
+    def test_oversized_candidate_document_fails_before_native_inspection(self) -> None:
+        candidate = self.fixture.clone_bundle("oversized-document")
+        document = Path(candidate, "appliance.manifest.json")
+        os.chmod(candidate, 0o755)
+        os.chmod(document, 0o600)
+        with document.open("wb") as handle:
+            handle.seek(inspector.MAX_INPUT_BYTES)
+            handle.write(b"x")
+        os.chmod(document, 0o444)
+        os.chmod(candidate, 0o555)
+        self.assertEqual(self._fails(candidate), "CP_PROVENANCE_INPUT_SIZE")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

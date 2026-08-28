@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -17,6 +18,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "test"))
 
 import conf_proc_provenance_v2_inspect as inspector  # noqa: E402
+import conf_proc_json as cj  # noqa: E402
 from conf_proc_provenance_v2_inspect_documents import derive_inspection_inputs  # noqa: E402
 from conf_proc_provenance_v2_inspect_fixture import build_positive_fixture  # noqa: E402
 
@@ -58,6 +60,34 @@ class H4InspectorEndToEndTests(unittest.TestCase):
         )
         self.assertEqual(result.artifact_input_sha256, expected.artifact_input_sha256)
         self.assertEqual(result.execution_provenance_sha256, expected.execution_provenance_sha256)
+
+    def test_cli_failure_is_explicitly_not_qualified(self) -> None:
+        candidate = self.fixture.clone_bundle("cli-negative")
+        os.chmod(candidate, 0o755)
+        Path(candidate, "unexpected").write_bytes(b"x")
+        os.chmod(candidate, 0o555)
+        values = self.fixture.inspect_kwargs()
+        completed = subprocess.run(
+            [
+                sys.executable, str(ROOT / "conf_proc_provenance_v2_inspect.py"),
+                "--root-lock", values["root_lock_path"],
+                "--runtime-closure", values["runtime_closure_path"],
+                "--verity-rules", values["verity_rules_path"],
+                "--tcb-identity", values["tcb_identity_path"],
+                "--builder-source", values["builder_source_path"],
+                "--policy", values["policy_path"],
+                "--input-root", values["input_root"],
+                "--tool-root", values["tool_root"],
+                "--bundle", candidate,
+            ],
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 1)
+        outcome = cj.canonical_loads(completed.stdout.rstrip(b"\n"))
+        self.assertEqual(outcome["state"], "not_qualified")
+        self.assertEqual(outcome["hardware_qualification"], "not_qualified")
+        self.assertNotIn("artifact_consistent", outcome.values())
 
 
 if __name__ == "__main__":

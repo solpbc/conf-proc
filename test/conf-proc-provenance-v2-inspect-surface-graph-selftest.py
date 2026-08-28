@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "test")]
 
 from conf_proc_graph_compare import compare_graph_to_policy  # noqa: E402
+import conf_proc_inspect_graph as inspect_graph  # noqa: E402
 from conf_proc_inspect_graph import extract_graph  # noqa: E402
 from conf_proc_inspect_modules import compare_module_authority  # noqa: E402
 from conf_proc_policy import parse_policy  # noqa: E402
@@ -49,7 +50,7 @@ class H4InspectorSurfaceGraphTests(unittest.TestCase):
             ("usr/lib/systemd/system-generators/h4", b"#!/bin/sh\n", 0o755),
             ("etc/dbus-1/system-services/h4.service", b"[D-BUS Service]\nExec=/bin/sh -c x\n", 0o644),
             ("etc/udev/rules.d/h4.rules", b'ACTION=="add", ENV{SYSTEMD_WANTS}="h4.service"\n', 0o644),
-            ("etc/cron.d/h4", b"* * * * * root /bin/true\n", 0o644),
+            ("etc/cron.d/h4", b"* * * * * root /bin/true --arg\n", 0o644),
             ("opt/azure-runcommand", b"x", 0o644),
             ("opt/bin/runner", b"exec cloud-init status", 0o644),
             ("etc/systemd/journald.conf", b"[Journal]\nStorage=persistent\n", 0o644),
@@ -69,6 +70,61 @@ class H4InspectorSurfaceGraphTests(unittest.TestCase):
             with self.assertRaises(ApplianceError):
                 check_extracted_surfaces(runtime_policy_root=str(runtime), models_root=str(models), policy=self.policy, graph_nodes=[])
 
+    def test_strict_graph_closes_all_supported_activation_kinds_recursively(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as root:
+            models = Path(root, "models")
+            runtime = Path(root, "runtime")
+            models.mkdir()
+            for relative, content in (
+                ("usr/bin/app", b"#!/usr/bin/middle\nexit 0\n"),
+                ("usr/bin/middle", b"#!/usr/bin/final\nexit 0\n"),
+                ("usr/bin/final", b""),
+                ("etc/dbus-1/system-services/h4.service", b"[D-BUS Service]\nExec=/usr/bin/app\n"),
+                ("etc/udev/rules.d/h4.rules", b'SUBSYSTEM=="fixture", PROGRAM=="/usr/bin/app"\n'),
+                ("etc/cron.d/h4", b"* * * * * root /usr/bin/app\n"),
+            ):
+                target = runtime / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(content)
+            nodes, edges = extract_graph(str(runtime), strict=True)
+            check_extracted_surfaces(
+                runtime_policy_root=str(runtime), models_root=str(models), policy=self.policy, graph_nodes=nodes
+            )
+            self.assertEqual(
+                {edge["kind"] for edge in edges if edge["to_id"] == "exec:/usr/bin/app"},
+                {"dbus_activation", "udev_activation", "cron_activation"},
+            )
+            self.assertEqual(
+                {
+                    (edge["from_id"], edge["to_id"])
+                    for edge in edges
+                    if edge["kind"] == "script_interpreter"
+                },
+                {
+                    ("exec:/usr/bin/app", "interpreter:/usr/bin/middle"),
+                    ("interpreter:/usr/bin/middle", "interpreter:/usr/bin/final"),
+                },
+            )
+
+            Path(runtime, "usr/bin/middle").unlink()
+            with self.assertRaises(ApplianceError) as context:
+                extract_graph(str(runtime), strict=True)
+            self.assertEqual(context.exception.reason_code, "CP_POLICY_UNSUPPORTED_ACTIVATION")
+            legacy_nodes, _legacy_edges = extract_graph(str(runtime))
+            self.assertIn("exec:/usr/bin/app", {node["id"] for node in legacy_nodes})
+
+    def test_strict_graph_rejects_ambiguous_fixed_path_library(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as root:
+            runtime = Path(root, "runtime")
+            for relative in ("lib/libx.so.1", "usr/lib/libx.so.1"):
+                target = runtime / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(relative.encode())
+            accumulator = inspect_graph._GraphAccumulator(str(runtime), strict=True)
+            with self.assertRaises(ApplianceError) as context:
+                inspect_graph._resolve_soname(accumulator, "libx.so.1")
+            self.assertEqual(context.exception.reason_code, "CP_POLICY_UNSUPPORTED_ACTIVATION")
+
     def test_large_non_executable_model_is_not_content_scanned(self) -> None:
         with tempfile.TemporaryDirectory(dir="/var/tmp") as root:
             models = Path(root, "models")
@@ -78,6 +134,23 @@ class H4InspectorSurfaceGraphTests(unittest.TestCase):
             runtime.mkdir()
             model.write_bytes(b"x" * (32 * 1024 * 1024 + 1))
             check_extracted_surfaces(runtime_policy_root=str(runtime), models_root=str(models), policy=self.policy, graph_nodes=[])
+
+    def test_large_runtime_file_is_stream_scanned_without_policy_cap(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as root:
+            models = Path(root, "models")
+            runtime = Path(root, "runtime")
+            models.mkdir()
+            payload = runtime / "usr/lib/liblarge.so"
+            payload.parent.mkdir(parents=True)
+            payload.write_bytes(b"x" * (32 * 1024 * 1024 + 1))
+            check_extracted_surfaces(runtime_policy_root=str(runtime), models_root=str(models), policy=self.policy, graph_nodes=[])
+
+            with payload.open("r+b") as handle:
+                handle.seek(1024 * 1024 - 4)
+                handle.write(b"xxxxcloud-initxxxx")
+            with self.assertRaises(ApplianceError) as context:
+                check_extracted_surfaces(runtime_policy_root=str(runtime), models_root=str(models), policy=self.policy, graph_nodes=[])
+            self.assertEqual(context.exception.reason_code, "CP_PROVENANCE_V2_INSPECT_PROHIBITED_SURFACE")
 
     def test_graph_and_module_authority_mismatches_are_red(self) -> None:
         with self.assertRaises(ApplianceError):

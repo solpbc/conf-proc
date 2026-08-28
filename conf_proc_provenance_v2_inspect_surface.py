@@ -17,7 +17,7 @@ from typing import Final
 
 from conf_proc_prohibited import check_content_markers, check_prohibited_path, check_prohibited_unit
 from conf_proc_reasons import CP_PROVENANCE_V2_INSPECT_PROHIBITED_SURFACE, ApplianceError
-from conf_proc_unit_parser import parse_exec_line, parse_systemd_unit, parse_udev_actions
+from conf_proc_unit_parser import parse_crontab_lines, parse_exec_line, parse_systemd_unit, parse_udev_actions
 
 
 _UNIT_DIRS: Final = ("etc/systemd/system", "usr/lib/systemd/system", "lib/systemd/system")
@@ -45,6 +45,8 @@ _SHELL_BASENAMES: Final = frozenset({"sh", "bash", "dash", "zsh", "ksh", "busybo
 _FETCHER_BASENAMES: Final = frozenset({"apt", "apt-get", "yum", "dnf", "curl", "wget"})
 _AZURE_MARKERS: Final = ("runcommand", "run-command", "run_command", "microsoft.cplat.core", "walinuxagent", "waagent", "cloud-init")
 _JOURNAL_PREFIXES: Final = ("var/log/journal", "var/lib/systemd/journal")
+_CONTENT_SCAN_CHUNK: Final = 1024 * 1024
+_CONTENT_SCAN_OVERLAP: Final = 64
 
 
 def check_extracted_surfaces(*, runtime_policy_root: str, models_root: str, policy, graph_nodes: list[dict]) -> None:
@@ -115,16 +117,24 @@ def _scan_regular_content(relative: str, absolute: str, policy) -> None:
     basename = posixpath.basename(normalized)
     if basename in _FETCHER_BASENAMES:
         _reject("network fetcher is prohibited")
-    if normalized in _UNMODELED_ACTIVATION_FILES or parent in _CRON_D_DIRS or parent in _CRON_PERIOD_DIRS:
+    if normalized in _UNMODELED_ACTIVATION_FILES or parent in _CRON_PERIOD_DIRS:
         _reject("cron activation is prohibited")
     if parent in _GENERATOR_DIRS:
         _reject("systemd generator is prohibited")
+    if normalized.startswith(_JOURNAL_PREFIXES) or basename.endswith((".journal", ".journal~")):
+        _reject("persistent journal surface is prohibited")
+    structured = (
+        parent in (*_UNIT_DIRS, *_DBUS_DIRS, *_UDEV_DIRS, *_CRON_D_DIRS)
+        or normalized == "etc/systemd/journald.conf"
+        or normalized.startswith("etc/systemd/journald.conf.d/")
+    )
+    if not structured:
+        _scan_unstructured_content(absolute, f"/{normalized}")
+        return
     content = _read_bounded(absolute)
     _check_shared_content(f"/{normalized}", content)
     if any(marker.encode("ascii") in content.lower() for marker in _AZURE_MARKERS):
         _reject("Azure or cloud management surface is prohibited")
-    if normalized.startswith(_JOURNAL_PREFIXES) or basename.endswith((".journal", ".journal~")):
-        _reject("persistent journal surface is prohibited")
     if _is_journald_config(normalized, content):
         _reject("persistent journald configuration is prohibited")
     if parent in _UNIT_DIRS:
@@ -133,6 +143,8 @@ def _scan_regular_content(relative: str, absolute: str, policy) -> None:
         _validate_dbus_service(content)
     elif parent in _UDEV_DIRS:
         _validate_udev_rule(content)
+    elif parent in _CRON_D_DIRS:
+        _validate_cron_file(content)
 
 
 def _validate_service_unit(basename: str, content: bytes, policy) -> None:
@@ -182,6 +194,12 @@ def _validate_udev_rule(content: bytes) -> None:
     parse_udev_actions(_decode_text(content), reject_unmodeled=True)
 
 
+def _validate_cron_file(content: bytes) -> None:
+    commands = parse_crontab_lines(_decode_text(content), reject_unmodeled=True)
+    if len(commands) != 1:
+        _reject("cron.d must contain exactly one modeled command")
+
+
 def _validate_exec_value(value: str) -> None:
     argv = parse_exec_line(value)
     if any(marker in value for marker in _SHELL_MARKERS) or posixpath.basename(argv[0]) in _SHELL_BASENAMES:
@@ -210,6 +228,8 @@ def _validate_activation_path(relative: str) -> None:
         **{directory: (".rules",) for directory in _UDEV_DIRS},
         **{directory: None for directory in (*_CRON_D_DIRS, *_CRON_PERIOD_DIRS, *_GENERATOR_DIRS)},
     }
+    if normalized in approved or any(directory.startswith(normalized + "/") for directory in approved):
+        return
     if parent in approved:
         suffixes = approved[parent]
         if suffixes is not None and not basename.endswith(suffixes):
@@ -276,6 +296,22 @@ def _read_bounded(path: str) -> bytes:
     if len(data) > 32 * 1024 * 1024:
         _reject("extracted content exceeds inspection limit")
     return data
+
+
+def _scan_unstructured_content(path: str, image_path: str) -> None:
+    """Scan arbitrary-size runtime bytes without imposing a candidate size cap."""
+
+    tail = b""
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(_CONTENT_SCAN_CHUNK)
+            if not chunk:
+                return
+            window = tail + chunk
+            _check_shared_content(image_path, window)
+            if any(marker.encode("ascii") in window.lower() for marker in _AZURE_MARKERS):
+                _reject("Azure or cloud management surface is prohibited")
+            tail = window[-_CONTENT_SCAN_OVERLAP:]
 
 
 def _decode_text(data: bytes) -> str:

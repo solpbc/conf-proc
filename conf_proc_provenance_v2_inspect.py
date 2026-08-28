@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import posixpath
 import stat
 import subprocess
 import sys
@@ -71,6 +72,13 @@ class InspectionResult:
     manifest_sha256: str
     spdx_sha256: str
     evidence_ceiling: str
+
+
+@dataclass(frozen=True)
+class _PinnedSourceAuthority:
+    path: str
+    identity: tuple[int, int, int, int, int]
+    sha256: str
 
 
 class _ReadBudget:
@@ -201,6 +209,94 @@ def _pinned_bundle_files(directory: str) -> Iterator[dict[str, int]]:
                 pass
 
 
+@contextmanager
+def _pinned_source_authority(input_root: str, relative_path: str, expected_sha256: str) -> Iterator[_PinnedSourceAuthority]:
+    """Retain every source-root component and one exact out-of-image authority."""
+
+    if os.path.isabs(relative_path) or posixpath.normpath(relative_path) != relative_path or relative_path.startswith("../"):
+        raise ApplianceError(CP_PROVENANCE_INPUT_READ, "source authority path is invalid")
+    components = [part for part in os.path.abspath(input_root).split(os.sep) if part]
+    relative_components = [part for part in relative_path.split("/") if part]
+    if not components or not relative_components or any(part in (".", "..") for part in relative_components):
+        raise ApplianceError(CP_PROVENANCE_INPUT_READ, "source authority path is invalid")
+
+    directories: list[tuple[int, str, int, tuple[int, int, int, int, int], bool]] = []
+    root_descriptor = -1
+    leaf_descriptor = -1
+    try:
+        root_descriptor = os.open(os.sep, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        parent = root_descriptor
+        for index, component in enumerate((*components, *relative_components[:-1])):
+            child = os.open(
+                component,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=parent,
+            )
+            metadata = os.fstat(child)
+            if not _is_trusted_source_directory(metadata):
+                os.close(child)
+                raise ApplianceError(CP_PROVENANCE_INPUT_READ, "source authority directory is not trusted")
+            content_sensitive = index >= len(components) - 1
+            directories.append(
+                (
+                    parent,
+                    component,
+                    child,
+                    _directory_identity(metadata, content_sensitive=content_sensitive),
+                    content_sensitive,
+                )
+            )
+            parent = child
+        leaf_name = relative_components[-1]
+        leaf_descriptor = os.open(leaf_name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=parent)
+        metadata = os.fstat(leaf_descriptor)
+        if not _is_same_owner_regular(metadata):
+            raise ApplianceError(CP_PROVENANCE_INPUT_READ, "source authority is not a same-owner regular file")
+        identity = _stat_identity(metadata)
+        digest = _sha256_fd(leaf_descriptor)
+        if digest != expected_sha256:
+            raise ApplianceError(CP_PROVENANCE_INPUT_READ, "source authority digest disagrees with root lock")
+        yield _PinnedSourceAuthority(
+            path=os.path.abspath(os.path.join(input_root, relative_path)),
+            identity=identity,
+            sha256=digest,
+        )
+
+        for parent_descriptor, name, descriptor, expected_identity, content_sensitive in directories:
+            if _directory_identity(os.fstat(descriptor), content_sensitive=content_sensitive) != expected_identity:
+                raise ApplianceError(CP_PROVENANCE_V2_INSPECT_CONCURRENT_MUTATION, "source authority directory changed")
+            current = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=parent_descriptor)
+            try:
+                current_stat = os.fstat(current)
+                if (current_stat.st_dev, current_stat.st_ino) != (expected_identity[0], expected_identity[1]):
+                    raise ApplianceError(CP_PROVENANCE_V2_INSPECT_CONCURRENT_MUTATION, "source authority path changed")
+            finally:
+                os.close(current)
+        after = os.fstat(leaf_descriptor)
+        current = os.open(leaf_name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=directories[-1][2])
+        try:
+            current_stat = os.fstat(current)
+            if (
+                _stat_identity(after) != identity
+                or _sha256_fd(leaf_descriptor) != digest
+                or (current_stat.st_dev, current_stat.st_ino) != (after.st_dev, after.st_ino)
+            ):
+                raise ApplianceError(CP_PROVENANCE_V2_INSPECT_CONCURRENT_MUTATION, "source authority changed during inspection")
+        finally:
+            os.close(current)
+    except ApplianceError:
+        raise
+    except OSError as exc:
+        raise ApplianceError(CP_PROVENANCE_INPUT_READ, "could not pin source authority path") from exc
+    finally:
+        if leaf_descriptor >= 0:
+            os.close(leaf_descriptor)
+        for _parent, _name, descriptor, _identity, _content_sensitive in reversed(directories):
+            os.close(descriptor)
+        if root_descriptor >= 0:
+            os.close(root_descriptor)
+
+
 def inspect_bundle(
     *,
     root_lock_path: str,
@@ -269,12 +365,18 @@ def _inspect_values(**paths: str) -> dict[str, str]:
         guard = _candidate_guard(base_guard, inputs.lock, tool_paths, candidate_paths.values())
         pinned_reads = (*candidate_paths.values(), trusted_bundle_path)
         result: dict[str, str] | None = None
-        with _pinned_bundle_files(paths["bundle"]) as bundle_files, guard.pin_reads(pinned_reads), guard.pin_tools(
-            (tool_paths["veritysetup"], tool_paths["unsquashfs"], tool_paths["openssl"])
+        with (
+            _pinned_source_authority(paths["input_root"], trusted_input.source_local_path, trusted_input.sha256) as trusted_authority,
+            _pinned_bundle_files(paths["bundle"]) as bundle_files,
+            guard.pin_reads(pinned_reads),
+            guard.pin_tools((tool_paths["veritysetup"], tool_paths["unsquashfs"], tool_paths["openssl"])),
         ):
+            _validate_document_budget(authority_bytes, bundle_files)
             for name, descriptor in bundle_files.items():
                 if _stat_identity(os.fstat(descriptor)) != _stat_identity(guard.stat_read(candidate_paths[name])):
                     raise ApplianceError(CP_PROVENANCE_V2_INSPECT_CONCURRENT_MUTATION, "candidate pin identities disagree")
+            if _stat_identity(guard.stat_read(trusted_bundle_path)) != trusted_authority.identity:
+                raise ApplianceError(CP_PROVENANCE_V2_INSPECT_CONCURRENT_MUTATION, "source authority pin identities disagree")
             trusted_bundle_bytes = guard.read_bytes(trusted_bundle_path)
             if hashlib.sha256(trusted_bundle_bytes).hexdigest() != trusted_input.sha256:
                 raise ApplianceError(CP_PROVENANCE_INPUT_READ, "trusted certificate authority does not match the lock")
@@ -312,7 +414,7 @@ def _inspect_values(**paths: str) -> dict[str, str]:
                     "graph_edges": edges,
                 }
                 check_documents(manifest_bytes=manifest_bytes, spdx_bytes=spdx_bytes, inputs=inputs, evidence=evidence)
-                _require_sealed_binding(authorities, candidate_paths)
+                _require_sealed_binding(authority_bytes, manifest_bytes, spdx_bytes, work_root)
                 result = {
                     "state": "artifact_consistent",
                     "hardware_qualification": "not_qualified",
@@ -350,6 +452,17 @@ def _candidate_guard(base_guard: HermeticGuard, lock, tool_paths: dict[str, str]
 def _require_native_tools(tool_paths: dict[str, str]) -> None:
     if any(name not in tool_paths for name in ("veritysetup", "unsquashfs", "openssl")):
         raise ApplianceError(CP_TOOL_MISSING, "required native inspection tool is not declared")
+
+
+def _validate_document_budget(authorities: dict[str, bytes], bundle_files: dict[str, int]) -> None:
+    document_sizes = [
+        os.fstat(bundle_files["appliance.manifest.json"]).st_size,
+        os.fstat(bundle_files["appliance.spdx.json"]).st_size,
+    ]
+    if any(size < 0 or size > MAX_INPUT_BYTES for size in document_sizes):
+        raise ApplianceError(CP_PROVENANCE_INPUT_SIZE, "candidate document exceeds its bounded-read budget")
+    if sum(len(payload) for payload in authorities.values()) + sum(document_sizes) > MAX_TOTAL_INPUT_BYTES:
+        raise ApplianceError(CP_PROVENANCE_INPUT_SIZE, "authority and document aggregate exceeds its bounded-read budget")
 
 
 def _inspect_images(*, guard: HermeticGuard, tool_paths: dict[str, str], lock, lock_digest: bytes, candidate_paths: dict[str, str], trusted_bundle_path: str, work_root: str):
@@ -406,7 +519,7 @@ def _inspect_images(*, guard: HermeticGuard, tool_paths: dict[str, str], lock, l
             compare_against_lock(inventory, lock, image=image)
             inventories[image] = inventory
             extraction_roots[image] = extract_root
-            nodes, edges = extract_graph(extract_root)
+            nodes, edges = extract_graph(extract_root, strict=True)
             _merge_graph(all_nodes, all_edges, nodes, edges)
             module_rows, firmware_rows = rederive_module_authority(
                 guard,
@@ -450,21 +563,28 @@ def _compare_module_claims(manifest_bytes: bytes, modules: list[dict], firmware:
         raise ApplianceError(CP_PROVENANCE_V2_INSPECT_DOCUMENT_MISMATCH, "candidate module claim is invalid") from exc
 
 
-def _require_sealed_binding(authorities: dict[str, str], candidate_paths: dict[str, str]) -> None:
+def _require_sealed_binding(authorities: dict[str, bytes], manifest_bytes: bytes, spdx_bytes: bytes, work_root: str) -> None:
     adapter = os.path.join(os.path.dirname(os.path.abspath(__file__)), "conf_proc_inspect_provenance_cli.py")
-    argv = [
-        sys.executable, adapter,
-        "--root-lock", authorities["root_lock"],
-        "--runtime-closure", authorities["runtime_closure"],
-        "--verity-rules", authorities["verity_rules"],
-        "--tcb-identity", authorities["tcb_identity"],
-        "--builder-source", authorities["builder_source"],
-        "--policy", authorities["policy"],
-        "--manifest", candidate_paths["appliance.manifest.json"],
-        "--sbom", candidate_paths["appliance.spdx.json"],
-    ]
     try:
-        completed = subprocess.run(argv, capture_output=True, check=False)
+        payloads = {**authorities, "manifest": manifest_bytes, "sbom": spdx_bytes}
+        with _sealed_file_snapshot(payloads, work_root) as snapshot_paths:
+            argv = [
+                sys.executable, adapter,
+                "--root-lock", snapshot_paths["root_lock"],
+                "--runtime-closure", snapshot_paths["runtime_closure"],
+                "--verity-rules", snapshot_paths["verity_rules"],
+                "--tcb-identity", snapshot_paths["tcb_identity"],
+                "--builder-source", snapshot_paths["builder_source"],
+                "--policy", snapshot_paths["policy"],
+                "--manifest", snapshot_paths["manifest"],
+                "--sbom", snapshot_paths["sbom"],
+            ]
+            completed = subprocess.run(
+                argv,
+                capture_output=True,
+                check=False,
+                env={"PATH": os.defpath, "LC_ALL": "C", "LANG": "C", "TZ": "UTC", "HOME": "/nonexistent"},
+            )
         output = completed.stdout[:-1] if completed.stdout.endswith(b"\n") else completed.stdout
         parsed = canonical_loads(output)
         if completed.returncode != 0 or type(parsed) is not dict or parsed.get("accepted") is not True:
@@ -473,6 +593,59 @@ def _require_sealed_binding(authorities: dict[str, str], candidate_paths: dict[s
         raise
     except (OSError, TypeError, ValueError) as exc:
         raise ApplianceError(CP_PROVENANCE_V2_INSPECT_SEALED_BINDING, "sealed provenance binding could not be checked") from exc
+
+
+@contextmanager
+def _sealed_file_snapshot(payloads: dict[str, bytes], work_root: str) -> Iterator[dict[str, str]]:
+    directory = os.path.join(work_root, "sealed-snapshot")
+    os.mkdir(directory, 0o700)
+    root = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    descriptors: dict[str, int] = {}
+    identities: dict[str, tuple[int, int, int, int, int]] = {}
+    digests: dict[str, str] = {}
+    try:
+        for name, payload in payloads.items():
+            if not name.replace("_", "-").replace("-", "").isalnum():
+                raise OSError("snapshot name is not safe")
+            descriptor = os.open(
+                name,
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+                0o400,
+                dir_fd=root,
+            )
+            descriptors[name] = descriptor
+            view = memoryview(payload)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise OSError("could not write sealed snapshot")
+                view = view[written:]
+            os.fchmod(descriptor, 0o400)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            identities[name] = _stat_identity(os.fstat(descriptor))
+            digests[name] = _sha256_fd(descriptor)
+        os.fchmod(root, 0o500)
+        root_identity = _stat_identity(os.fstat(root))
+        yield {name: os.path.join(directory, name) for name in payloads}
+        if _stat_identity(os.fstat(root)) != root_identity or sorted(os.listdir(root)) != sorted(payloads):
+            raise ApplianceError(CP_PROVENANCE_V2_INSPECT_CONCURRENT_MUTATION, "sealed snapshot directory changed")
+        for name, descriptor in descriptors.items():
+            after = os.fstat(descriptor)
+            current = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=root)
+            try:
+                current_stat = os.fstat(current)
+                if (
+                    _stat_identity(after) != identities[name]
+                    or _sha256_fd(descriptor) != digests[name]
+                    or (current_stat.st_dev, current_stat.st_ino) != (after.st_dev, after.st_ino)
+                ):
+                    raise ApplianceError(CP_PROVENANCE_V2_INSPECT_CONCURRENT_MUTATION, "sealed snapshot changed")
+            finally:
+                os.close(current)
+    finally:
+        for descriptor in descriptors.values():
+            os.close(descriptor)
+        os.close(root)
 
 
 def _open_nofollow_regular(path: str) -> int:
@@ -546,8 +719,23 @@ def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
     return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
 
 
+def _directory_identity(value: os.stat_result, *, content_sensitive: bool) -> tuple[int, int, int, int, int]:
+    if content_sensitive:
+        return _stat_identity(value)
+    return (value.st_dev, value.st_ino, stat.S_IMODE(value.st_mode), value.st_uid, value.st_gid)
+
+
 def _is_same_owner_directory(value: os.stat_result) -> bool:
     return stat.S_ISDIR(value.st_mode) and not stat.S_ISLNK(value.st_mode) and value.st_uid == os.geteuid()
+
+
+def _is_trusted_source_directory(value: os.stat_result) -> bool:
+    mode = stat.S_IMODE(value.st_mode)
+    return (
+        stat.S_ISDIR(value.st_mode)
+        and value.st_uid in (0, os.geteuid())
+        and (not mode & 0o022 or bool(mode & stat.S_ISVTX))
+    )
 
 
 def _is_same_owner_regular(value: os.stat_result) -> bool:
@@ -579,7 +767,17 @@ def main(argv: list[str] | None = None) -> int:
             bundle=args.bundle,
         )
     except ApplianceError as exc:
-        sys.stdout.buffer.write(canonical_dumps({"reason_code": exc.reason_code, "message": "inspection failed"}) + b"\n")
+        sys.stdout.buffer.write(
+            canonical_dumps(
+                {
+                    "state": "not_qualified",
+                    "hardware_qualification": "not_qualified",
+                    "reason_code": exc.reason_code,
+                    "message": "inspection failed",
+                }
+            )
+            + b"\n"
+        )
         return 1
     sys.stdout.buffer.write(canonical_dumps(asdict(result)) + b"\n")
     return 0

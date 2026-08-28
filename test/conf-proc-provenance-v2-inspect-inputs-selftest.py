@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import os
+import shutil
 import sys
 import unittest
 from copy import deepcopy
@@ -15,6 +17,7 @@ sys.path[:0] = [str(ROOT), str(ROOT / "test")]
 
 import conf_proc_provenance_v2_inspect as inspector  # noqa: E402
 import conf_proc_json as cj  # noqa: E402
+from conf_proc_lock import parse_lock  # noqa: E402
 from conf_proc_provenance_v2_inspect_documents import derive_inspection_inputs  # noqa: E402
 from conf_proc_provenance_v2_inspect_fixture import build_positive_fixture  # noqa: E402
 from conf_proc_reasons import ApplianceError  # noqa: E402
@@ -75,6 +78,33 @@ class H4InspectorInputTests(unittest.TestCase):
         with self.assertRaises(ApplianceError) as context:
             with inspector._pinned_authorities(paths):
                 Path(paths["builder_source"]).write_bytes(b"mutated during inspection")
+        self.assertEqual(context.exception.reason_code, "CP_PROVENANCE_V2_INSPECT_CONCURRENT_MUTATION")
+
+    def test_source_root_components_are_nofollow_trusted_and_retained(self) -> None:
+        h3 = self.fixture.h3
+        alias = Path(self.fixture.base, "input-root-alias")
+        alias.symlink_to(h3.input_root, target_is_directory=True)
+        with self.assertRaises(ApplianceError):
+            inspector.inspect_bundle(**{**self.fixture.inspect_kwargs(), "input_root": str(alias)})
+
+        replaceable = Path(self.fixture.base, "replaceable-parent")
+        replaceable.mkdir(mode=0o700)
+        copied = replaceable / "input"
+        shutil.copytree(h3.input_root, copied)
+        os.chmod(replaceable, 0o777)
+        try:
+            with self.assertRaises(ApplianceError):
+                inspector.inspect_bundle(**{**self.fixture.inspect_kwargs(), "input_root": str(copied)})
+        finally:
+            os.chmod(replaceable, 0o700)
+
+        lock = parse_lock(Path(h3.lock_path).read_bytes())
+        trusted = next(item for item in lock.inputs if item.role == "kernel_trusted_cert_bundle")
+        moved = Path(self.fixture.base, "input-root-moved")
+        with self.assertRaises(ApplianceError) as context:
+            with inspector._pinned_source_authority(h3.input_root, trusted.source_local_path, trusted.sha256):
+                os.rename(h3.input_root, moved)
+                os.rename(moved, h3.input_root)
         self.assertEqual(context.exception.reason_code, "CP_PROVENANCE_V2_INSPECT_CONCURRENT_MUTATION")
 
     def test_runtime_closure_structure_is_independently_validated(self) -> None:

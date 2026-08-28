@@ -43,10 +43,23 @@ class H4InspectorImageTreeTests(unittest.TestCase):
             inspector.inspect_bundle(**{**self.fixture.inspect_kwargs(), "bundle": bundle})
 
     def test_one_byte_truncation_extension_and_swap_are_rejected(self) -> None:
+        for filename in (
+            "models.squashfs",
+            "models.verity",
+            "runtime-policy.squashfs",
+            "runtime-policy.verity",
+        ):
+            with self.subTest(flip=filename):
+                self._rejects(
+                    self._mutate(
+                        "flip-" + filename.replace(".", "-"),
+                        lambda root, filename=filename: root.joinpath(filename).write_bytes(
+                            bytes([root.joinpath(filename).read_bytes()[0] ^ 1])
+                            + root.joinpath(filename).read_bytes()[1:]
+                        ),
+                    )
+                )
         mutations = {
-            "flip": lambda root: root.joinpath("models.squashfs").write_bytes(
-                bytes([root.joinpath("models.squashfs").read_bytes()[0] ^ 1]) + root.joinpath("models.squashfs").read_bytes()[1:]
-            ),
             "truncate": lambda root: root.joinpath("models.verity").write_bytes(root.joinpath("models.verity").read_bytes()[:-1]),
             "extend": lambda root: root.joinpath("runtime-policy.squashfs").write_bytes(root.joinpath("runtime-policy.squashfs").read_bytes() + b"x"),
             "swap": lambda root: _swap(root / "models.squashfs", root / "runtime-policy.squashfs"),
