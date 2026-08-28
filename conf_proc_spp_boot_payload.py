@@ -19,10 +19,12 @@ from conf_proc_prohibited import check_content_markers
 from conf_proc_provenance_v2_inspect import InspectionResult, _is_issued_inspection_result
 from conf_proc_reasons import (
     CP_SPP_PAYLOAD_ADDRESS,
+    CP_SPP_PAYLOAD_ARCHIVE,
     CP_SPP_PAYLOAD_AUTHORITY,
     CP_SPP_PAYLOAD_CONSISTENCY,
     CP_SPP_PAYLOAD_IMPORT,
     CP_SPP_PAYLOAD_PLAN,
+    CP_SPP_PAYLOAD_POLICY,
     CP_SPP_PAYLOAD_SOURCE,
     CP_SPP_PAYLOAD_STAGING,
     ApplianceError,
@@ -33,7 +35,7 @@ from conf_proc_spp_boot import BootBinding, _is_issued_boot_binding
 __all__ = ("BootPayloadResult", "compile_boot_payload")
 
 _PLAN_SCHEMA: Final = "conf-proc-spp-boot-payload-plan/v1"
-_PACKAGE_SCHEMA: Final = "conf-proc-spp-boot-payload/v1"
+_PACKAGE_SCHEMA: Final = "conf-proc-spp-boot-payload-package/v1"
 _MAX_SOURCE_BYTES: Final = 32 * 1024 * 1024
 _MAX_TOTAL_BYTES: Final = 128 * 1024 * 1024
 _HEX: Final = frozenset("0123456789abcdef")
@@ -90,22 +92,22 @@ _EXPECTED_LOCAL_IMPORTS: Final = {
     "conf_proc_reasons": frozenset(),
 }
 _PROHIBITED_COMPONENTS: Final = frozenset({
-    "apt", "apt-get", "cloud-init", "containerd", "curl", "dnf", "docker", "dockerd",
-    "journal", "kexec", "kdump", "mokmanager", "shimia32.efi", "shimaa64.efi", "shimx64.efi",
-    "ssh", "sshd", "swap.img", "swapfile", "waagent", "walinuxagent", "wget", "yum",
+    "apt", "cloud_init", "containerd", "coredump", "dnf", "docker", "getty",
+    "hibernate", "journald", "kdump", "mok", "packagekit", "recovery", "serial",
+    "shim", "socket", "ssh", "sshd", "subprocess", "swap", "waagent", "walinux",
 })
 _AUTHORITY_SPECS: Final = (
     ("root_lock_bytes", "/etc/spp/authority/root-lock.json", "root_lock"),
     ("runtime_closure_bytes", "/etc/spp/authority/runtime-closure.json", "runtime_closure"),
     ("verity_rules_bytes", "/etc/spp/authority/verity-rules.json", "verity_rules"),
     ("tcb_identity_bytes", "/etc/spp/authority/tcb-identity.json", "tcb_identity"),
-    ("builder_source_bytes", "/etc/spp/authority/builder-source.py", "builder_source"),
+    ("builder_source_bytes", "/etc/spp/authority/designated-builder-source.py", "designated_builder_source"),
     ("policy_bytes", "/etc/spp/authority/policy.json", "policy"),
-    ("accepted_manifest_bytes", "/etc/spp/authority/accepted-manifest.json", "accepted_manifest"),
-    ("kernel_feature_contract_bytes", "/etc/spp/authority/kernel-feature-contract.json", "kernel_feature_contract"),
-    ("trusted_certificate_bundle_bytes", "/etc/spp/authority/trusted-certificate-bundle.pem", "trusted_certificate_bundle"),
+    ("accepted_manifest_bytes", "/etc/spp/authority/appliance.manifest.json", "accepted_manifest"),
+    ("kernel_feature_contract_bytes", "/etc/spp/authority/kernel-features.json", "kernel_features"),
+    ("trusted_certificate_bundle_bytes", "/etc/spp/authority/trusted-module-signers.pem", "trusted_module_signers"),
     ("boot_contract_bytes", "/etc/spp/authority/boot-contract.json", "boot_contract"),
-    ("module_plan_bytes", "/etc/spp/authority/module-plan.json", "module_plan"),
+    ("module_plan_bytes", "/etc/spp/authority/module-load-plan.json", "module_load_plan"),
     ("gpt_layout_rules_bytes", "/etc/spp/authority/gpt-layout-rules.json", "gpt_layout_rules"),
 )
 
@@ -196,7 +198,7 @@ class _FrozenSource:
 
 
 def _error(code: str) -> None:
-    raise ApplianceError(code, "SPP boot payload rejected")
+    raise ApplianceError(code, "SPP boot payload rejected") from None
 
 
 def _sha256(value: object) -> bool:
@@ -292,15 +294,23 @@ def _validate_plan(plan_bytes: object, binding: BootBinding) -> _Plan:
         value = canonical_loads(plan_bytes)
     except ApplianceError:
         _error(CP_SPP_PAYLOAD_PLAN)
-    if type(value) is not dict or set(value) != {"schema", "boot_contract_sha256", "module_plan_sha256", "sources"}:
+    if type(value) is not dict or set(value) != {"schema", "plan_version", "boot_contract_sha256", "module_plan_sha256", "entries"}:
         _error(CP_SPP_PAYLOAD_PLAN)
-    if type(value["schema"]) is not str or value["schema"] != _PLAN_SCHEMA or type(value["boot_contract_sha256"]) is not str or type(value["module_plan_sha256"]) is not str or type(value["sources"]) is not list:
+    if (
+        type(value["schema"]) is not str
+        or value["schema"] != _PLAN_SCHEMA
+        or type(value["plan_version"]) is not int
+        or value["plan_version"] != 1
+        or type(value["boot_contract_sha256"]) is not str
+        or type(value["module_plan_sha256"]) is not str
+        or type(value["entries"]) is not list
+    ):
         _error(CP_SPP_PAYLOAD_PLAN)
-    if value["boot_contract_sha256"] != binding.boot_contract_sha256 or value["module_plan_sha256"] != binding.module_plan_sha256 or len(value["sources"]) != len(BOOT_PAYLOAD_SOURCE_AUTHORITY):
+    if value["boot_contract_sha256"] != binding.boot_contract_sha256 or value["module_plan_sha256"] != binding.module_plan_sha256 or len(value["entries"]) != len(BOOT_PAYLOAD_SOURCE_AUTHORITY):
         _error(CP_SPP_PAYLOAD_PLAN)
     source_paths: list[str] = []
     casefolded: set[str] = set()
-    for item, authority in zip(value["sources"], BOOT_PAYLOAD_SOURCE_AUTHORITY, strict=True):
+    for item, authority in zip(value["entries"], BOOT_PAYLOAD_SOURCE_AUTHORITY, strict=True):
         if type(item) is not dict or set(item) != {"archive_path", "source_path"} or type(item["archive_path"]) is not str:
             _error(CP_SPP_PAYLOAD_PLAN)
         if item["archive_path"] != authority.archive_path:
@@ -440,7 +450,7 @@ def _check_source_content(source: _FrozenSource) -> None:
         check_content_markers(source.authority.archive_path, source.data)
     except ApplianceError:
         # The digest prefix is the only source-derived public diagnostic.
-        raise ApplianceError(CP_SPP_PAYLOAD_SOURCE, f"source rejected sha256={source.authority.sha256[:16]}") from None
+        raise ApplianceError(CP_SPP_PAYLOAD_POLICY, f"source rejected sha256={source.authority.sha256[:16]}") from None
 
 
 def _import_closure(sources: tuple[_FrozenSource, ...]) -> tuple[str, ...]:
@@ -460,7 +470,7 @@ def _import_closure(sources: tuple[_FrozenSource, ...]) -> tuple[str, ...]:
                     if alias.asname is not None or not alias.name or any(not part.isidentifier() for part in alias.name.split(".")):
                         _error(CP_SPP_PAYLOAD_IMPORT)
                     target = alias.name.split(".")[0]
-                    _check_component_policy(alias.name.replace(".", "/"), CP_SPP_PAYLOAD_IMPORT)
+                    _check_component_policy(alias.name.replace(".", "/"), CP_SPP_PAYLOAD_POLICY)
                     if target in local:
                         imports.add(target)
                     else:
@@ -472,7 +482,7 @@ def _import_closure(sources: tuple[_FrozenSource, ...]) -> tuple[str, ...]:
                     continue
                 if any(not part.isidentifier() for part in node.module.split(".")):
                     _error(CP_SPP_PAYLOAD_IMPORT)
-                _check_component_policy(node.module.replace(".", "/"), CP_SPP_PAYLOAD_IMPORT)
+                _check_component_policy(node.module.replace(".", "/"), CP_SPP_PAYLOAD_POLICY)
                 target = node.module.split(".")[0]
                 if target in local:
                     imports.add(target)
@@ -497,7 +507,7 @@ def _members(sources: tuple[_FrozenSource, ...], binding: BootBinding) -> tuple[
     members = [_Member(source.authority.archive_path, "source", source.authority.role, source.authority.mode, source.data) for source in sources]
     for attribute, path, role in _AUTHORITY_SPECS:
         data = getattr(binding, attribute)
-        if type(data) is not bytes or len(data) > _MAX_SOURCE_BYTES:
+        if type(data) is not bytes or not 1 <= len(data) <= _MAX_SOURCE_BYTES:
             _error(CP_SPP_PAYLOAD_AUTHORITY)
         members.append(_Member(path, "sealed_authority", role, 0o444, data))
     if sum(len(member.data) for member in members) > _MAX_TOTAL_BYTES * 2:
@@ -510,7 +520,9 @@ def _pad4(value: int) -> int:
 
 
 def _newc_member(index: int, member: _Member) -> bytes:
-    name = member.path.encode("utf-8") + b"\0"
+    if not member.path.startswith("/"):
+        _error(CP_SPP_PAYLOAD_ARCHIVE)
+    name = member.path[1:].encode("utf-8") + b"\0"
     fields = (index, stat.S_IFREG | member.mode, 0, 0, 1, 0, len(member.data), 0, 0, 0, 0, len(name), 0)
     header = _CPIO_MAGIC + b"".join(f"{field:08x}".encode("ascii") for field in fields)
     return header + name + b"\0" * _pad4(len(header) + len(name)) + member.data + b"\0" * _pad4(len(member.data))
@@ -529,50 +541,63 @@ def _parse_newc(data: bytes) -> tuple[tuple[str, int, bytes], ...]:
     records: list[tuple[str, int, bytes]] = []
     while True:
         if data[offset:offset + 6] != _CPIO_MAGIC or offset + 110 > len(data):
-            _error(CP_SPP_PAYLOAD_CONSISTENCY)
+            _error(CP_SPP_PAYLOAD_ARCHIVE)
         raw = data[offset + 6:offset + 110]
         if any(byte not in b"0123456789abcdef" for byte in raw):
-            _error(CP_SPP_PAYLOAD_CONSISTENCY)
+            _error(CP_SPP_PAYLOAD_ARCHIVE)
         fields = tuple(int(raw[position:position + 8], 16) for position in range(0, 104, 8))
         offset += 110
         name_size, size = fields[11], fields[6]
         if name_size < 1 or offset + name_size > len(data):
-            _error(CP_SPP_PAYLOAD_CONSISTENCY)
+            _error(CP_SPP_PAYLOAD_ARCHIVE)
         name_data = data[offset:offset + name_size]
-        offset += name_size + _pad4(110 + name_size)
+        offset += name_size
+        name_padding = _pad4(110 + name_size)
+        if offset + name_padding > len(data) or any(data[offset:offset + name_padding]):
+            _error(CP_SPP_PAYLOAD_ARCHIVE)
+        offset += name_padding
         if not name_data.endswith(b"\0") or offset + size > len(data):
-            _error(CP_SPP_PAYLOAD_CONSISTENCY)
+            _error(CP_SPP_PAYLOAD_ARCHIVE)
         try:
             name = name_data[:-1].decode("utf-8")
         except UnicodeDecodeError:
-            _error(CP_SPP_PAYLOAD_CONSISTENCY)
+            _error(CP_SPP_PAYLOAD_ARCHIVE)
         payload = data[offset:offset + size]
-        offset += size + _pad4(size)
+        offset += size
+        data_padding = _pad4(size)
+        if offset + data_padding > len(data) or any(data[offset:offset + data_padding]):
+            _error(CP_SPP_PAYLOAD_ARCHIVE)
+        offset += data_padding
         if name == _CPIO_TRAILER.decode("ascii"):
             if fields != (0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 11, 0) or offset != len(data):
-                _error(CP_SPP_PAYLOAD_CONSISTENCY)
+                _error(CP_SPP_PAYLOAD_ARCHIVE)
             return tuple(records)
-        if not name.startswith("/") or fields[1] != stat.S_IFREG | 0o444 or fields[4] != 1 or any(fields[index] for index in (2, 3, 5, 7, 8, 9, 10, 12)):
-            _error(CP_SPP_PAYLOAD_CONSISTENCY)
-        records.append((name, fields[1] & 0o7777, payload))
+        if not name or name.startswith("/") or "\x00" in name or fields[0] != len(records) + 1 or fields[1] != stat.S_IFREG | 0o444 or fields[4] != 1 or any(fields[index] for index in (2, 3, 5, 7, 8, 9, 10, 12)):
+            _error(CP_SPP_PAYLOAD_ARCHIVE)
+        records.append(("/" + name, fields[1] & 0o7777, payload))
 
 
 def _entry_record(member: _Member) -> dict[str, object]:
-    return {"archive_path": member.path, "entry_type": member.entry_type, "mode": member.mode, "role": member.role, "sha256": member.sha256, "size_bytes": len(member.data)}
+    return {"path": member.path, "role": member.role, "mode": member.mode, "size_bytes": len(member.data), "sha256": member.sha256}
 
 
 def _package_bytes(inspection: InspectionResult, binding: BootBinding, cpio: bytes, members: tuple[_Member, ...], unresolved: tuple[str, ...]) -> bytes:
     digest = hashlib.sha256(cpio).hexdigest()
     value = {
-        "artifact_input_sha256": inspection.artifact_input_sha256,
-        "boot_contract_sha256": binding.boot_contract_sha256,
-        "builder_consistency": "builder_consistent",
-        "cpio": {"sha256": digest, "size_bytes": len(cpio), "status": "builder_consistent"},
-        "entries": [_entry_record(member) for member in members],
-        "execution_provenance_sha256": inspection.execution_provenance_sha256,
         "schema": _PACKAGE_SCHEMA,
-        "state": "built_unqualified",
-        "unresolved_imports": [{"module": item, "status": "unresolved"} for item in unresolved],
+        "package_version": 1,
+        "status": "built_unqualified",
+        "boot_qualification": "not_qualified",
+        "runtime_closure": "unresolved",
+        "activation_closure": "unresolved",
+        "directory_closure": "unresolved",
+        "h4_artifact_input_sha256": inspection.artifact_input_sha256,
+        "h4_execution_provenance_sha256": inspection.execution_provenance_sha256,
+        "boot_contract_sha256": binding.boot_contract_sha256,
+        "module_plan_sha256": binding.module_plan_sha256,
+        "cpio_sha256": digest,
+        "entries": [_entry_record(member) for member in members],
+        "external_imports_declared_unresolved": list(unresolved),
     }
     return canonical_dumps(value)
 
@@ -585,7 +610,15 @@ def _payload_address(binding: BootBinding, cpio: bytes, package: bytes) -> _Payl
     )
 
 
-def _check_builder_consistency(cpio: bytes, package: bytes, members: tuple[_Member, ...], binding: BootBinding, address: _PayloadAddress) -> None:
+def _check_builder_consistency(
+    cpio: bytes,
+    package: bytes,
+    members: tuple[_Member, ...],
+    inspection: InspectionResult,
+    binding: BootBinding,
+    address: _PayloadAddress,
+    unresolved: tuple[str, ...],
+) -> None:
     expected_address = _payload_address(binding, cpio, package)
     if address != expected_address:
         _error(CP_SPP_PAYLOAD_CONSISTENCY)
@@ -597,12 +630,46 @@ def _check_builder_consistency(cpio: bytes, package: bytes, members: tuple[_Memb
         value = canonical_loads(package)
     except ApplianceError:
         _error(CP_SPP_PAYLOAD_CONSISTENCY)
-    if type(value) is not dict or set(value) != {"artifact_input_sha256", "boot_contract_sha256", "builder_consistency", "cpio", "entries", "execution_provenance_sha256", "schema", "state", "unresolved_imports"}:
+    expected_keys = {
+        "schema", "package_version", "status", "boot_qualification", "runtime_closure",
+        "activation_closure", "directory_closure", "h4_artifact_input_sha256",
+        "h4_execution_provenance_sha256", "boot_contract_sha256", "module_plan_sha256",
+        "cpio_sha256", "entries", "external_imports_declared_unresolved",
+    }
+    if type(value) is not dict or set(value) != expected_keys or canonical_dumps(value) != package:
         _error(CP_SPP_PAYLOAD_CONSISTENCY)
-    if value["schema"] != _PACKAGE_SCHEMA or value["state"] != "built_unqualified" or value["builder_consistency"] != "builder_consistent" or value["entries"] != [_entry_record(item) for item in members]:
+    expected_strings = {
+        "schema": _PACKAGE_SCHEMA,
+        "status": "built_unqualified",
+        "boot_qualification": "not_qualified",
+        "runtime_closure": "unresolved",
+        "activation_closure": "unresolved",
+        "directory_closure": "unresolved",
+        "h4_artifact_input_sha256": inspection.artifact_input_sha256,
+        "h4_execution_provenance_sha256": inspection.execution_provenance_sha256,
+        "boot_contract_sha256": binding.boot_contract_sha256,
+        "module_plan_sha256": binding.module_plan_sha256,
+        "cpio_sha256": address.cpio_sha256,
+    }
+    if type(value["package_version"]) is not int or value["package_version"] != 1:
         _error(CP_SPP_PAYLOAD_CONSISTENCY)
-    cpio_value = value["cpio"]
-    if type(cpio_value) is not dict or cpio_value != {"sha256": address.cpio_sha256, "size_bytes": len(cpio), "status": "builder_consistent"}:
+    if any(type(value[key]) is not str or value[key] != expected for key, expected in expected_strings.items()):
+        _error(CP_SPP_PAYLOAD_CONSISTENCY)
+    if type(value["entries"]) is not list:
+        _error(CP_SPP_PAYLOAD_CONSISTENCY)
+    for entry in value["entries"]:
+        if (
+            type(entry) is not dict
+            or set(entry) != {"path", "role", "mode", "size_bytes", "sha256"}
+            or any(type(entry[key]) is not str for key in ("path", "role", "sha256"))
+            or type(entry["mode"]) is not int
+            or type(entry["size_bytes"]) is not int
+            or entry["size_bytes"] < 1
+        ):
+            _error(CP_SPP_PAYLOAD_CONSISTENCY)
+    if value["entries"] != [_entry_record(item) for item in members]:
+        _error(CP_SPP_PAYLOAD_CONSISTENCY)
+    if type(value["external_imports_declared_unresolved"]) is not list or value["external_imports_declared_unresolved"] != list(unresolved) or any(type(item) is not str for item in value["external_imports_declared_unresolved"]):
         _error(CP_SPP_PAYLOAD_CONSISTENCY)
 
 
@@ -610,7 +677,10 @@ def _open_or_create_directory(parent_fd: int, name: str) -> int:
     try:
         descriptor = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
     except FileNotFoundError:
-        os.mkdir(name, 0o700, dir_fd=parent_fd)
+        try:
+            os.mkdir(name, 0o700, dir_fd=parent_fd)
+        except FileExistsError:
+            pass
         descriptor = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
     value = os.fstat(descriptor)
     if not stat.S_ISDIR(value.st_mode) or value.st_uid != os.geteuid() or stat.S_IMODE(value.st_mode) != 0o700:
@@ -807,7 +877,7 @@ def _publish(
             parent_identity.gid, parent_identity.nlink + 1, parent_identity.size,
             parent_identity.mtime_ns, parent_identity.ctime_ns,
         )
-        _check_final_parent(parent_fd, parent_expected, check_nlink=True)
+        _check_final_parent(parent_fd, parent_expected, check_nlink=False)
         _revalidate_root(source_root)
         for source in sources:
             _revalidate_source(source_root, source)
@@ -815,14 +885,14 @@ def _publish(
         _check_final_parent(output.fd, output.identities[-1], check_nlink=False)
         for descriptor, expected in zip(opened[1:-1], opened_identities[1:-1], strict=True):
             _check_final_parent(descriptor, expected, check_nlink=False)
-        _check_final_parent(parent_fd, parent_expected, check_nlink=True)
+        _check_final_parent(parent_fd, parent_expected, check_nlink=False)
         try:
             _rename_noreplace(parent_fd, stage_name, parent_fd, address.package_sha256)
             moved = True
         except FileExistsError:
             _validate_existing(parent_fd, address.package_sha256, cpio, package)
         _revalidate_root(output)
-        _check_final_parent(parent_fd, parent_expected, check_nlink=True)
+        _check_final_parent(parent_fd, parent_expected, check_nlink=False)
         _validate_existing(parent_fd, address.package_sha256, cpio, package)
         return os.path.join(output.path, "built_unqualified", address.boot_contract_sha256, address.cpio_sha256, address.package_sha256)
     finally:
@@ -840,6 +910,9 @@ def compile_boot_payload(*, inspection: InspectionResult, binding: BootBinding, 
     sources: list[_FrozenSource] = []
     source_pin: _PinnedRoot | None = None
     output_pin: _PinnedRoot | None = None
+    result: BootPayloadResult | None = None
+    failure_reason: str | None = None
+    failure_message = "SPP boot payload rejected"
     try:
         _validate_literal_authority()
         inspection, binding = _validate_issued_inputs(inspection, binding)
@@ -858,19 +931,21 @@ def compile_boot_payload(*, inspection: InspectionResult, binding: BootBinding, 
         cpio = _newc_archive(members)
         package = _package_bytes(inspection, binding, cpio, members, unresolved)
         address = _payload_address(binding, cpio, package)
-        _check_builder_consistency(cpio, package, members, binding, address)
+        _check_builder_consistency(cpio, package, members, inspection, binding, address, unresolved)
         _revalidate_root(source_pin)
         _revalidate_root(output_pin)
         for source in frozen:
             _revalidate_source(source_pin, source)
         final_path = _publish(source_pin, frozen, output_pin, binding, cpio, package, address)
-        return BootPayloadResult("built_unqualified", address.cpio_sha256, address.package_sha256, final_path)
-    except ApplianceError:
-        raise
-    except OSError as exc:
-        raise ApplianceError(CP_SPP_PAYLOAD_STAGING, "SPP boot payload rejected") from exc
-    except Exception as exc:  # noqa: BLE001 - direct public boundary is sanitized
-        raise ApplianceError(CP_SPP_PAYLOAD_CONSISTENCY, "SPP boot payload rejected") from exc
+        result = BootPayloadResult("built_unqualified", address.cpio_sha256, address.package_sha256, final_path)
+    except ApplianceError as exc:
+        failure_reason = exc.reason_code
+        if exc.reason_code == CP_SPP_PAYLOAD_POLICY and "sha256=" in str(exc):
+            failure_message = str(exc).split(": ", 1)[-1]
+    except OSError:
+        failure_reason = CP_SPP_PAYLOAD_STAGING
+    except Exception:  # noqa: BLE001 - direct public boundary is sanitized
+        failure_reason = CP_SPP_PAYLOAD_CONSISTENCY
     finally:
         for source in reversed(sources):
             source.close()
@@ -878,3 +953,10 @@ def compile_boot_payload(*, inspection: InspectionResult, binding: BootBinding, 
             output_pin.close()
         if source_pin is not None:
             source_pin.close()
+    if failure_reason is not None:
+        # Raise outside every handler so private paths and source syntax cannot
+        # survive as __cause__ or __context__ on the public error.
+        raise ApplianceError(failure_reason, failure_message)
+    if result is None:
+        raise ApplianceError(CP_SPP_PAYLOAD_CONSISTENCY, "SPP boot payload rejected")
+    return result
