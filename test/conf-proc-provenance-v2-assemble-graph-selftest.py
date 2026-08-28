@@ -31,10 +31,12 @@ def _write(path: str, data: bytes) -> None:
     Path(path).write_bytes(data)
 
 
-def _unit(*, exec_path: str = "/usr/bin/app", deny: bool = True, no_new_privileges: str = "yes", ambient: str = "", bounding: str = "CAP_NET_BIND_SERVICE") -> bytes:
+def _unit(*, exec_path: str = "/usr/bin/app", deny: bool = True, network_scope: str = "none", no_new_privileges: str = "yes", ambient: str = "", bounding: str = "CAP_NET_BIND_SERVICE") -> bytes:
     lines = ["[Service]", "ExecStart=" + exec_path]
     if deny:
         lines.append("IPAddressDeny=any")
+        if network_scope == "loopback":
+            lines.append("IPAddressAllow=127.0.0.0/8")
     lines.extend(
         [
             "CapabilityBoundingSet=" + bounding,
@@ -96,6 +98,16 @@ class H3GraphTests(unittest.TestCase):
         edge = {"from_id": "a", "to_id": "b", "kind": "unit_exec", "origin_path": "a.service", "origin_key": "ExecStart"}
         with self.assertRaises(ApplianceError) as context:
             assembler._merge_graph({}, {}, [], [edge, edge])
+        self.assertEqual(context.exception.reason_code, "CP_TREE_UNEXPECTED")
+
+    def test_raw_service_exec_collisions_are_rejected_before_graph_projection(self) -> None:
+        tree, payload = self._runtime_tree()
+        _write(os.path.join(tree, "etc/systemd/system/other.service"), _unit(network_scope="loopback"))
+        with self.assertRaises(ApplianceError) as context:
+            assembler._observe_graphs(
+                {"models": os.path.join(self.base, "models-empty"), "runtime-policy": tree},
+                _policy(payload),
+            )
         self.assertEqual(context.exception.reason_code, "CP_TREE_UNEXPECTED")
 
     def test_unlisted_activation_and_mount_are_rejected(self) -> None:

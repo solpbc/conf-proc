@@ -71,8 +71,8 @@ def _parents(paths: list[str], image: str, uid: int, gid: int) -> list[dict]:
 class _Fixture:
     def __init__(self, base: str, *, fake_mksquashfs: bool = False) -> None:
         self.base = base
-        self.uid = os.geteuid()
-        self.gid = os.getegid()
+        self.uid = 0
+        self.gid = 0
         self.input_root = os.path.join(base, "inputs")
         self.output = os.path.join(base, "output")
         self.tool_root = os.path.join(base, "tools") if fake_mksquashfs else "/"
@@ -514,6 +514,24 @@ class H3AssemblyEndToEndTests(unittest.TestCase):
         self.assertNotIn("H3-HOSTILE", str(context.exception))
         self.assertNotIn(hostile_base, str(context.exception))
 
+    def test_staging_filesystem_failure_is_sanitized(self) -> None:
+        original_makedirs = assembler.os.makedirs
+
+        def reject_work_directory(path: str, *args, **kwargs) -> None:
+            if os.path.basename(path) == "work":
+                raise OSError("H3-HOSTILE filesystem failure " + self.base)
+            original_makedirs(path, *args, **kwargs)
+
+        assembler.os.makedirs = reject_work_directory
+        try:
+            with self.assertRaises(ApplianceError) as context:
+                self.fixture.assemble()
+        finally:
+            assembler.os.makedirs = original_makedirs
+        self.assertEqual(context.exception.reason_code, "CP_PROVENANCE_V2_STAGING")
+        self.assertNotIn("H3-HOSTILE", str(context.exception))
+        self.assertNotIn(self.base, str(context.exception))
+
     def test_post_rename_directory_hardening_failure_is_nonfatal(self) -> None:
         inputs = provenance.derive_inputs(
             root_lock_bytes=self.fixture.lock_bytes,
@@ -545,6 +563,22 @@ class H3AssemblyEndToEndTests(unittest.TestCase):
         self.assertEqual(sorted(os.listdir(destination)), sorted(assembler.BUNDLE_FILES))
         for name in assembler.BUNDLE_FILES:
             self.assertEqual(stat.S_IMODE(os.lstat(os.path.join(destination, name)).st_mode) & 0o333, 0)
+
+    def test_post_rename_lease_teardown_failure_is_nonfatal(self) -> None:
+        original_flock = assembler.fcntl.flock
+
+        def reject_unlock(descriptor: int, operation: int) -> None:
+            if operation == assembler.fcntl.LOCK_UN:
+                raise OSError("test-only lease teardown failure")
+            original_flock(descriptor, operation)
+
+        assembler.fcntl.flock = reject_unlock
+        try:
+            result = self.fixture.assemble()
+        finally:
+            assembler.fcntl.flock = original_flock
+        self.assertTrue(os.path.isdir(result.bundle_path))
+        self.assertEqual(sorted(os.listdir(result.bundle_path)), sorted(assembler.BUNDLE_FILES))
 
     def test_authority_size_boundaries_and_missing_tool_are_hard_failures(self) -> None:
         exact = os.path.join(self.base, "exact-32m")

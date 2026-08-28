@@ -61,13 +61,12 @@ from conf_proc_reasons import (
     CP_TREE_METADATA,
     CP_TREE_SYMLINK,
     CP_TREE_UNEXPECTED,
-    CP_TREE_XATTR,
     CP_VERITY_FORMAT,
     CP_VERITY_GEOMETRY,
     ApplianceError,
 )
-from conf_proc_tree_rules import classify_node_type
-from conf_proc_unit_parser import parse_systemd_unit
+from conf_proc_tree_rules import classify_node_type, validate_symlink_target
+from conf_proc_unit_parser import parse_exec_line, parse_systemd_unit
 
 
 MAX_INPUT_BYTES = 32 * 1024 * 1024
@@ -158,10 +157,13 @@ def assemble(
 
         address = (inputs.artifact_input_sha256, inputs.execution_provenance_sha256)
         with _address_lease(output, address):
-            stage_root = _prepare_stage(output, address)
+            stage_root = _prepare_stage(output, address, lock)
             with _stage_owner_lease(output, address):
                 work_root = os.path.join(stage_root, "work")
-                os.makedirs(work_root)
+                try:
+                    os.makedirs(work_root)
+                except OSError as exc:
+                    raise ApplianceError(CP_PROVENANCE_V2_STAGING, "could not create H3 work directory") from exc
                 _preflight_placements(lock)
 
                 with hermetic_lockdown():
@@ -180,7 +182,7 @@ def assemble(
                         _normalize_tree_metadata(lock, image_id, tree_dir)
                         _validate_tree_authorities(lock, policy, closure, image_id, tree_dir)
                         pseudo_path = os.path.join(work_root, f"{image_id}.pseudo")
-                        Path(pseudo_path).write_text("\n".join(pseudo_lines) + "\n", encoding="utf-8")
+                        _write_staging_text(pseudo_path, "\n".join(pseudo_lines) + "\n")
                         trees[image_id] = tree_dir
                         pseudo_files[image_id] = pseudo_path
                         phase = "tree-built"
@@ -277,9 +279,12 @@ def assemble(
                             artifacts.spdx_bytes,
                         )
                     )
-                    _remove_tree(work_root)
-                    Path(os.path.join(stage_root, "appliance.manifest.json")).write_bytes(artifacts.manifest_bytes)
-                    Path(os.path.join(stage_root, "appliance.spdx.json")).write_bytes(artifacts.spdx_bytes)
+                    try:
+                        _remove_tree(work_root)
+                    except OSError as exc:
+                        raise ApplianceError(CP_PROVENANCE_V2_STAGING, "could not clear H3 work directory") from exc
+                    _write_staging_bytes(os.path.join(stage_root, "appliance.manifest.json"), artifacts.manifest_bytes)
+                    _write_staging_bytes(os.path.join(stage_root, "appliance.spdx.json"), artifacts.spdx_bytes)
                     fault_hook(phase)
 
                     phase = "local-gate"
@@ -325,6 +330,14 @@ def assemble(
             return _result(inputs, destination, staged_digests)
     except ApplianceError as exc:
         sanitized = ApplianceError(exc.reason_code, "assembly failed")
+        sanitized.phase = phase
+        raise sanitized from None
+    except OSError:
+        sanitized = ApplianceError(CP_PROVENANCE_V2_STAGING, "assembly failed")
+        sanitized.phase = phase
+        raise sanitized from None
+    except Exception:
+        sanitized = ApplianceError(CP_PROVENANCE_V2_STAGING, "assembly failed")
         sanitized.phase = phase
         raise sanitized from None
     finally:
@@ -389,9 +402,6 @@ def _normalize_tree_metadata(lock: Lock, image_id: str, tree_root: str) -> None:
             try:
                 if placement.node_type != "symlink":
                     os.chmod(path, placement.mode)
-                actual = os.lstat(path)
-                if (actual.st_uid, actual.st_gid) != (placement.uid, placement.gid):
-                    os.chown(path, placement.uid, placement.gid, follow_symlinks=False)
             except OSError as exc:
                 raise ApplianceError(CP_TREE_METADATA, "could not normalize staged tree metadata") from exc
 
@@ -440,8 +450,6 @@ def _validate_tree_authorities(lock: Lock, policy: Policy, closure: dict, image_
         if (
             actual["node_type"] != placement.node_type
             or actual["mode"] != placement.mode
-            or actual["uid"] != placement.uid
-            or actual["gid"] != placement.gid
             or actual["xattrs"] != expected_xattrs
             or tuple(item[0] for item in expected_xattrs) != placement.xattrs
         ):
@@ -467,23 +475,29 @@ def _validate_image_symlink(image_id: str, path: str, target: str) -> None:
 
 
 def _freeze_trees(trees: Iterable[str]) -> None:
-    for tree_root in trees:
-        for root, directories, files in os.walk(tree_root, topdown=False, followlinks=False):
-            for name in [*files, *directories]:
-                path = os.path.join(root, name)
-                if stat.S_ISLNK(os.lstat(path).st_mode):
-                    continue
-                os.chmod(path, stat.S_IMODE(os.lstat(path).st_mode) & ~0o222)
-        os.chmod(tree_root, stat.S_IMODE(os.lstat(tree_root).st_mode) & ~0o222)
+    try:
+        for tree_root in trees:
+            for root, directories, files in os.walk(tree_root, topdown=False, followlinks=False):
+                for name in [*files, *directories]:
+                    path = os.path.join(root, name)
+                    if stat.S_ISLNK(os.lstat(path).st_mode):
+                        continue
+                    os.chmod(path, stat.S_IMODE(os.lstat(path).st_mode) & ~0o222)
+            os.chmod(tree_root, stat.S_IMODE(os.lstat(tree_root).st_mode) & ~0o222)
+    except OSError as exc:
+        raise ApplianceError(CP_TREE_METADATA, "could not freeze H3 staging tree") from exc
 
 
 def _tree_snapshot(tree_root: str) -> tuple[dict, ...]:
-    records = []
-    for root, directories, files in os.walk(tree_root, topdown=True, followlinks=False):
-        for name in sorted([*directories, *files]):
-            path = os.path.join(root, name)
-            records.append(_snapshot_path(tree_root, "/" + os.path.relpath(path, tree_root)))
-    return tuple(sorted(records, key=lambda item: item["path"]))
+    try:
+        records = []
+        for root, directories, files in os.walk(tree_root, topdown=True, followlinks=False):
+            for name in sorted([*directories, *files]):
+                path = os.path.join(root, name)
+                records.append(_snapshot_path(tree_root, "/" + os.path.relpath(path, tree_root)))
+        return tuple(sorted(records, key=lambda item: item["path"]))
+    except OSError as exc:
+        raise ApplianceError(CP_TREE_METADATA, "could not snapshot H3 staging tree") from exc
 
 
 def _snapshot_path(tree_root: str, image_path: str) -> dict:
@@ -515,40 +529,81 @@ def _assert_tree_snapshots(trees: dict[str, str], snapshots: dict[str, tuple[dic
 
 
 def _validate_runtime_service_policy(tree_root: str, policy: Policy) -> None:
-    for root, _directories, files in os.walk(tree_root):
-        for name in files:
-            if name.endswith(".mount"):
-                raise ApplianceError(CP_TREE_UNEXPECTED, "mount units are forbidden in H3 runtime-policy")
-            if not name.endswith((".service", ".socket", ".timer")):
-                continue
-            if os.path.relpath(root, tree_root) not in _UNIT_DIRS:
-                raise ApplianceError(CP_TREE_UNEXPECTED, "runtime activation unit is outside an approved unit directory")
-            if not name.endswith(".service"):
-                continue
-            sections = parse_systemd_unit(Path(os.path.join(root, name)).read_text(encoding="utf-8"))
-            service = sections.get("Service", {})
-            bounding = tuple(sorted(service.get("CapabilityBoundingSet", [""])[0].split()))
-            ambient = tuple(sorted(service.get("AmbientCapabilities", [""])[0].split()))
-            if service.get("NoNewPrivileges") != ["yes"] or ambient:
-                raise ApplianceError(CP_TREE_UNEXPECTED, "runtime service capability posture is forbidden")
-            expected = policy.capability_policy.get(f"unit:{name}")
-            if expected is None or (
-                bounding != expected.capability_bounding_set
-                or ambient != expected.ambient_capabilities
-                or expected.no_new_privileges is not True
-            ):
-                raise ApplianceError(CP_TREE_UNEXPECTED, "runtime service capability policy disagrees with tree")
+    try:
+        for root, _directories, files in os.walk(tree_root):
+            for name in files:
+                if name.endswith(".mount"):
+                    raise ApplianceError(CP_TREE_UNEXPECTED, "mount units are forbidden in H3 runtime-policy")
+                if not name.endswith((".service", ".socket", ".timer")):
+                    continue
+                if os.path.relpath(root, tree_root) not in _UNIT_DIRS:
+                    raise ApplianceError(CP_TREE_UNEXPECTED, "runtime activation unit is outside an approved unit directory")
+                if not name.endswith(".service"):
+                    continue
+                sections = parse_systemd_unit(Path(os.path.join(root, name)).read_text(encoding="utf-8"))
+                service = sections.get("Service", {})
+                bounding = tuple(sorted(service.get("CapabilityBoundingSet", [""])[0].split()))
+                ambient = tuple(sorted(service.get("AmbientCapabilities", [""])[0].split()))
+                if service.get("NoNewPrivileges") != ["yes"] or ambient:
+                    raise ApplianceError(CP_TREE_UNEXPECTED, "runtime service capability posture is forbidden")
+                expected = policy.capability_policy.get(f"unit:{name}")
+                if expected is None or (
+                    bounding != expected.capability_bounding_set
+                    or ambient != expected.ambient_capabilities
+                    or expected.no_new_privileges is not True
+                ):
+                    raise ApplianceError(CP_TREE_UNEXPECTED, "runtime service capability policy disagrees with tree")
+    except OSError as exc:
+        raise ApplianceError(CP_TREE_METADATA, "could not read H3 runtime service policy") from exc
 
 
 def _observe_graphs(trees: dict[str, str], policy: Policy) -> None:
     all_nodes: dict[str, dict] = {}
     all_edges: dict[tuple[str, str, str, str, str], dict] = {}
     for image_id in IMAGE_IDS:
-        nodes, edges = extract_graph(trees[image_id])
+        _preflight_service_exec_contributions(trees[image_id])
+        try:
+            nodes, edges = extract_graph(trees[image_id])
+        except OSError as exc:
+            raise ApplianceError(CP_TREE_METADATA, "could not extract H3 activation graph") from exc
         if image_id == "models" and nodes:
             raise ApplianceError(CP_TREE_UNEXPECTED, "models tree must be data-only")
         _merge_graph(all_nodes, all_edges, nodes, edges)
     compare_graph_to_policy(list(all_nodes.values()), list(all_edges.values()), policy)
+
+
+def _preflight_service_exec_contributions(tree_root: str) -> None:
+    """Reject raw service contributions that extract_graph would coalesce."""
+
+    observed: dict[str, tuple[tuple[str, ...], str]] = {}
+    try:
+        for unit_dir in _UNIT_DIRS:
+            directory = os.path.join(tree_root, unit_dir)
+            if not os.path.isdir(directory):
+                continue
+            for name in sorted(os.listdir(directory)):
+                if not name.endswith(".service"):
+                    continue
+                sections = parse_systemd_unit(Path(os.path.join(directory, name)).read_text(encoding="utf-8"))
+                service = sections.get("Service", {})
+                network_scope = _service_network_scope(service)
+                for value in service.get("ExecStart", []):
+                    argv = tuple(parse_exec_line(value))
+                    prior = observed.setdefault(argv[0], (argv, network_scope))
+                    if prior != (argv, network_scope):
+                        raise ApplianceError(CP_TREE_UNEXPECTED, "service exec path has conflicting raw contributions")
+    except OSError as exc:
+        raise ApplianceError(CP_TREE_METADATA, "could not preflight H3 service contributions") from exc
+
+
+def _service_network_scope(service: dict[str, list[str]]) -> str:
+    deny = service.get("IPAddressDeny", [])
+    allow = service.get("IPAddressAllow", [])
+    if deny == ["any"] and not allow:
+        return "none"
+    if deny == ["any"] and allow in (["127.0.0.0/8"], ["localhost"]):
+        return "loopback"
+    raise ApplianceError(CP_TREE_UNEXPECTED, "runtime service network policy is not statically derivable")
 
 
 def _merge_graph(
@@ -624,7 +679,10 @@ def _build_image(
         guard.run_tool(list(build.mksquashfs_argv), cwd=staging_dir)
         if _tree_snapshot(tree_dir) != snapshot:
             raise ApplianceError(CP_TREE_UNEXPECTED, "frozen tree changed during mksquashfs")
-        pad_file_to_block_size(squashfs_path)
+        try:
+            pad_file_to_block_size(squashfs_path)
+        except OSError as exc:
+            raise ApplianceError(CP_VERITY_GEOMETRY, "could not pad H3 squashfs image") from exc
         formatted = guard.run_tool(list(build.veritysetup_format_argv), cwd=staging_dir)
         root_hash = _parse_root_hash(formatted.stdout)
         verify = conf_proc_provenance_render.render_verify_stage(
@@ -637,16 +695,21 @@ def _build_image(
             root_hash=root_hash,
         )
         guard.run_tool(list(verify.veritysetup_verify_argv), cwd=staging_dir)
-    if os.path.getsize(squashfs_path) % 4096 or os.path.getsize(hash_device_path) % 4096:
-        raise ApplianceError(CP_VERITY_GEOMETRY, "H3 image output is not aligned to 4096-byte geometry")
-    return ProvenanceV2ImageRecord(
-        image_id=image_id,
-        squashfs_sha256=_sha256_file(squashfs_path),
-        squashfs_size_bytes=os.path.getsize(squashfs_path),
-        hash_device_sha256=_sha256_file(hash_device_path),
-        hash_device_size_bytes=os.path.getsize(hash_device_path),
-        root_hash=root_hash,
-    )
+    try:
+        squashfs_size = os.path.getsize(squashfs_path)
+        hash_device_size = os.path.getsize(hash_device_path)
+        if squashfs_size % 4096 or hash_device_size % 4096:
+            raise ApplianceError(CP_VERITY_GEOMETRY, "H3 image output is not aligned to 4096-byte geometry")
+        return ProvenanceV2ImageRecord(
+            image_id=image_id,
+            squashfs_sha256=_sha256_file(squashfs_path),
+            squashfs_size_bytes=squashfs_size,
+            hash_device_sha256=_sha256_file(hash_device_path),
+            hash_device_size_bytes=hash_device_size,
+            root_hash=root_hash,
+        )
+    except OSError as exc:
+        raise ApplianceError(CP_VERITY_GEOMETRY, "could not measure H3 image output") from exc
 
 
 def _parse_root_hash(stdout: bytes) -> str:
@@ -664,9 +727,12 @@ def _enforce_payload_budget(payloads: tuple[bytes, ...]) -> None:
 
 
 def _local_gate(stage_root: str, inputs: conf_proc_provenance_v2.ProvenanceInputs, images: list[ProvenanceV2ImageRecord]) -> dict[str, str]:
-    digests = _bundle_digests(stage_root, readonly=False)
-    manifest = parse_manifest_v2(Path(os.path.join(stage_root, "appliance.manifest.json")).read_bytes()).raw
-    parse_spdx_v2(Path(os.path.join(stage_root, "appliance.spdx.json")).read_bytes())
+    try:
+        digests = _bundle_digests(stage_root, readonly=False)
+        manifest = parse_manifest_v2(Path(os.path.join(stage_root, "appliance.manifest.json")).read_bytes()).raw
+        parse_spdx_v2(Path(os.path.join(stage_root, "appliance.spdx.json")).read_bytes())
+    except OSError as exc:
+        raise ApplianceError(CP_PROVENANCE_V2_LOCAL_GATE, "could not read staged H3 bundle") from exc
     if manifest["sbom"]["sha256"] != digests["appliance.spdx.json"]:
         raise ApplianceError(CP_PROVENANCE_V2_LOCAL_GATE, "manifest does not bind staged SPDX bytes")
     for image in images:
@@ -694,24 +760,24 @@ def _local_gate(stage_root: str, inputs: conf_proc_provenance_v2.ProvenanceInput
 
 @contextmanager
 def _address_lease(output: str, address: tuple[str, str]) -> Iterator[None]:
+    handle = None
     try:
         os.makedirs(os.path.join(output, ".h3-locks"), exist_ok=True)
         path = os.path.join(output, ".h3-locks", "-".join(address) + ".lock")
         handle = open(path, "a+b")
-    except OSError as exc:
-        raise ApplianceError(CP_PROVENANCE_V2_LEASE, "could not establish H3 address lease") from exc
-    try:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
     except OSError as exc:
+        if handle is not None:
+            _release_lease_quietly(handle)
         raise ApplianceError(CP_PROVENANCE_V2_LEASE, "could not use H3 address lease") from exc
     try:
         yield
     finally:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        handle.close()
+        # This runs after the sole visibility rename, so it must be best-effort.
+        _release_lease_quietly(handle)
 
 
-def _prepare_stage(output: str, address: tuple[str, str]) -> str:
+def _prepare_stage(output: str, address: tuple[str, str], lock: Lock | None = None) -> str:
     name = "-".join(address)
     parent = os.path.join(output, ".h3-staging")
     stage = os.path.join(parent, name)
@@ -719,11 +785,14 @@ def _prepare_stage(output: str, address: tuple[str, str]) -> str:
         os.makedirs(parent, exist_ok=True)
     except OSError as exc:
         raise ApplianceError(CP_PROVENANCE_V2_STAGING, "could not create H3 staging parent") from exc
-    matching = [entry.name for entry in os.scandir(parent) if entry.name.startswith(name)]
+    try:
+        matching = [entry.name for entry in os.scandir(parent) if entry.name.startswith(name)]
+    except OSError as exc:
+        raise ApplianceError(CP_PROVENANCE_V2_STAGING, "could not inspect H3 staging parent") from exc
     if matching and matching != [name]:
         raise ApplianceError(CP_PROVENANCE_V2_SCAVENGE, "unexpected same-address H3 staging entry")
     if os.path.lexists(stage):
-        _validate_stale_stage(output, name, stage)
+        _validate_stale_stage(output, name, stage, lock)
         try:
             _remove_tree(stage)
         except OSError as exc:
@@ -739,6 +808,7 @@ def _prepare_stage(output: str, address: tuple[str, str]) -> str:
 def _stage_owner_lease(output: str, address: tuple[str, str]) -> Iterator[None]:
     name = "-".join(address)
     parent = os.path.join(output, ".h3-owners")
+    handle = None
     try:
         os.makedirs(parent, exist_ok=True)
         parent_metadata = os.lstat(parent)
@@ -747,19 +817,23 @@ def _stage_owner_lease(output: str, address: tuple[str, str]) -> Iterator[None]:
         handle = _open_owner_lock(os.path.join(parent, name + ".lock"), CP_PROVENANCE_V2_LEASE)
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except (OSError, ApplianceError) as exc:
+        if handle is not None:
+            _release_lease_quietly(handle)
         if isinstance(exc, ApplianceError):
             raise
         raise ApplianceError(CP_PROVENANCE_V2_LEASE, "H3 staging owner lock is held or unavailable") from exc
     try:
         yield
     finally:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        handle.close()
+        _release_lease_quietly(handle)
 
 
-def _validate_stale_stage(output: str, name: str, stage: str) -> None:
-    value = os.lstat(stage)
-    if not stat.S_ISDIR(value.st_mode) or stat.S_ISLNK(value.st_mode) or value.st_uid != os.geteuid():
+def _validate_stale_stage(output: str, name: str, stage: str, lock: Lock | None) -> None:
+    try:
+        value = os.lstat(stage)
+    except OSError as exc:
+        raise ApplianceError(CP_PROVENANCE_V2_SCAVENGE, "could not inspect stale H3 staging node") from exc
+    if not _is_same_owner_directory(value):
         raise ApplianceError(CP_PROVENANCE_V2_SCAVENGE, "stale H3 staging node is not a same-owner directory")
     owner_path = os.path.join(output, ".h3-owners", name + ".lock")
     try:
@@ -771,24 +845,121 @@ def _validate_stale_stage(output: str, name: str, stage: str) -> None:
         raise ApplianceError(CP_PROVENANCE_V2_SCAVENGE, "stale H3 staging owner remains live") from exc
     finally:
         if "owner" in locals():
-            fcntl.flock(owner.fileno(), fcntl.LOCK_UN)
-            owner.close()
-    for root, directories, files in os.walk(stage, followlinks=False):
-        for name in [*directories, *files]:
-            item = os.path.join(root, name)
-            metadata = os.lstat(item)
-            if stat.S_ISLNK(metadata.st_mode) or metadata.st_uid != os.geteuid():
-                raise ApplianceError(CP_PROVENANCE_V2_SCAVENGE, "stale H3 staging content is suspicious")
-    root_entries = set(os.listdir(stage))
+            _release_lease_quietly(owner)
+    if lock is None:
+        raise ApplianceError(CP_PROVENANCE_V2_SCAVENGE, "stale H3 staging cannot be validated without its lock")
+    try:
+        root_entries = set(os.listdir(stage))
+    except OSError as exc:
+        raise ApplianceError(CP_PROVENANCE_V2_SCAVENGE, "could not inspect stale H3 staging layout") from exc
     if not root_entries <= ({"work"} | set(BUNDLE_FILES)):
         raise ApplianceError(CP_PROVENANCE_V2_SCAVENGE, "stale H3 staging layout is unexpected")
     if "work" in root_entries:
-        work_metadata = os.lstat(os.path.join(stage, "work"))
-        if not stat.S_ISDIR(work_metadata.st_mode) or stat.S_ISLNK(work_metadata.st_mode):
+        try:
+            work_metadata = os.lstat(os.path.join(stage, "work"))
+        except OSError as exc:
+            raise ApplianceError(CP_PROVENANCE_V2_SCAVENGE, "could not inspect stale H3 work area") from exc
+        if not _is_same_owner_directory(work_metadata):
             raise ApplianceError(CP_PROVENANCE_V2_SCAVENGE, "stale H3 work area is malformed")
+        _validate_stale_work_tree(os.path.join(stage, "work"), lock)
     for name in root_entries & set(BUNDLE_FILES):
-        if not stat.S_ISREG(os.lstat(os.path.join(stage, name)).st_mode):
+        try:
+            metadata = os.lstat(os.path.join(stage, name))
+        except OSError as exc:
+            raise ApplianceError(CP_PROVENANCE_V2_SCAVENGE, "could not inspect stale H3 bundle item") from exc
+        if not _is_same_owner_regular(metadata):
             raise ApplianceError(CP_PROVENANCE_V2_SCAVENGE, "stale H3 bundle item is malformed")
+
+
+def _validate_stale_work_tree(work_root: str, lock: Lock) -> None:
+    tree_nodes, parent_paths, module_work_files = _stale_work_expectations(lock)
+    try:
+        entries = list(os.scandir(work_root))
+    except OSError as exc:
+        raise ApplianceError(CP_PROVENANCE_V2_SCAVENGE, "could not inspect stale H3 work tree") from exc
+    for entry in entries:
+        image_id = next((candidate for candidate in IMAGE_IDS if entry.name == f"{candidate}-tree"), None)
+        if image_id is not None:
+            _validate_stale_image_tree(entry.path, image_id, tree_nodes[image_id], parent_paths[image_id])
+        elif entry.name in {"models.pseudo", "runtime-policy.pseudo"} or entry.name in module_work_files:
+            try:
+                metadata = os.lstat(entry.path)
+            except OSError as exc:
+                raise ApplianceError(CP_PROVENANCE_V2_SCAVENGE, "could not inspect stale H3 work item") from exc
+            if not _is_same_owner_regular(metadata):
+                raise ApplianceError(CP_PROVENANCE_V2_SCAVENGE, "stale H3 work item is malformed")
+        else:
+            raise ApplianceError(CP_PROVENANCE_V2_SCAVENGE, "stale H3 work layout is unexpected")
+
+
+def _stale_work_expectations(lock: Lock) -> tuple[dict[str, dict], dict[str, set[str]], set[str]]:
+    tree_nodes = {image_id: {} for image_id in IMAGE_IDS}
+    parent_paths = {image_id: set() for image_id in IMAGE_IDS}
+    module_work_files: set[str] = set()
+    for lock_input in lock.inputs:
+        for placement in lock_input.placements:
+            tree_nodes[placement.image][placement.path] = placement
+            parent = posixpath.dirname(placement.path)
+            while parent != "/":
+                parent_paths[placement.image].add(parent)
+                parent = posixpath.dirname(parent)
+            if placement.node_type == "file" and placement.path.endswith(".ko"):
+                basename = os.path.basename(placement.path)
+                module_work_files.update({f"{basename}.content", f"{basename}.sig.der", f"{basename}.signer.pem"})
+    return tree_nodes, parent_paths, module_work_files
+
+
+def _validate_stale_image_tree(tree_root: str, image_id: str, nodes: dict, parent_paths: set[str]) -> None:
+    try:
+        root_metadata = os.lstat(tree_root)
+    except OSError as exc:
+        raise ApplianceError(CP_PROVENANCE_V2_SCAVENGE, "could not inspect stale H3 image tree") from exc
+    if not _is_same_owner_directory(root_metadata):
+        raise ApplianceError(CP_PROVENANCE_V2_SCAVENGE, "stale H3 image tree is malformed")
+    try:
+        for root, directories, files in os.walk(tree_root, followlinks=False):
+            for item_name in [*directories, *files]:
+                item = os.path.join(root, item_name)
+                image_path = "/" + os.path.relpath(item, tree_root)
+                metadata = os.lstat(item)
+                placement = nodes.get(image_path)
+                if stat.S_ISDIR(metadata.st_mode):
+                    if not _is_same_owner_directory(metadata) or (placement is None and image_path not in parent_paths):
+                        raise ApplianceError(CP_PROVENANCE_V2_SCAVENGE, "stale H3 image directory is malformed")
+                elif stat.S_ISREG(metadata.st_mode):
+                    if not _is_same_owner_regular(metadata) or placement is None or placement.node_type != "file":
+                        raise ApplianceError(CP_PROVENANCE_V2_SCAVENGE, "stale H3 image file is malformed")
+                elif stat.S_ISLNK(metadata.st_mode):
+                    if image_id != "runtime-policy" or placement is None or placement.node_type != "symlink" or os.readlink(item) != placement.target:
+                        raise ApplianceError(CP_PROVENANCE_V2_SCAVENGE, "stale H3 image symlink is malformed")
+                    try:
+                        validate_symlink_target(image_path, placement.target or "")
+                        _validate_image_symlink(image_id, image_path, placement.target or "")
+                    except ApplianceError as exc:
+                        raise ApplianceError(CP_PROVENANCE_V2_SCAVENGE, "stale H3 image symlink is malformed") from exc
+                else:
+                    raise ApplianceError(CP_PROVENANCE_V2_SCAVENGE, "stale H3 image node is malformed")
+    except OSError as exc:
+        raise ApplianceError(CP_PROVENANCE_V2_SCAVENGE, "could not inspect stale H3 image tree") from exc
+
+
+def _is_same_owner_directory(value: os.stat_result) -> bool:
+    return stat.S_ISDIR(value.st_mode) and not stat.S_ISLNK(value.st_mode) and value.st_uid == os.geteuid()
+
+
+def _is_same_owner_regular(value: os.stat_result) -> bool:
+    return stat.S_ISREG(value.st_mode) and value.st_nlink == 1 and value.st_uid == os.geteuid()
+
+
+def _release_lease_quietly(handle) -> None:
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except (OSError, ValueError):
+        pass
+    try:
+        handle.close()
+    except (OSError, ValueError):
+        pass
 
 
 def _open_owner_lock(path: str, reason_code: str):
@@ -822,17 +993,23 @@ def _assert_bundle_shape(directory: str, *, readonly: bool) -> None:
         raise ApplianceError(CP_PROVENANCE_V2_BUNDLE_SHAPE, "could not enumerate H3 bundle") from exc
     if names != sorted(BUNDLE_FILES):
         raise ApplianceError(CP_PROVENANCE_V2_BUNDLE_SHAPE, "H3 bundle does not have the exact six-file shape")
-    for name in BUNDLE_FILES:
-        metadata = os.lstat(os.path.join(directory, name))
-        if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode) or metadata.st_nlink != 1:
-            raise ApplianceError(CP_PROVENANCE_V2_BUNDLE_SHAPE, "H3 bundle contains a non-regular file")
-        if readonly and (stat.S_IMODE(metadata.st_mode) & 0o333):
-            raise ApplianceError(CP_PROVENANCE_V2_BUNDLE_READONLY, "H3 bundle file remains writable or executable")
+    try:
+        for name in BUNDLE_FILES:
+            metadata = os.lstat(os.path.join(directory, name))
+            if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode) or metadata.st_nlink != 1:
+                raise ApplianceError(CP_PROVENANCE_V2_BUNDLE_SHAPE, "H3 bundle contains a non-regular file")
+            if readonly and (stat.S_IMODE(metadata.st_mode) & 0o333):
+                raise ApplianceError(CP_PROVENANCE_V2_BUNDLE_READONLY, "H3 bundle file remains writable or executable")
+    except OSError as exc:
+        raise ApplianceError(CP_PROVENANCE_V2_BUNDLE_SHAPE, "could not inspect H3 bundle file") from exc
 
 
 def _bundle_digests(directory: str, *, readonly: bool) -> dict[str, str]:
     _assert_bundle_shape(directory, readonly=readonly)
-    return {name: _sha256_file(os.path.join(directory, name)) for name in BUNDLE_FILES}
+    try:
+        return {name: _sha256_file(os.path.join(directory, name)) for name in BUNDLE_FILES}
+    except OSError as exc:
+        raise ApplianceError(CP_PROVENANCE_V2_BUNDLE_SHAPE, "could not hash H3 bundle file") from exc
 
 
 def _make_bundle_readonly(directory: str) -> None:
@@ -842,6 +1019,20 @@ def _make_bundle_readonly(directory: str) -> None:
             os.chmod(os.path.join(directory, name), 0o444)
     except OSError as exc:
         raise ApplianceError(CP_PROVENANCE_V2_BUNDLE_READONLY, "could not make H3 bundle files read-only") from exc
+
+
+def _write_staging_text(path: str, value: str) -> None:
+    try:
+        Path(path).write_text(value, encoding="utf-8")
+    except OSError as exc:
+        raise ApplianceError(CP_PROVENANCE_V2_STAGING, "could not write H3 staging metadata") from exc
+
+
+def _write_staging_bytes(path: str, value: bytes) -> None:
+    try:
+        Path(path).write_bytes(value)
+    except OSError as exc:
+        raise ApplianceError(CP_PROVENANCE_V2_STAGING, "could not write H3 staging document") from exc
 
 
 def _result(inputs: conf_proc_provenance_v2.ProvenanceInputs, bundle_path: str, digests: dict[str, str]) -> AssemblyResult:
@@ -872,7 +1063,10 @@ def _remove_tree(path: str) -> None:
         for name in [*files, *directories]:
             item = os.path.join(root, name)
             try:
-                if not stat.S_ISLNK(os.lstat(item).st_mode):
+                metadata = os.lstat(item)
+                if stat.S_ISREG(metadata.st_mode) and metadata.st_nlink != 1:
+                    continue
+                if not stat.S_ISLNK(metadata.st_mode):
                     os.chmod(item, 0o700)
             except OSError:
                 pass

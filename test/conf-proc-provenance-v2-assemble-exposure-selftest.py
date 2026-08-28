@@ -14,6 +14,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -40,6 +41,24 @@ def _tcb() -> bytes:
     return cj.canonical_dumps({"schema": "conf-proc-pre-sandbox-tcb/v1", "status": "declared_unverified", "caller": executable("caller", 1), "launcher": executable("launcher", 2), "sandbox": {"backend": "bubblewrap", "executable": executable("sandbox", 3), "helper": None}, "kernel_feature_contract": {"schema": "conf-proc-kernel-features/v1", "sha256": format(4, "064x")}})
 
 
+def _stale_lock() -> object:
+    placements = (
+        SimpleNamespace(image="runtime-policy", path="/etc", node_type="directory", target=None),
+        SimpleNamespace(image="runtime-policy", path="/etc/target", node_type="file", target=None),
+        SimpleNamespace(image="runtime-policy", path="/etc/link", node_type="symlink", target="target"),
+    )
+    return SimpleNamespace(inputs=(SimpleNamespace(placements=placements),))
+
+
+def _stale_stage(output: str, address: tuple[str, str]) -> str:
+    name = "-".join(address)
+    stage = os.path.join(output, ".h3-staging", name)
+    os.makedirs(os.path.join(stage, "work", "runtime-policy-tree", "etc"))
+    os.makedirs(os.path.join(output, ".h3-owners"), exist_ok=True)
+    open(os.path.join(output, ".h3-owners", name + ".lock"), "a+b").close()
+    return stage
+
+
 class _Fixture:
     def __init__(self, base: str) -> None:
         self.base = base
@@ -47,7 +66,7 @@ class _Fixture:
         self.output = os.path.join(base, "output")
         os.makedirs(self.input_root)
         os.makedirs(self.output)
-        self.uid, self.gid = os.geteuid(), os.getegid()
+        self.uid, self.gid = 0, 0
         self._write_authorities()
 
     def _certificate(self) -> tuple[bytes, dict]:
@@ -160,6 +179,35 @@ class H3ExposureTests(unittest.TestCase):
         open(os.path.join(self.fixture.output, ".h3-owners", name + ".lock"), "a+b").close()
         result = self.fixture.assemble()
         self.assertTrue(os.path.isdir(result.bundle_path))
+
+        stale_output = os.path.join(self.base, "stale-symlink")
+        stale_address = ("a" * 64, "b" * 64)
+        stale = _stale_stage(stale_output, stale_address)
+        Path(os.path.join(stale, "work", "runtime-policy-tree", "etc", "target")).write_bytes(b"target")
+        os.symlink("target", os.path.join(stale, "work", "runtime-policy-tree", "etc", "link"))
+        recreated = assembler._prepare_stage(stale_output, stale_address, _stale_lock())
+        self.assertEqual(recreated, stale)
+        self.assertEqual(os.listdir(recreated), [])
+
+        for kind in ("hard-link", "fifo"):
+            unsafe_output = os.path.join(self.base, "unsafe-" + kind)
+            unsafe_address = ("c" * 64, "d" * 64)
+            unsafe = _stale_stage(unsafe_output, unsafe_address)
+            target = os.path.join(unsafe, "work", "runtime-policy-tree", "etc", "target")
+            external = os.path.join(unsafe_output, "external")
+            if kind == "hard-link":
+                Path(external).write_bytes(b"outside")
+                os.chmod(external, 0o640)
+                os.link(external, target)
+            else:
+                os.mkfifo(target)
+            with self.assertRaises(ApplianceError) as context:
+                assembler._prepare_stage(unsafe_output, unsafe_address, _stale_lock())
+            self.assertEqual(context.exception.reason_code, "CP_PROVENANCE_V2_SCAVENGE")
+            self.assertTrue(os.path.lexists(unsafe))
+            if kind == "hard-link":
+                self.assertEqual(Path(external).read_bytes(), b"outside")
+                self.assertEqual(stat.S_IMODE(os.lstat(external).st_mode), 0o640)
 
         other = _Fixture(os.path.join(self.base, "other"))
         other_name = "-".join(other.address)

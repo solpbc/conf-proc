@@ -52,8 +52,8 @@ def _placement(image: str, path: str, node_type: str = "file", *, target: str | 
         path=path,
         node_type=node_type,
         mode=0o644,
-        uid=os.geteuid(),
-        gid=os.getegid(),
+        uid=0,
+        gid=0,
         xattrs=(),
         source_input_id="source" if node_type == "file" else None,
         target=target,
@@ -75,8 +75,8 @@ class H3TreeTests(unittest.TestCase):
             images={
                 "models": ImagePolicy(
                     nodes=(
-                        TreeNodePolicy("/payload", "file", 0o644, os.geteuid(), os.getegid(), (), "source", None, "model"),
-                        TreeNodePolicy("/unexpected", "file", 0o644, os.geteuid(), os.getegid(), (), "source", None, "model"),
+                        TreeNodePolicy("/payload", "file", 0o644, 0, 0, (), "source", None, "model"),
+                        TreeNodePolicy("/unexpected", "file", 0o644, 0, 0, (), "source", None, "model"),
                     )
                 )
             }
@@ -84,7 +84,7 @@ class H3TreeTests(unittest.TestCase):
         closure = {
             "entries": [
                 {
-                    "path": "/payload", "node_type": "file", "mode": 0o644, "uid": os.geteuid(), "gid": os.getegid(),
+                    "path": "/payload", "node_type": "file", "mode": 0o644, "uid": 0, "gid": 0,
                     "size_bytes": 4, "sha256": _sha(b"tree"), "symlink_target": None, "xattrs": [],
                 }
             ]
