@@ -21,6 +21,7 @@ venv/
 .env.*
 !.env.example
 *.pem
+!test/spp-boot-module-signer-fixture.pem
 *.key
 *.cert
 *.crt

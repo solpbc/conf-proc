@@ -80,7 +80,7 @@ def _placement(image: str, path: str, input_id: str) -> dict:
 
 @lru_cache(maxsize=1)
 def _trusted_certificate_bundle() -> tuple[bytes, str, str, str]:
-    bundle = (ROOT / "roots" / "amd" / "Turin" / "ark.pem").read_bytes()
+    bundle = (ROOT / "test" / "spp-boot-module-signer-fixture.pem").read_bytes()
     certificate = x509.load_pem_x509_certificate(bundle)
     spki = certificate.public_key().public_bytes(
         serialization.Encoding.DER,
@@ -346,7 +346,7 @@ def build_compact_fixture(*, strict_subset: bool = False, unreachable_executable
             "predecessor_sha256": predecessor_sha256, "image_order": ["models", "runtime-policy"],
             "module_roles": {"boot": [identities[0]], "serving": [identities[-1]]},
             "non_runtime_loadable_modules": [identities[1]] if strict_subset else [],
-            "tmpfs_mounts": [{"path": "/run/spp", "size_bytes": 1048576, "mode": 0o755}],
+            "tmpfs_mounts": [{"path": "/run/spp-state", "size_bytes": 1048576, "mode": 0o755}],
             "mutable_control_order": list(boot._CONTROL_ORDER),
             "observation_contract_sha256": boot.OBSERVATION_CONTRACT_SHA256,
             "gpt_layout_rules_sha256": _sha(gpt_rules_bytes),
@@ -357,8 +357,8 @@ def build_compact_fixture(*, strict_subset: bool = False, unreachable_executable
             "schema": "conf-proc-spp-module-load-plan/v1", "plan_version": 1,
             "boot_contract_sha256": _sha(boot_contract_bytes), "measurement_scope": "future-pcr4-only",
             "entries": [
-                {"index": 0, **identities[0], "depends_on": []},
-                {"index": 1, **identities[-1], "depends_on": [0]},
+                {"index": 0, **identities[0], "predecessor_indices": []},
+                {"index": 1, **identities[-1], "predecessor_indices": [0]},
             ],
         }
     )
@@ -433,6 +433,24 @@ def _observation(effect: boot.BootEffect) -> boot.BootObservation:
     raise AssertionError(type(effect))
 
 
+class _FixtureTransport:
+    def __init__(self, extend_outcome: boot.Pcr15ExtendOutcome = boot.Pcr15ExtendOutcome.ACKNOWLEDGED) -> None:
+        self.extend_outcome = extend_outcome
+        self.invocations: list[boot.BootEffect] = []
+
+    def execute(self, effect: boot.BootEffect) -> boot.BootObservation:
+        self.invocations.append(effect)
+        if type(effect) is boot.ExtendPcr15Effect:
+            return boot.Pcr15ExtendObservation(effect.contract_sha256, self.extend_outcome)
+        if type(effect) is boot.ServingActionEffect:
+            return boot.ServingActionObservation(
+                effect.contract_sha256,
+                effect.action,
+                boot.ServingActionStatus.COMPLETED,
+            )
+        return _observation(effect)
+
+
 def _reach(engine: boot.BootTransitionEngine, state: boot.BootTransitionState) -> None:
     while engine.state is not state:
         effect = engine.next_effect()
@@ -446,20 +464,25 @@ def _child_legal() -> int:
 
 def _child_pcr_outcome(outcome: boot.Pcr15ExtendOutcome) -> int:
     engine = boot.BootTransitionEngine(_binding())
+    transport = _FixtureTransport(outcome)
     states = []
     controls = []
     while engine.state is not boot.BootTransitionState.SERVING:
-        effect = engine.next_effect()
-        assert effect is not None
-        states.append(engine.state)
-        if engine.state is not boot.BootTransitionState.SERVING_READY:
+        requested_state = engine.state
+        states.append(requested_state)
+        if requested_state is boot.BootTransitionState.PCR15_EXTEND:
+            invocation_count = len(transport.invocations)
+            engine.advance(transport)
+            assert len(transport.invocations) == invocation_count + 1
+            effect = transport.invocations[-1]
+        else:
+            effect = engine.next_effect()
+            assert effect is not None
+            engine.advance(transport)
+        if requested_state is not boot.BootTransitionState.SERVING_READY:
             assert type(effect) is not boot.ServingReadyEffect
         if type(effect) is boot.CloseMutableControlEffect:
             controls.append(effect.control)
-        observation = _observation(effect)
-        if type(effect) is boot.ExtendPcr15Effect:
-            observation = boot.Pcr15ExtendObservation(effect.contract_sha256, outcome)
-        engine.accept(observation)
     assert engine.next_effect() is None
     assert states == [
         boot.BootTransitionState.CMDLINE, boot.BootTransitionState.PCR15_ZERO,
@@ -479,17 +502,22 @@ def _child_pcr_outcome(outcome: boot.Pcr15ExtendOutcome) -> int:
         boot.BootTransitionState.SERVING_READY,
     ]
     assert controls == list(boot._CONTROL_ORDER[1:])
+    for action in boot.ServingAction:
+        observation = engine.invoke_serving_action(action, transport)
+        assert type(observation) is boot.ServingActionObservation
     return 0
 
 
-_PCR_KAT_MEASUREMENT_HEX = "7b43a98e852edb967653724802022124f08e330c1b8bbc2a033d316253a9e244"
-_PCR_KAT_AFTER_HEX = "c044474b5871d154868a5a0ef411ac6020a837acd4d464ce33b8ac1f24c686ce"
+_PCR_KAT_MEASUREMENT_HEX = "c96583eab2f1fe78a62bd1b9ad6c076efbd6f82ae11af4528ea1a2bc0c8a5290"
+_PCR_KAT_AFTER_HEX = "7969a2786774fada6e734a611712bb86879f3d4752ee2593c83e75030c3fc010"
 
 
 def _child_pcr_known_answer() -> int:
     engine = boot.BootTransitionEngine(_binding())
     _reach(engine, boot.BootTransitionState.PCR15_EXTEND)
-    effect = engine.next_effect()
+    transport = _FixtureTransport()
+    engine.advance(transport)
+    effect = transport.invocations[-1]
     assert type(effect) is boot.ExtendPcr15Effect
     assert effect.measurement.hex() == _PCR_KAT_MEASUREMENT_HEX
     assert engine.predicted_pcr15.hex() == _PCR_KAT_AFTER_HEX
@@ -498,13 +526,18 @@ def _child_pcr_known_answer() -> int:
 
 def _child_transition_table() -> int:
     engine = boot.BootTransitionEngine(_binding())
+    transport = _FixtureTransport()
     for row in boot.BOOT_TRANSITION_TABLE:
         assert engine.state is row.state
         while engine.state is row.state:
-            effect = engine.next_effect()
-            assert effect is not None
+            if engine.state is boot.BootTransitionState.PCR15_EXTEND:
+                engine.advance(transport)
+                effect = transport.invocations[-1]
+            else:
+                effect = engine.next_effect()
+                assert effect is not None
+                engine.advance(transport)
             assert type(effect).__name__ == row.effect_name
-            engine.accept(_observation(effect))
     assert engine.state is boot.BootTransitionState.SERVING
     return 0
 
@@ -712,10 +745,28 @@ class SppBootSelftest(unittest.TestCase):
         with self.assertRaises(ApplianceError):
             boot.bind_boot_inputs(**build_compact_fixture(unreachable_executable=True))
 
+    def test_c4_tmpfs_cannot_hide_or_nest_an_immutable_image_mount(self) -> None:
+        docs = build_compact_fixture()
+        contract = canonical_loads(docs["boot_contract_bytes"])
+        contract["tmpfs_mounts"] = [{"path": "/run/spp", "size_bytes": 1048576, "mode": 0o755}]
+        docs["boot_contract_bytes"] = canonical_dumps(contract)
+        plan = canonical_loads(docs["module_plan_bytes"])
+        plan["boot_contract_sha256"] = _sha(docs["boot_contract_bytes"])
+        docs["module_plan_bytes"] = canonical_dumps(plan)
+        with self.assertRaises(ApplianceError):
+            boot.bind_boot_inputs(**docs)
+
+        contract["tmpfs_mounts"] = [
+            {"path": "/run/a", "size_bytes": 4096, "mode": 0o700},
+            {"path": "/run/a/nested", "size_bytes": 4096, "mode": 0o700},
+        ]
+        with self.assertRaises(ApplianceError):
+            boot.parse_boot_contract(canonical_dumps(contract))
+
     def test_d_module_subset_order_roles_and_nonruntime_closure(self) -> None:
         docs = build_compact_fixture()
         plan = canonical_loads(docs["module_plan_bytes"])
-        plan["entries"][1]["depends_on"] = [1]
+        plan["entries"][1]["predecessor_indices"] = [1]
         with self.assertRaises(ApplianceError):
             boot.parse_module_load_plan(canonical_dumps(plan))
         docs = build_compact_fixture()
@@ -735,13 +786,25 @@ class SppBootSelftest(unittest.TestCase):
     def test_d2_module_cycle_duplicate_role_and_nonruntime_overlap_are_rejected(self) -> None:
         docs = build_compact_fixture()
         plan = canonical_loads(docs["module_plan_bytes"])
-        plan["entries"][0]["depends_on"] = [0]
+        plan["entries"][0]["predecessor_indices"] = [0]
         with self.assertRaises(ApplianceError):
             boot.parse_module_load_plan(canonical_dumps(plan))
         contract = canonical_loads(docs["boot_contract_bytes"])
         contract["non_runtime_loadable_modules"] = contract["module_roles"]["boot"]
         with self.assertRaises(ApplianceError):
             boot.parse_boot_contract(canonical_dumps(contract))
+
+    def test_d3_omitted_dependency_and_ambiguous_basename_are_rejected(self) -> None:
+        docs = build_compact_fixture()
+        plan = canonical_loads(docs["module_plan_bytes"])
+        plan["entries"][1]["predecessor_indices"] = []
+        with self.assertRaises(ApplianceError):
+            boot.parse_module_load_plan(canonical_dumps(plan))
+
+        plan = canonical_loads(docs["module_plan_bytes"])
+        plan["entries"][1]["path"] = "/alternate/boot.ko"
+        with self.assertRaises(ApplianceError):
+            boot.parse_module_load_plan(canonical_dumps(plan))
 
     def test_e_wrong_and_out_of_order_observations_fail_closed(self) -> None:
         engine = boot.BootTransitionEngine(_binding())
@@ -807,6 +870,26 @@ class SppBootSelftest(unittest.TestCase):
         result = subprocess.run([sys.executable, str(Path(__file__).resolve()), "_child_legal"], check=False, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_g1_each_serving_action_fails_before_ready_without_transport_use(self) -> None:
+        binding = _binding()
+        with self.assertRaises(TypeError):
+            boot.ServingReadyEffect(binding.boot_contract_sha256)
+        with self.assertRaises(TypeError):
+            boot.ServingActionEffect(binding.boot_contract_sha256)
+        with self.assertRaises(TypeError):
+            boot.ExtendPcr15Effect(binding.boot_contract_sha256)
+        pre_ready_states = tuple(row.state for row in boot.BOOT_TRANSITION_TABLE)
+        for state in pre_ready_states:
+            for action in boot.ServingAction:
+                with self.subTest(state=state, action=action):
+                    engine = boot.BootTransitionEngine(binding)
+                    engine.state = state
+                    transport = _FixtureTransport()
+                    with self.assertRaises(ApplianceError):
+                        engine.invoke_serving_action(action, transport)
+                    self.assertEqual(transport.invocations, [])
+                    self.assertIs(engine.state, boot.BootTransitionState.FAILED_NON_SERVING)
+
     def test_g2_transition_table_matches_reducer_effects(self) -> None:
         result = subprocess.run([sys.executable, str(Path(__file__).resolve()), "_child_transition_table"], check=False, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -821,26 +904,54 @@ class SppBootSelftest(unittest.TestCase):
                 result = subprocess.run([sys.executable, str(Path(__file__).resolve()), mode], check=False, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_i_pcr_latch_blocks_second_writer_without_retry(self) -> None:
+    def test_i_pcr_latch_is_claimed_by_one_transport_across_different_contracts(self) -> None:
         first = boot.BootTransitionEngine(_binding())
         _reach(first, boot.BootTransitionState.PCR15_EXTEND)
-        first_effect = first.next_effect()
-        self.assertIsInstance(first_effect, boot.ExtendPcr15Effect)
-        second = boot.BootTransitionEngine(_binding())
+        with self.assertRaises(TypeError):
+            boot.ExtendPcr15Effect(first.contract_sha256, first.pcr15_measurement, boot.Pcr15EvidenceClass.DERIVED_APPRAISED_CONJUNCTION)
+
+        second_docs = build_compact_fixture()
+        second_contract = canonical_loads(second_docs["boot_contract_bytes"])
+        second_contract["tmpfs_mounts"] = [{"path": "/run/spp-second", "size_bytes": 1048576, "mode": 0o755}]
+        second_docs["boot_contract_bytes"] = canonical_dumps(second_contract)
+        second_plan = canonical_loads(second_docs["module_plan_bytes"])
+        second_plan["boot_contract_sha256"] = _sha(second_docs["boot_contract_bytes"])
+        second_docs["module_plan_bytes"] = canonical_dumps(second_plan)
+        second = boot.BootTransitionEngine(boot.bind_boot_inputs(**second_docs))
+        self.assertNotEqual(first.contract_sha256, second.contract_sha256)
         _reach(second, boot.BootTransitionState.PCR15_EXTEND)
-        with self.assertRaises(ApplianceError):
-            second.next_effect()
-        self.assertIs(second.state, boot.BootTransitionState.FAILED_NON_SERVING)
-        first.accept(boot.Pcr15ExtendObservation(first.contract_sha256, boot.Pcr15ExtendOutcome.TIMEOUT))
+
+        first_transport = _FixtureTransport()
+        second_transport = _FixtureTransport()
+        first.advance(first_transport)
+        first_effect = first_transport.invocations[-1]
+        self.assertIsInstance(first_effect, boot.ExtendPcr15Effect)
+        self.assertIs(first_effect.evidence_class, boot.Pcr15EvidenceClass.DERIVED_APPRAISED_CONJUNCTION)
         self.assertIs(first.state, boot.BootTransitionState.PCR15_READBACK)
         with self.assertRaises(ApplianceError):
-            first.accept(boot.Pcr15Readback(first.contract_sha256, b"\0" * 32))
-        self.assertIs(first.state, boot.BootTransitionState.FAILED_NON_SERVING)
-        third = boot.BootTransitionEngine(_binding())
-        _reach(third, boot.BootTransitionState.PCR15_EXTEND)
+            second.advance(second_transport)
+        self.assertIs(second.state, boot.BootTransitionState.FAILED_NON_SERVING)
+        self.assertEqual(second_transport.invocations, [])
+
+        replacement_transport = _FixtureTransport()
         with self.assertRaises(ApplianceError):
-            third.next_effect()
-        self.assertIs(third.state, boot.BootTransitionState.FAILED_NON_SERVING)
+            first.advance(replacement_transport)
+        self.assertIs(first.state, boot.BootTransitionState.FAILED_NON_SERVING)
+
+    def test_j_transport_exception_is_not_retained_in_safe_failure(self) -> None:
+        class SecretFailureTransport:
+            def execute(self, effect: boot.BootEffect) -> boot.BootObservation:
+                raise RuntimeError("/owner/path bearer-secret raw-child-output")
+
+        engine = boot.BootTransitionEngine(_binding())
+        with self.assertRaises(ApplianceError) as captured:
+            engine.advance(SecretFailureTransport())
+        self.assertIsNone(captured.exception.__cause__)
+        self.assertIsNone(captured.exception.__context__)
+        self.assertNotIn("secret", str(captured.exception))
+        diagnostic = engine.next_effect()
+        self.assertIsInstance(diagnostic, boot.SafeDiagnosticEffect)
+        self.assertNotIn("secret", repr(diagnostic))
 
 
 if __name__ == "__main__":

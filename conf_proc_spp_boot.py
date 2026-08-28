@@ -112,6 +112,12 @@ def _absolute_path(value: object) -> bool:
     )
 
 
+def _paths_overlap(first: str, second: str) -> bool:
+    """Return whether either absolute path is the other path or its ancestor."""
+
+    return first == second or first.startswith(second + "/") or second.startswith(first + "/")
+
+
 def _uuid(value: object) -> bool:
     if type(value) is not str:
         return False
@@ -178,9 +184,17 @@ class BootContract:
 
 @dataclass(frozen=True)
 class ModulePlanEntry:
+    """One load step plus its complete transitive load-order predecessor closure.
+
+    ``predecessor_indices`` deliberately does not claim to reproduce sparse
+    ``modinfo`` symbol dependencies.  The total order makes every earlier load
+    an ordering dependency, so the canonical closure is independently
+    checkable and no earlier prerequisite can be omitted.
+    """
+
     index: int
     identity: ModuleIdentity
-    depends_on: tuple[int, ...]
+    predecessor_indices: tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -379,6 +393,11 @@ def parse_boot_contract(data: bytes) -> BootContract:
         _require(_absolute_path(item["path"]) and type(item["size_bytes"]) is int and item["size_bytes"] > 0 and type(item["mode"]) is int and 0 <= item["mode"] <= 0o777, CP_BOOT_SCHEMA, "tmpfs description is invalid")
         parsed_mounts.append(TmpfsDescription(item["path"], item["size_bytes"], item["mode"]))
     _require([item.path for item in parsed_mounts] == sorted(item.path for item in parsed_mounts) and len({item.path for item in parsed_mounts}) == len(parsed_mounts), CP_BOOT_SCHEMA, "tmpfs descriptions must be sorted and unique")
+    _require(
+        all(not _paths_overlap(left.path, right.path) for index, left in enumerate(parsed_mounts) for right in parsed_mounts[index + 1:]),
+        CP_BOOT_SCHEMA,
+        "tmpfs mount paths must not overlap",
+    )
     _require(raw["mutable_control_order"] == list(_CONTROL_ORDER), CP_BOOT_SCHEMA, "mutable control order is invalid")
     _require(raw["observation_contract_sha256"] == OBSERVATION_CONTRACT_SHA256, CP_BOOT_SCHEMA, "observation shape digest is not engine-owned")
     _require(_sha(raw["gpt_layout_rules_sha256"]), CP_BOOT_SCHEMA, "GPT rules digest is invalid")
@@ -398,14 +417,19 @@ def parse_module_load_plan(data: bytes) -> ModuleLoadPlan:
     _require(type(entries) is list and entries, CP_BOOT_MODULE_PLAN, "module plan entries are invalid")
     parsed: list[ModulePlanEntry] = []
     for item in entries:
-        _require(type(item) is dict and set(item) == {"index", "path", "sha256", "signer_certificate_sha256", "depends_on"}, CP_BOOT_MODULE_PLAN, "module plan entry fields are invalid")
-        _require(type(item["index"]) is int and item["index"] >= 0 and type(item["depends_on"]) is list and all(type(value) is int and value >= 0 for value in item["depends_on"]), CP_BOOT_MODULE_PLAN, "module plan order is invalid")
+        _require(type(item) is dict and set(item) == {"index", "path", "sha256", "signer_certificate_sha256", "predecessor_indices"}, CP_BOOT_MODULE_PLAN, "module plan entry fields are invalid")
+        _require(type(item["index"]) is int and item["index"] >= 0 and type(item["predecessor_indices"]) is list and all(type(value) is int and value >= 0 for value in item["predecessor_indices"]), CP_BOOT_MODULE_PLAN, "module plan order is invalid")
         identity = _parse_identity({key: item[key] for key in ("path", "sha256", "signer_certificate_sha256")}, CP_BOOT_MODULE_PLAN)
-        dependencies = tuple(item["depends_on"])
-        _require(dependencies == tuple(sorted(dependencies)) and len(set(dependencies)) == len(dependencies) and all(value < item["index"] for value in dependencies), CP_BOOT_MODULE_PLAN, "module dependencies must be unique prior indices")
+        dependencies = tuple(item["predecessor_indices"])
+        _require(
+            dependencies == tuple(range(item["index"])),
+            CP_BOOT_MODULE_PLAN,
+            "module dependencies must name every prior load index exactly once",
+        )
         parsed.append(ModulePlanEntry(item["index"], identity, dependencies))
     _require([item.index for item in parsed] == list(range(len(parsed))), CP_BOOT_MODULE_PLAN, "module plan indices must be contiguous")
     _require(len({item.identity for item in parsed}) == len(parsed), CP_BOOT_MODULE_PLAN, "module plan identities must be unique")
+    _require(len({posixpath.basename(item.identity.path) for item in parsed}) == len(parsed), CP_BOOT_MODULE_PLAN, "module plan basenames must be unambiguous")
     return ModuleLoadPlan(raw["boot_contract_sha256"], tuple(parsed))
 
 
@@ -817,6 +841,16 @@ def bind_boot_inputs(
         contract.mutable_control_order,
         kfc.mutable_controls,
     )
+    immutable_mounts = (runtime.runtime_policy_destination, runtime.models_destination)
+    _require(
+        all(
+            not _paths_overlap(mount.path, immutable_path)
+            for mount in runtime.tmpfs_mounts
+            for immutable_path in immutable_mounts
+        ),
+        CP_BOOT_BINDING,
+        "tmpfs mounts must not overlap immutable image mount paths",
+    )
     return _register_boot_binding(BootBinding(
         root_lock_bytes, runtime_closure_bytes, verity_rules_bytes, tcb_identity_bytes, builder_source_bytes, policy_bytes,
         accepted_manifest_bytes, kernel_feature_contract_bytes, trusted_certificate_bundle_bytes, boot_contract_bytes, module_plan_bytes, gpt_layout_rules_bytes,
@@ -836,6 +870,11 @@ def _validate_module_plan_bound(contract: BootContract, plan: ModuleLoadPlan, ma
     _require(set(planned) | set(non_runtime) == inventory_set, CP_BOOT_MODULE_PLAN, "module plan is not a closed inventory subset")
     _require(all(item in inventory_set and item.signer_certificate_sha256 in signer_set for item in planned + non_runtime), CP_BOOT_MODULE_PLAN, "module identity or signer is unauthorized")
     _require(set(contract.boot_modules).issubset(set(planned)) and set(contract.serving_modules).issubset(set(planned)), CP_BOOT_MODULE_PLAN, "required boot or serving module is absent from plan")
+    _require(
+        len({posixpath.basename(item.path) for item in planned + non_runtime}) == len(planned + non_runtime),
+        CP_BOOT_MODULE_PLAN,
+        "packaged module basenames must be unambiguous",
+    )
 
 
 class BootTransitionState(Enum):
@@ -1028,9 +1067,29 @@ class ControlReadback(BootObservation):
     status: ControlReadbackStatus
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class ExtendPcr15Effect(BootEffect):
+    """An engine-issued effect that callers cannot construct or fetch directly."""
+
     measurement: bytes
+    evidence_class: "Pcr15EvidenceClass"
+
+    def __init__(self, *_args: object, **_kwargs: object) -> None:
+        raise TypeError("ExtendPcr15Effect is engine-issued")
+
+
+class Pcr15EvidenceClass(Enum):
+    """The sole machine classification permitted for the PCR-15 commitment."""
+
+    DERIVED_APPRAISED_CONJUNCTION = "derived_appraised_conjunction"
+
+
+def _new_extend_pcr15_effect(contract_sha256: str, measurement: bytes) -> ExtendPcr15Effect:
+    effect = object.__new__(ExtendPcr15Effect)
+    object.__setattr__(effect, "contract_sha256", contract_sha256)
+    object.__setattr__(effect, "measurement", measurement)
+    object.__setattr__(effect, "evidence_class", Pcr15EvidenceClass.DERIVED_APPRAISED_CONJUNCTION)
+    return effect
 
 
 class Pcr15ExtendOutcome(Enum):
@@ -1058,9 +1117,53 @@ class TransportClosedObservation(BootObservation):
     status: TransportClosureStatus
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class ServingReadyEffect(BootEffect):
-    """The sole typed authorization for listener, network, service, and upstream use."""
+    """An engine-issued readiness effect that callers cannot construct."""
+
+    def __init__(self, *_args: object, **_kwargs: object) -> None:
+        raise TypeError("ServingReadyEffect is engine-issued")
+
+
+def _new_serving_ready_effect(contract_sha256: str) -> ServingReadyEffect:
+    effect = object.__new__(ServingReadyEffect)
+    object.__setattr__(effect, "contract_sha256", contract_sha256)
+    return effect
+
+
+class ServingAction(Enum):
+    LISTENER_CREATE = "listener_create"
+    LISTENER_BIND = "listener_bind"
+    SERVICE_START = "service_start"
+    NETWORK_ACTIVATE = "network_activate"
+    UPSTREAM_OPEN = "upstream_open"
+
+
+@dataclass(frozen=True, init=False)
+class ServingActionEffect(BootEffect):
+    """A post-readiness action; no pre-ready reducer state can emit one."""
+
+    action: ServingAction
+
+    def __init__(self, *_args: object, **_kwargs: object) -> None:
+        raise TypeError("ServingActionEffect is engine-issued")
+
+
+def _new_serving_action_effect(contract_sha256: str, action: ServingAction) -> ServingActionEffect:
+    effect = object.__new__(ServingActionEffect)
+    object.__setattr__(effect, "contract_sha256", contract_sha256)
+    object.__setattr__(effect, "action", action)
+    return effect
+
+
+class ServingActionStatus(Enum):
+    COMPLETED = "completed"
+
+
+@dataclass(frozen=True)
+class ServingActionObservation(BootObservation):
+    action: ServingAction
+    status: ServingActionStatus
 
 
 class ServingAuthorizationStatus(Enum):
@@ -1149,13 +1252,14 @@ class _PcrExtendLatchState(Enum):
     REQUEST_ISSUED = "request_issued"
     ACKNOWLEDGED = "acknowledged"
     AMBIGUOUS = "ambiguous"
+    TRANSPORT_CLOSED = "transport_closed"
 
 
 _PCR_EXTEND_LATCH_LOCK: Final = threading.Lock()
 _PCR_EXTEND_LATCH_STATE = _PcrExtendLatchState.UNREQUESTED
 
 
-def _issue_extend_request() -> bool:
+def _claim_extend_transport() -> bool:
     global _PCR_EXTEND_LATCH_STATE
     with _PCR_EXTEND_LATCH_LOCK:
         if _PCR_EXTEND_LATCH_STATE is not _PcrExtendLatchState.UNREQUESTED:
@@ -1174,6 +1278,17 @@ def _record_extend_outcome(outcome: Pcr15ExtendOutcome) -> None:
         )
 
 
+def _record_extend_transport_closed() -> None:
+    global _PCR_EXTEND_LATCH_STATE
+    with _PCR_EXTEND_LATCH_LOCK:
+        _require(
+            _PCR_EXTEND_LATCH_STATE in (_PcrExtendLatchState.ACKNOWLEDGED, _PcrExtendLatchState.AMBIGUOUS),
+            CP_BOOT_LATCH,
+            "PCR15 transport cannot close before one extend outcome",
+        )
+        _PCR_EXTEND_LATCH_STATE = _PcrExtendLatchState.TRANSPORT_CLOSED
+
+
 class BootTransitionEngine:
     """A monotonic reducer over one immutable ``BootBinding``."""
 
@@ -1188,6 +1303,8 @@ class BootTransitionEngine:
         self._pending: BootEffect | None = None
         self._runtime_mapping: str | None = None
         self._models_mapping: str | None = None
+        self._extend_transport: BootTransport | None = None
+        self._extend_request_issued = False
         self._control_index = 1
         self._failure_kind = FailureEffectKind.DIAGNOSTIC
         self._failure_code = CP_BOOT_PROTOCOL
@@ -1220,19 +1337,65 @@ class BootTransitionEngine:
         return effect
 
     def advance(self, transport: BootTransport) -> BootTransitionState:
+        if self.state is BootTransitionState.PCR15_EXTEND and self._pending is None:
+            if not _claim_extend_transport():
+                self._fail(CP_BOOT_LATCH)
+                raise ApplianceError(CP_BOOT_LATCH, "a PCR15 extend transport was already claimed for this boot")
+            self._extend_transport = transport
+            self._extend_request_issued = True
+            self._pending = _new_extend_pcr15_effect(self.contract_sha256, self.pcr15_measurement)
         effect = self.next_effect()
         _require(effect is not None, CP_BOOT_PROTOCOL, "boot transition has no further effect")
+        if type(effect) is ExtendPcr15Effect:
+            if transport is not self._extend_transport:
+                self._pending = None
+                self._fail(CP_BOOT_LATCH)
+                raise ApplianceError(CP_BOOT_LATCH, "PCR15 extend requires the transport that claimed the request")
+        elif self.state in (BootTransitionState.PCR15_READBACK, BootTransitionState.TRANSPORT_CLOSED):
+            if transport is not self._extend_transport:
+                self._pending = None
+                self._fail(CP_BOOT_LATCH)
+                raise ApplianceError(CP_BOOT_LATCH, "PCR15 readback and closure require the claimed extend transport")
+        transport_failed = False
         try:
             observation = transport.execute(effect)
-        except Exception as exc:
+        except Exception:
             if type(effect) is ExtendPcr15Effect:
                 # The request was issued before the transport could report the
                 # error.  Its only resolution is the next exact PCR readback.
                 return self.accept(Pcr15ExtendObservation(self.contract_sha256, Pcr15ExtendOutcome.ERROR))
             self._pending = None
             self._fail(CP_BOOT_PROTOCOL)
-            raise ApplianceError(CP_BOOT_PROTOCOL, "typed boot transport failed") from exc
+            transport_failed = True
+        if transport_failed:
+            # Raise outside the handler so arbitrary transport exceptions are
+            # not retained as __cause__ or __context__ on the safe error.
+            raise ApplianceError(CP_BOOT_PROTOCOL, "typed boot transport failed")
         return self.accept(observation)
+
+    def invoke_serving_action(self, action: ServingAction, transport: BootTransport) -> BootObservation:
+        """Invoke one serving action only after the unique readiness transition."""
+
+        if type(action) is not ServingAction or self.state is not BootTransitionState.SERVING:
+            self._fail(CP_BOOT_PROTOCOL)
+            raise ApplianceError(CP_BOOT_PROTOCOL, "serving action is unavailable before serving readiness")
+        transport_failed = False
+        try:
+            observation = transport.execute(_new_serving_action_effect(self.contract_sha256, action))
+        except Exception:
+            self._fail(CP_BOOT_PROTOCOL)
+            transport_failed = True
+        if transport_failed:
+            raise ApplianceError(CP_BOOT_PROTOCOL, "typed serving transport failed")
+        if not (
+            type(observation) is ServingActionObservation
+            and observation.contract_sha256 == self.contract_sha256
+            and observation.action is action
+            and observation.status is ServingActionStatus.COMPLETED
+        ):
+            self._fail(CP_BOOT_OBSERVATION)
+            raise ApplianceError(CP_BOOT_OBSERVATION, "serving action observation is invalid")
+        return observation
 
     def _effect_for_state(self) -> BootEffect:
         contract = self.contract_sha256
@@ -1272,16 +1435,14 @@ class BootTransitionEngine:
         if self.state is BootTransitionState.MUTABLE_CONTROLS:
             return CloseMutableControlEffect(contract, runtime.mutable_control_order[self._control_index])
         if self.state is BootTransitionState.PCR15_EXTEND:
-            if not _issue_extend_request():
-                self._fail(CP_BOOT_LATCH)
-                raise ApplianceError(CP_BOOT_LATCH, "a PCR15 extend request was already issued in this process")
-            return ExtendPcr15Effect(contract, self.pcr15_measurement)
+            self._fail(CP_BOOT_LATCH)
+            raise ApplianceError(CP_BOOT_LATCH, "PCR15 extend effects are emitted only by advance with a transport")
         if self.state is BootTransitionState.PCR15_READBACK:
             return ReadPcr15Effect(contract, self.predicted_pcr15)
         if self.state is BootTransitionState.TRANSPORT_CLOSED:
             return CloseTransportEffect(contract)
         if self.state is BootTransitionState.SERVING_READY:
-            return ServingReadyEffect(contract)
+            return _new_serving_ready_effect(contract)
         self._fail(CP_BOOT_PROTOCOL)
         raise ApplianceError(CP_BOOT_PROTOCOL, "unrecognized boot transition state")
 
@@ -1387,6 +1548,7 @@ class BootTransitionEngine:
             if self._control_index == len(runtime.mutable_control_order):
                 self.state = BootTransitionState.PCR15_EXTEND
         elif state is BootTransitionState.PCR15_EXTEND:
+            _require(self._extend_request_issued and self._extend_transport is not None, CP_BOOT_LATCH, "PCR15 observation has no claimed extend transport")
             _require(type(observation.outcome) is Pcr15ExtendOutcome, CP_BOOT_PCR, "PCR extend outcome is invalid")
             _record_extend_outcome(observation.outcome)
             self.state = BootTransitionState.PCR15_READBACK
@@ -1395,6 +1557,8 @@ class BootTransitionEngine:
             self.state = BootTransitionState.TRANSPORT_CLOSED
         elif state is BootTransitionState.TRANSPORT_CLOSED:
             _require(observation.status is TransportClosureStatus.CLOSED, CP_BOOT_OBSERVATION, "transport closure readback is invalid")
+            _record_extend_transport_closed()
+            self._extend_transport = None
             self.state = BootTransitionState.SERVING_READY
         elif state is BootTransitionState.SERVING_READY:
             _require(observation.status is ServingAuthorizationStatus.AUTHORIZED, CP_BOOT_OBSERVATION, "serving authorization is invalid")
@@ -1422,6 +1586,7 @@ class BootTransitionEngine:
         if self.state is not BootTransitionState.FAILED_NON_SERVING:
             self._failure_stage = self.state.value
             self.state = BootTransitionState.FAILED_NON_SERVING
+            self._extend_transport = None
             self._failure_kind = FailureEffectKind.DIAGNOSTIC
             self._failure_code = code
 
