@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from copy import deepcopy
 from pathlib import Path
 
 
@@ -75,6 +76,53 @@ class H4InspectorInputTests(unittest.TestCase):
             with inspector._pinned_authorities(paths):
                 Path(paths["builder_source"]).write_bytes(b"mutated during inspection")
         self.assertEqual(context.exception.reason_code, "CP_PROVENANCE_V2_INSPECT_CONCURRENT_MUTATION")
+
+    def test_runtime_closure_structure_is_independently_validated(self) -> None:
+        exact = self._bytes()
+
+        def closure_mutation(mutator) -> ApplianceError:
+            changed = dict(exact)
+            closure = cj.canonical_loads(changed["runtime_closure_bytes"])
+            mutator(closure)
+            changed["runtime_closure_bytes"] = cj.canonical_dumps(closure)
+            with self.assertRaises(ApplianceError) as context:
+                derive_inspection_inputs(**changed)
+            return context.exception
+
+        with self.subTest("unsorted paths"):
+            error = closure_mutation(lambda closure: closure.update(entries=list(reversed(closure["entries"]))))
+            self.assertEqual(error.reason_code, "CP_RUNTIME_CLOSURE_SCHEMA")
+
+        with self.subTest("single-member hardlink group"):
+            def single_hardlink(closure):
+                next(entry for entry in closure["entries"] if entry["node_type"] == "file")["hardlink_group"] = "a" * 64
+
+            error = closure_mutation(single_hardlink)
+            self.assertEqual(error.reason_code, "CP_RUNTIME_CLOSURE_SCHEMA")
+
+        with self.subTest("escaping symlink"):
+            def escaping_symlink(closure):
+                entry = next(entry for entry in closure["entries"] if entry["node_type"] == "file")
+                entry.update(node_type="symlink", sha256=None, symlink_target="/outside-the-closure", hardlink_group=None)
+
+            error = closure_mutation(escaping_symlink)
+            self.assertEqual(error.reason_code, "CP_RUNTIME_CLOSURE_SCHEMA")
+
+        with self.subTest("file symlink target"):
+            def file_symlink_target(closure):
+                next(entry for entry in closure["entries"] if entry["node_type"] == "file")["symlink_target"] = "/not-used"
+
+            error = closure_mutation(file_symlink_target)
+            self.assertEqual(error.reason_code, "CP_RUNTIME_CLOSURE_SCHEMA")
+
+        with self.subTest("TCB executable shape"):
+            changed = dict(exact)
+            tcb = deepcopy(cj.canonical_loads(changed["tcb_identity_bytes"]))
+            del tcb["caller"]["linkage"]
+            changed["tcb_identity_bytes"] = cj.canonical_dumps(tcb)
+            with self.assertRaises(ApplianceError) as context:
+                derive_inspection_inputs(**changed)
+            self.assertEqual(context.exception.reason_code, "CP_TCB_IDENTITY_SCHEMA")
 
 
 if __name__ == "__main__":

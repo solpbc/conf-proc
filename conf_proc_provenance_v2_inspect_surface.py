@@ -101,8 +101,9 @@ def _scan_tree(tree_root: str, *, models: bool, policy, graph_nodes: list[dict] 
     for node in graph_nodes:
         if type(node) is dict and type(node.get("path")) is str and node["path"].startswith("/"):
             executable_or_activation.add(node["path"].lstrip("/"))
-    for relative, absolute in regular_paths:
-        _scan_regular_content(relative, absolute, policy)
+    if not models:
+        for relative, absolute in regular_paths:
+            _scan_regular_content(relative, absolute, policy)
     for relative in executable_or_activation:
         if _has_writable_ancestor(relative, writable_dirs):
             _reject("writable executable or activation ancestor is prohibited")
@@ -120,8 +121,7 @@ def _scan_regular_content(relative: str, absolute: str, policy) -> None:
         _reject("systemd generator is prohibited")
     content = _read_bounded(absolute)
     _check_shared_content(f"/{normalized}", content)
-    lowered = normalized.lower()
-    if any(marker in lowered for marker in _AZURE_MARKERS):
+    if any(marker.encode("ascii") in content.lower() for marker in _AZURE_MARKERS):
         _reject("Azure or cloud management surface is prohibited")
     if normalized.startswith(_JOURNAL_PREFIXES) or basename.endswith((".journal", ".journal~")):
         _reject("persistent journal surface is prohibited")

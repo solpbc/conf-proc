@@ -31,7 +31,6 @@ from conf_proc_lock import Lock, parse_lock
 from conf_proc_policy import Policy, parse_policy
 from conf_proc_reasons import (
     CP_PROVENANCE_AUTHORITY,
-    CP_PROVENANCE_STATUS,
     CP_PROVENANCE_V2_INSPECT_DOCUMENT_MISMATCH,
     CP_RUNTIME_CLOSURE_SCHEMA,
     CP_TCB_IDENTITY_SCHEMA,
@@ -89,6 +88,31 @@ _SPDX_REFERENCE_TYPES: Final = (
 _SPDX_SYMLINK_DOMAIN: Final = b"conf-proc/spdx-symlink-checksum/v1"
 _SPDX_NAMESPACE_DOMAIN: Final = b"conf-proc/spdx-document-namespace/v1"
 _SANITIZE_RE: Final = re.compile(r"[^A-Za-z0-9.-]")
+_CLOSURE_ENTRY_KEYS: Final = frozenset(
+    {
+        "path",
+        "node_type",
+        "mode",
+        "uid",
+        "gid",
+        "size_bytes",
+        "sha256",
+        "symlink_target",
+        "hardlink_group",
+        "xattrs",
+        "capabilities",
+        "logical_role",
+        "provenance",
+        "root_lock_input_id",
+    }
+)
+_CLOSURE_PROVENANCE_KEYS: Final = frozenset({"scheme", "identity", "immutable_ref"})
+_CLOSURE_XATTR_KEYS: Final = frozenset({"name", "value_sha256"})
+_TCB_EXECUTABLE_KEYS: Final = frozenset(
+    {"logical_name", "sha256", "linkage", "interpreter_sha256", "loader_sha256", "library_sha256s"}
+)
+_TCB_SANDBOX_KEYS: Final = frozenset({"backend", "executable", "helper"})
+_TCB_KERNEL_CONTRACT_KEYS: Final = frozenset({"schema", "sha256"})
 
 _SUPPORTED_VERITY_RULES: Final = {
     "schema": _VERITY_RULES_SCHEMA,
@@ -553,12 +577,51 @@ def _parse_runtime_closure(data: bytes) -> dict:
     _require(raw["schema"] == _RUNTIME_CLOSURE_SCHEMA and raw["status"] == _DECLARED_UNVERIFIED,
              CP_RUNTIME_CLOSURE_SCHEMA, "runtime closure identity is invalid")
     _require(type(raw["entries"]) is list and raw["entries"], CP_RUNTIME_CLOSURE_SCHEMA, "runtime closure entries are invalid")
+
+    paths: list[str] = []
+    hardlink_groups: dict[str, list[dict]] = {}
     for entry in raw["entries"]:
-        _require(type(entry) is dict and {"path", "node_type", "mode", "uid", "gid", "size_bytes", "sha256", "symlink_target", "hardlink_group", "xattrs", "capabilities", "logical_role", "provenance", "root_lock_input_id"} == set(entry),
-                 CP_RUNTIME_CLOSURE_SCHEMA, "runtime closure entry is invalid")
-        _require(type(entry["logical_role"]) is str and entry["logical_role"], CP_RUNTIME_CLOSURE_SCHEMA, "runtime closure role is invalid")
-        _require(type(entry["root_lock_input_id"]) is str or entry["root_lock_input_id"] is None,
-                 CP_RUNTIME_CLOSURE_SCHEMA, "runtime closure binding is invalid")
+        _parse_closure_entry(entry)
+        paths.append(entry["path"])
+        if entry["hardlink_group"] is not None:
+            _require(entry["node_type"] == "file", CP_RUNTIME_CLOSURE_SCHEMA, "only files may join a hardlink group")
+            hardlink_groups.setdefault(entry["hardlink_group"], []).append(entry)
+
+    _require(
+        paths == sorted(paths) and len(paths) == len(set(paths)),
+        CP_RUNTIME_CLOSURE_SCHEMA,
+        "runtime closure paths must be sorted and unique",
+    )
+
+    known_paths = set(paths)
+    for entry in raw["entries"]:
+        if entry["node_type"] != "symlink":
+            continue
+        target = entry["symlink_target"]
+        resolved = posixpath.normpath(
+            target if target.startswith("/") else posixpath.join(posixpath.dirname(entry["path"]), target)
+        )
+        _require(
+            resolved.startswith("/") and resolved in known_paths,
+            CP_RUNTIME_CLOSURE_SCHEMA,
+            "symlink target escapes the runtime closure",
+        )
+
+    for members in hardlink_groups.values():
+        _require(len(members) >= 2, CP_RUNTIME_CLOSURE_SCHEMA, "hardlink group must have at least two members")
+        identities = {
+            (
+                item["sha256"],
+                item["size_bytes"],
+                item["mode"],
+                item["uid"],
+                item["gid"],
+                canonical_dumps(item["xattrs"]),
+                tuple(item["capabilities"]),
+            )
+            for item in members
+        }
+        _require(len(identities) == 1, CP_RUNTIME_CLOSURE_SCHEMA, "hardlink group members disagree")
     return raw
 
 
@@ -572,8 +635,162 @@ def _parse_tcb_identity(data: bytes) -> None:
              CP_TCB_IDENTITY_SCHEMA, "TCB identity fields are invalid")
     _require(raw["schema"] == _TCB_IDENTITY_SCHEMA and raw["status"] == _DECLARED_UNVERIFIED,
              CP_TCB_IDENTITY_SCHEMA, "TCB identity status is invalid")
-    for item in (raw["caller"], raw["launcher"], raw["sandbox"].get("executable") if type(raw["sandbox"]) is dict else None):
-        _require(type(item) is dict and _sha256(item.get("sha256")), CP_TCB_IDENTITY_SCHEMA, "TCB executable identity is invalid")
+    _parse_tcb_executable(raw["caller"])
+    _parse_tcb_executable(raw["launcher"])
+
+    sandbox = raw["sandbox"]
+    _require(type(sandbox) is dict and set(sandbox) == _TCB_SANDBOX_KEYS, CP_TCB_IDENTITY_SCHEMA, "TCB sandbox fields are invalid")
+    _require(sandbox["backend"] in ("bubblewrap", "unshare"), CP_TCB_IDENTITY_SCHEMA, "TCB sandbox backend is invalid")
+    _parse_tcb_executable(sandbox["executable"])
+    _require(sandbox["helper"] is None or type(sandbox["helper"]) is dict, CP_TCB_IDENTITY_SCHEMA, "TCB sandbox helper is invalid")
+    if sandbox["helper"] is not None:
+        _parse_tcb_executable(sandbox["helper"])
+
+    kernel = raw["kernel_feature_contract"]
+    _require(
+        type(kernel) is dict and set(kernel) == _TCB_KERNEL_CONTRACT_KEYS,
+        CP_TCB_IDENTITY_SCHEMA,
+        "TCB kernel contract fields are invalid",
+    )
+    _require(
+        kernel["schema"] == "conf-proc-kernel-features/v1" and _sha256(kernel["sha256"]),
+        CP_TCB_IDENTITY_SCHEMA,
+        "TCB kernel contract is invalid",
+    )
+
+
+def _parse_closure_entry(entry: object) -> None:
+    _require(
+        type(entry) is dict and set(entry) == _CLOSURE_ENTRY_KEYS,
+        CP_RUNTIME_CLOSURE_SCHEMA,
+        "runtime closure entry is invalid",
+    )
+    _require(_absolute_normal_path(entry["path"]), CP_RUNTIME_CLOSURE_SCHEMA, "runtime closure path is invalid")
+    _require(entry["node_type"] in ("file", "directory", "symlink"), CP_RUNTIME_CLOSURE_SCHEMA, "runtime closure node type is invalid")
+    for key in ("mode", "uid", "gid", "size_bytes"):
+        _require(type(entry[key]) is int and entry[key] >= 0, CP_RUNTIME_CLOSURE_SCHEMA, f"runtime closure {key} is invalid")
+    _require(
+        entry["mode"] <= 0o7777 and not entry["mode"] & 0o6000,
+        CP_RUNTIME_CLOSURE_SCHEMA,
+        "runtime closure privileged mode is invalid",
+    )
+    _require(type(entry["logical_role"]) is str and entry["logical_role"], CP_RUNTIME_CLOSURE_SCHEMA, "runtime closure role is invalid")
+    _require(
+        entry["root_lock_input_id"] is None
+        or type(entry["root_lock_input_id"]) is str
+        and entry["root_lock_input_id"],
+        CP_RUNTIME_CLOSURE_SCHEMA,
+        "runtime closure binding is invalid",
+    )
+    _require(
+        entry["hardlink_group"] is None or _sha256(entry["hardlink_group"]),
+        CP_RUNTIME_CLOSURE_SCHEMA,
+        "runtime closure hardlink group is invalid",
+    )
+
+    node_type = entry["node_type"]
+    if node_type == "file":
+        _require(
+            _sha256(entry["sha256"]) and entry["symlink_target"] is None,
+            CP_RUNTIME_CLOSURE_SCHEMA,
+            "runtime closure file identity is invalid",
+        )
+    elif node_type == "directory":
+        _require(
+            entry["sha256"] is None and entry["symlink_target"] is None and entry["size_bytes"] == 0,
+            CP_RUNTIME_CLOSURE_SCHEMA,
+            "runtime closure directory identity is invalid",
+        )
+    else:
+        _require(
+            entry["sha256"] is None and type(entry["symlink_target"]) is str and entry["symlink_target"],
+            CP_RUNTIME_CLOSURE_SCHEMA,
+            "runtime closure symlink identity is invalid",
+        )
+
+    xattrs = entry["xattrs"]
+    _require(type(xattrs) is list, CP_RUNTIME_CLOSURE_SCHEMA, "runtime closure xattrs are invalid")
+    xattr_names: list[str] = []
+    for xattr in xattrs:
+        _require(
+            type(xattr) is dict and set(xattr) == _CLOSURE_XATTR_KEYS,
+            CP_RUNTIME_CLOSURE_SCHEMA,
+            "runtime closure xattr is invalid",
+        )
+        _require(
+            type(xattr["name"]) is str and xattr["name"] and _sha256(xattr["value_sha256"]),
+            CP_RUNTIME_CLOSURE_SCHEMA,
+            "runtime closure xattr is invalid",
+        )
+        xattr_names.append(xattr["name"])
+    _require(
+        xattr_names == sorted(xattr_names) and len(xattr_names) == len(set(xattr_names)),
+        CP_RUNTIME_CLOSURE_SCHEMA,
+        "runtime closure xattrs must be sorted and unique",
+    )
+
+    capabilities = entry["capabilities"]
+    _require(
+        type(capabilities) is list and all(type(capability) is str and capability for capability in capabilities),
+        CP_RUNTIME_CLOSURE_SCHEMA,
+        "runtime closure capabilities are invalid",
+    )
+    _require(
+        capabilities == sorted(capabilities) and len(capabilities) == len(set(capabilities)),
+        CP_RUNTIME_CLOSURE_SCHEMA,
+        "runtime closure capabilities must be sorted and unique",
+    )
+
+    provenance = entry["provenance"]
+    _require(
+        type(provenance) is dict
+        and set(provenance) == _CLOSURE_PROVENANCE_KEYS
+        and all(type(provenance[key]) is str and provenance[key] for key in _CLOSURE_PROVENANCE_KEYS),
+        CP_RUNTIME_CLOSURE_SCHEMA,
+        "runtime closure provenance is invalid",
+    )
+    _require(
+        provenance["immutable_ref"].startswith("sha256:") and _sha256(provenance["immutable_ref"][7:]),
+        CP_RUNTIME_CLOSURE_SCHEMA,
+        "runtime closure provenance is invalid",
+    )
+
+
+def _parse_tcb_executable(raw: object) -> None:
+    _require(
+        type(raw) is dict and set(raw) == _TCB_EXECUTABLE_KEYS,
+        CP_TCB_IDENTITY_SCHEMA,
+        "TCB executable fields are invalid",
+    )
+    _require(
+        type(raw["logical_name"]) is str and raw["logical_name"] and _sha256(raw["sha256"]),
+        CP_TCB_IDENTITY_SCHEMA,
+        "TCB executable identity is invalid",
+    )
+    _require(raw["linkage"] in ("static", "dynamic"), CP_TCB_IDENTITY_SCHEMA, "TCB executable linkage is invalid")
+    libraries = raw["library_sha256s"]
+    _require(
+        type(libraries) is list and all(_sha256(library) for library in libraries),
+        CP_TCB_IDENTITY_SCHEMA,
+        "TCB executable library identities are invalid",
+    )
+    _require(
+        libraries == sorted(libraries) and len(libraries) == len(set(libraries)),
+        CP_TCB_IDENTITY_SCHEMA,
+        "TCB executable library identities must be sorted and unique",
+    )
+    if raw["linkage"] == "static":
+        _require(
+            raw["interpreter_sha256"] is None and raw["loader_sha256"] is None and libraries == [],
+            CP_TCB_IDENTITY_SCHEMA,
+            "static TCB executable has dynamic dependencies",
+        )
+    else:
+        _require(
+            _sha256(raw["interpreter_sha256"]) and _sha256(raw["loader_sha256"]) and libraries,
+            CP_TCB_IDENTITY_SCHEMA,
+            "dynamic TCB executable is incomplete",
+        )
 
 
 def _verify_authority_binding(lock: Lock, closure: dict, builder_digest: str, policy_digest: str, policy_size: int) -> None:
@@ -603,6 +820,17 @@ def _verify_authority_binding(lock: Lock, closure: dict, builder_digest: str, po
 def _mapping(value: object, message: str) -> dict:
     _require(type(value) is dict, CP_PROVENANCE_V2_INSPECT_DOCUMENT_MISMATCH, message)
     return value
+
+
+def _absolute_normal_path(value: object) -> bool:
+    return (
+        type(value) is str
+        and "\x00" not in value
+        and value.startswith("/")
+        and not value.startswith("//")
+        and value != "/"
+        and posixpath.normpath(value) == value
+    )
 
 
 def _sha256(value: object) -> bool:

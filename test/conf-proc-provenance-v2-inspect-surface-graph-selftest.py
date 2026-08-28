@@ -51,6 +51,7 @@ class H4InspectorSurfaceGraphTests(unittest.TestCase):
             ("etc/udev/rules.d/h4.rules", b'ACTION=="add", ENV{SYSTEMD_WANTS}="h4.service"\n', 0o644),
             ("etc/cron.d/h4", b"* * * * * root /bin/true\n", 0o644),
             ("opt/azure-runcommand", b"x", 0o644),
+            ("opt/bin/runner", b"exec cloud-init status", 0o644),
             ("etc/systemd/journald.conf", b"[Journal]\nStorage=persistent\n", 0o644),
         )
         for relative, content, mode in cases:
@@ -67,6 +68,16 @@ class H4InspectorSurfaceGraphTests(unittest.TestCase):
             os.chmod(target, 0o755)
             with self.assertRaises(ApplianceError):
                 check_extracted_surfaces(runtime_policy_root=str(runtime), models_root=str(models), policy=self.policy, graph_nodes=[])
+
+    def test_large_non_executable_model_is_not_content_scanned(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as root:
+            models = Path(root, "models")
+            runtime = Path(root, "runtime")
+            model = models / "weights" / "model.bin"
+            model.parent.mkdir(parents=True)
+            runtime.mkdir()
+            model.write_bytes(b"x" * (32 * 1024 * 1024 + 1))
+            check_extracted_surfaces(runtime_policy_root=str(runtime), models_root=str(models), policy=self.policy, graph_nodes=[])
 
     def test_graph_and_module_authority_mismatches_are_red(self) -> None:
         with self.assertRaises(ApplianceError):

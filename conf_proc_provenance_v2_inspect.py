@@ -37,6 +37,8 @@ from conf_proc_reasons import (
     CP_PROVENANCE_V2_INSPECT_CONCURRENT_MUTATION,
     CP_PROVENANCE_V2_INSPECT_DOCUMENT_MISMATCH,
     CP_PROVENANCE_V2_INSPECT_SEALED_BINDING,
+    CP_POLICY_GRAPH_MISMATCH,
+    CP_SQUASHFS_EXTRACT,
     CP_TOOL_MISSING,
     ApplianceError,
 )
@@ -277,7 +279,10 @@ def _inspect_values(**paths: str) -> dict[str, str]:
             if hashlib.sha256(trusted_bundle_bytes).hexdigest() != trusted_input.sha256:
                 raise ApplianceError(CP_PROVENANCE_INPUT_READ, "trusted certificate authority does not match the lock")
             check_authorized_signers_match_bundle(inputs.lock, trusted_bundle_bytes)
-            with tempfile.TemporaryDirectory(dir="/var/tmp", prefix="conf-proc-h4-") as work_root:
+            work_parent = "/var/tmp"
+            if os.stat(work_parent).st_dev != os.stat(paths["bundle"], follow_symlinks=False).st_dev:
+                raise ApplianceError(CP_SQUASHFS_EXTRACT, "inspection workspace must share the candidate bundle filesystem")
+            with tempfile.TemporaryDirectory(dir=work_parent, prefix="conf-proc-h4-") as work_root:
                 os.chmod(work_root, 0o700)
                 images, inventories, modules, firmware, nodes, edges, extraction_roots = _inspect_images(
                     guard=guard,
@@ -423,12 +428,12 @@ def _merge_graph(nodes_by_id: dict[str, dict], edges_by_key: dict[tuple[str, str
     for node in nodes:
         prior = nodes_by_id.get(node["id"])
         if prior is not None and prior != node:
-            raise ApplianceError(CP_PROVENANCE_V2_INSPECT_DOCUMENT_MISMATCH, "graph identities conflict")
+            raise ApplianceError(CP_POLICY_GRAPH_MISMATCH, "graph identities conflict")
         nodes_by_id[node["id"]] = node
     for edge in edges:
         key = (edge["from_id"], edge["to_id"], edge["kind"], edge["origin_path"], edge["origin_key"])
         if key in edges_by_key:
-            raise ApplianceError(CP_PROVENANCE_V2_INSPECT_DOCUMENT_MISMATCH, "graph edge is duplicated")
+            raise ApplianceError(CP_POLICY_GRAPH_MISMATCH, "graph edge is duplicated")
         edges_by_key[key] = edge
 
 

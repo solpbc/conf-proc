@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -16,7 +17,6 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "test"))
 
 import conf_proc_provenance_v2_inspect as inspector  # noqa: E402
-from conf_proc_json import canonical_dumps  # noqa: E402
 from conf_proc_provenance_v2_inspect_documents import derive_inspection_inputs  # noqa: E402
 from conf_proc_provenance_v2_inspect_fixture import build_positive_fixture  # noqa: E402
 
@@ -27,6 +27,7 @@ class H4InspectorEndToEndTests(unittest.TestCase):
         self.addCleanup(self.fixture.cleanup)
 
     def test_real_h3_bundle_is_artifact_consistent(self) -> None:
+        self.assertEqual(os.stat(self.fixture.bundle).st_dev, os.stat("/var/tmp").st_dev)
         result = inspector.inspect_bundle(**self.fixture.inspect_kwargs())
         self.assertEqual(set(result.__dataclass_fields__), {
             "state", "hardware_qualification", "artifact_input_sha256", "execution_provenance_sha256",
@@ -57,7 +58,6 @@ class H4InspectorEndToEndTests(unittest.TestCase):
         )
         self.assertEqual(result.artifact_input_sha256, expected.artifact_input_sha256)
         self.assertEqual(result.execution_provenance_sha256, expected.execution_provenance_sha256)
-        self.assertEqual(canonical_dumps(result.__dict__), canonical_dumps(result.__dict__))
 
 
 if __name__ == "__main__":
