@@ -236,6 +236,25 @@ class H3ExposureTests(unittest.TestCase):
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             handle.close()
 
+    def test_symlinked_infrastructure_is_rejected_without_following_it(self) -> None:
+        external = os.path.join(self.base, "outside-staging")
+        os.mkdir(external)
+        staging = os.path.join(self.fixture.output, ".h3-staging")
+        os.symlink(external, staging)
+        with self.assertRaises(ApplianceError) as context:
+            self.fixture.assemble()
+        self.assertEqual(context.exception.reason_code, "CP_PROVENANCE_V2_STAGING")
+        self.assertEqual(os.listdir(external), [])
+
+        other = _Fixture(os.path.join(self.base, "symlinked-bundle-root"))
+        outside_bundle = os.path.join(self.base, "outside-bundle")
+        os.mkdir(outside_bundle)
+        os.symlink(outside_bundle, os.path.join(other.output, "built_unverified"))
+        with self.assertRaises(ApplianceError) as context:
+            assembler._prepare_destination_parent(other.output, other.address)
+        self.assertEqual(context.exception.reason_code, "CP_PROVENANCE_V2_STAGING")
+        self.assertEqual(os.listdir(outside_bundle), [])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

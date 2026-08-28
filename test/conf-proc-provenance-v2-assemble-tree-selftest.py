@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import stat
 import sys
 import tempfile
 import unittest
@@ -46,12 +47,19 @@ def _input(input_id: str, placement: Placement, data: bytes = b"tree") -> LockIn
     )
 
 
-def _placement(image: str, path: str, node_type: str = "file", *, target: str | None = None) -> Placement:
+def _placement(
+    image: str,
+    path: str,
+    node_type: str = "file",
+    *,
+    target: str | None = None,
+    mode: int = 0o644,
+) -> Placement:
     return Placement(
         image=image,
         path=path,
         node_type=node_type,
-        mode=0o644,
+        mode=mode,
         uid=0,
         gid=0,
         xattrs=(),
@@ -131,6 +139,29 @@ class H3TreeTests(unittest.TestCase):
         with self.assertRaises(ApplianceError) as context:
             assembler._assert_tree_snapshots({"models": tree}, snapshots)
         self.assertEqual(context.exception.reason_code, "CP_TREE_UNEXPECTED")
+
+    def test_privileged_placement_mode_is_rejected_before_chmod(self) -> None:
+        tree = os.path.join(self.base, "privileged-mode")
+        os.makedirs(tree)
+        payload = os.path.join(tree, "payload")
+        Path(payload).write_bytes(b"tree")
+        lock = SimpleNamespace(inputs=(_input("source", _placement("models", "/payload", mode=0o4644)),))
+        original_chmod = assembler.os.chmod
+        calls: list[int] = []
+
+        def record_chmod(path: str, mode: int, *args, **kwargs) -> None:
+            calls.append(mode)
+            original_chmod(path, mode, *args, **kwargs)
+
+        assembler.os.chmod = record_chmod
+        try:
+            with self.assertRaises(ApplianceError) as context:
+                assembler._normalize_tree_metadata(lock, "models", tree)
+        finally:
+            assembler.os.chmod = original_chmod
+        self.assertEqual(context.exception.reason_code, "CP_TREE_METADATA")
+        self.assertEqual(calls, [])
+        self.assertEqual(stat.S_IMODE(os.lstat(payload).st_mode) & 0o6000, 0)
 
 
 if __name__ == "__main__":

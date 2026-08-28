@@ -296,9 +296,10 @@ def assemble(
                     _assert_bundle_shape(stage_root, readonly=True)
                     fault_hook(phase)
 
-            destination = os.path.join(output, "built_unverified", *address)
-            _ensure_same_filesystem(stage_root, os.path.join(output, "built_unverified"))
-            if os.path.lexists(destination):
+            destination_parent = _prepare_destination_parent(output, address)
+            destination = os.path.join(destination_parent, address[1])
+            _ensure_same_filesystem(stage_root, destination_parent)
+            if _existing_real_directory(destination, CP_PROVENANCE_V2_STAGING, "H3 destination is not a real directory"):
                 existing_digests = _bundle_digests(destination, readonly=True)
                 if existing_digests != staged_digests:
                     raise ApplianceError(
@@ -309,12 +310,11 @@ def assemble(
                 stage_root = None
                 return _result(inputs, destination, existing_digests)
 
-            try:
-                os.makedirs(os.path.dirname(destination), exist_ok=True)
-            except OSError as exc:
-                raise ApplianceError(CP_PROVENANCE_V2_STAGING, "could not create H3 destination parents") from exc
             phase = "pre-rename"
             fault_hook(phase)
+            _prepare_destination_parent(output, address)
+            if _existing_real_directory(destination, CP_PROVENANCE_V2_STAGING, "H3 destination is not a real directory"):
+                raise ApplianceError(CP_PROVENANCE_V2_SAME_ADDRESS_DISAGREEMENT, "H3 destination appeared before atomic exposure")
             try:
                 os.rename(stage_root, destination)
             except OSError as exc:
@@ -398,6 +398,8 @@ def _normalize_tree_metadata(lock: Lock, image_id: str, tree_root: str) -> None:
         for placement in lock_input.placements:
             if placement.image != image_id:
                 continue
+            if placement.mode & 0o6000:
+                raise ApplianceError(CP_TREE_METADATA, "privileged placement mode is forbidden in H3 staging")
             path = os.path.join(tree_root, placement.path.lstrip("/"))
             try:
                 if placement.node_type != "symlink":
@@ -762,8 +764,10 @@ def _local_gate(stage_root: str, inputs: conf_proc_provenance_v2.ProvenanceInput
 def _address_lease(output: str, address: tuple[str, str]) -> Iterator[None]:
     handle = None
     try:
-        os.makedirs(os.path.join(output, ".h3-locks"), exist_ok=True)
-        path = os.path.join(output, ".h3-locks", "-".join(address) + ".lock")
+        _ensure_real_directory(output, CP_PROVENANCE_V2_STAGING, "H3 output root is not a real directory")
+        lock_parent = os.path.join(output, ".h3-locks")
+        _ensure_real_directory(lock_parent, CP_PROVENANCE_V2_STAGING, "H3 address-lock parent is not a real directory")
+        path = os.path.join(lock_parent, "-".join(address) + ".lock")
         handle = open(path, "a+b")
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
     except OSError as exc:
@@ -781,10 +785,12 @@ def _prepare_stage(output: str, address: tuple[str, str], lock: Lock | None = No
     name = "-".join(address)
     parent = os.path.join(output, ".h3-staging")
     stage = os.path.join(parent, name)
-    try:
-        os.makedirs(parent, exist_ok=True)
-    except OSError as exc:
-        raise ApplianceError(CP_PROVENANCE_V2_STAGING, "could not create H3 staging parent") from exc
+    _ensure_real_directory(parent, CP_PROVENANCE_V2_STAGING, "H3 staging parent is not a real directory")
+    _ensure_real_directory(
+        os.path.join(output, ".h3-owners"),
+        CP_PROVENANCE_V2_STAGING,
+        "H3 owner-lock parent is not a real directory",
+    )
     try:
         matching = [entry.name for entry in os.scandir(parent) if entry.name.startswith(name)]
     except OSError as exc:
@@ -810,10 +816,7 @@ def _stage_owner_lease(output: str, address: tuple[str, str]) -> Iterator[None]:
     parent = os.path.join(output, ".h3-owners")
     handle = None
     try:
-        os.makedirs(parent, exist_ok=True)
-        parent_metadata = os.lstat(parent)
-        if not stat.S_ISDIR(parent_metadata.st_mode) or stat.S_ISLNK(parent_metadata.st_mode):
-            raise OSError("H3 owner-lock parent is not a directory")
+        _ensure_real_directory(parent, CP_PROVENANCE_V2_STAGING, "H3 owner-lock parent is not a real directory")
         handle = _open_owner_lock(os.path.join(parent, name + ".lock"), CP_PROVENANCE_V2_LEASE)
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except (OSError, ApplianceError) as exc:
@@ -977,9 +980,43 @@ def _open_owner_lock(path: str, reason_code: str):
         raise
 
 
+def _ensure_real_directory(path: str, reason_code: str, message: str) -> None:
+    try:
+        metadata = os.lstat(path)
+    except FileNotFoundError:
+        try:
+            os.makedirs(path, exist_ok=True)
+            metadata = os.lstat(path)
+        except OSError as exc:
+            raise ApplianceError(reason_code, message) from exc
+    except OSError as exc:
+        raise ApplianceError(reason_code, message) from exc
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise ApplianceError(reason_code, message)
+
+
+def _existing_real_directory(path: str, reason_code: str, message: str) -> bool:
+    try:
+        metadata = os.lstat(path)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise ApplianceError(reason_code, message) from exc
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise ApplianceError(reason_code, message)
+    return True
+
+
+def _prepare_destination_parent(output: str, address: tuple[str, str]) -> str:
+    bundle_root = os.path.join(output, "built_unverified")
+    _ensure_real_directory(bundle_root, CP_PROVENANCE_V2_STAGING, "H3 bundle root is not a real directory")
+    destination_parent = os.path.join(bundle_root, address[0])
+    _ensure_real_directory(destination_parent, CP_PROVENANCE_V2_STAGING, "H3 bundle address parent is not a real directory")
+    return destination_parent
+
+
 def _ensure_same_filesystem(stage_root: str, final_parent: str) -> None:
     try:
-        os.makedirs(final_parent, exist_ok=True)
         if os.stat(stage_root).st_dev != os.stat(final_parent).st_dev:
             raise ApplianceError(CP_PROVENANCE_V2_STAGING, "H3 staging and destination are on different filesystems")
     except OSError as exc:
