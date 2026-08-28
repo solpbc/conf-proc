@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import hashlib
 from datetime import datetime, timezone
 
 from conf_proc_geometry import derive_build_epoch

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import sys
 import unittest
 from pathlib import Path
@@ -143,9 +144,40 @@ class ProvenanceV2SpdxTests(unittest.TestCase):
             "conf-proc-tcb-identity",
             "conf-proc-verity-rules",
         ])
+        self.assertEqual([item["referenceLocator"] for item in appliance["externalRefs"]], [
+            f"sha256:{inputs.artifact_input_sha256}",
+            f"sha256:{inputs.builder_source_sha256}",
+            f"sha256:{inputs.execution_provenance_sha256}",
+            f"sha256:{inputs.policy_sha256}",
+            f"sha256:{inputs.runtime_closure_sha256}",
+            f"sha256:{inputs.tcb_identity_sha256}",
+            f"sha256:{inputs.verity_rules_sha256}",
+        ])
         self.assertEqual(len(raw["packages"]), 3)
         self.assertEqual(len(raw["files"]), 2)
         self.assertEqual(len(raw["relationships"]), 6)
+
+    def test_artifact_input_alone_derives_spdx_identity(self) -> None:
+        inputs = _inputs()
+        changed = replace(inputs, execution_provenance_sha256=_sha(107))
+        baseline = parse_spdx_v2(_build_spdx_v2_bytes(lock=_lock(), inputs=inputs)).raw
+        altered = parse_spdx_v2(_build_spdx_v2_bytes(lock=_lock(), inputs=changed)).raw
+        self.assertEqual(
+            (baseline["name"], baseline["documentNamespace"], baseline["creationInfo"]["created"]),
+            (altered["name"], altered["documentNamespace"], altered["creationInfo"]["created"]),
+        )
+        baseline_refs = {
+            item["referenceType"]: item["referenceLocator"]
+            for item in next(item for item in baseline["packages"] if item["SPDXID"] == "SPDXRef-Package-appliance")["externalRefs"]
+        }
+        altered_refs = {
+            item["referenceType"]: item["referenceLocator"]
+            for item in next(item for item in altered["packages"] if item["SPDXID"] == "SPDXRef-Package-appliance")["externalRefs"]
+        }
+        self.assertNotEqual(
+            baseline_refs["conf-proc-execution-provenance"],
+            altered_refs["conf-proc-execution-provenance"],
+        )
 
     def test_schema_requires_appliance_external_refs_and_canonical_bytes(self) -> None:
         data = _build_spdx_v2_bytes(lock=_lock(), inputs=_inputs())
@@ -174,6 +206,31 @@ class ProvenanceV2SpdxTests(unittest.TestCase):
             lambda: parse_spdx_v2(canonical_dumps(raw)),
             "CP_PROVENANCE_V2_SPDX_PRODUCTION",
         )
+
+    def test_schema_rejects_checksum_file_relationship_and_external_ref_field_mutations(self) -> None:
+        mutations = (
+            (lambda document: document["packages"][0]["checksums"][0], "algorithm"),
+            (lambda document: document["files"][0], "fileName"),
+            (lambda document: document["relationships"][0], "relationshipType"),
+            (
+                lambda document: next(
+                    item for item in document["packages"] if item["SPDXID"] == "SPDXRef-Package-appliance"
+                )["externalRefs"][0],
+                "referenceType",
+            ),
+        )
+        for select, required_key in mutations:
+            for mutation in ("missing", "extra"):
+                raw = canonical_loads(_build_spdx_v2_bytes(lock=_lock(), inputs=_inputs()))
+                entry = select(raw)
+                if mutation == "missing":
+                    entry.pop(required_key)
+                else:
+                    entry["unexpected"] = "value"
+                self.assert_rejected(
+                    lambda raw=raw: parse_spdx_v2(canonical_dumps(raw)),
+                    "CP_PROVENANCE_V2_SPDX_PRODUCTION",
+                )
 
     def test_rejects_sanitized_package_and_file_id_collisions(self) -> None:
         package_collision = _lock(

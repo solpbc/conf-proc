@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT))
 import conf_proc_provenance_v2 as provenance  # noqa: E402
 import conf_proc_reasons as reasons  # noqa: E402
 from conf_proc_json import canonical_dumps, canonical_loads  # noqa: E402
+from conf_proc_lock import parse_lock  # noqa: E402
 from conf_proc_provenance_v2_build_manifest import (  # noqa: E402
     ProvenanceV2FirmwareObservation,
     ProvenanceV2ImageRecord,
@@ -392,6 +393,10 @@ class ProvenanceV2ManifestTests(unittest.TestCase):
             "CP_PROVENANCE_V2_MANIFEST_PRODUCTION",
         )
         self.assert_rejected(
+            lambda: _produce(firmware_observations=()),
+            "CP_PROVENANCE_V2_MANIFEST_PRODUCTION",
+        )
+        self.assert_rejected(
             lambda: _produce(module_observations=(ProvenanceV2ModuleObservation("/usr/lib/modules/fixture.ko", _sha(201), _sha(99)),)),
             "CP_MODULE_SIGNER",
         )
@@ -401,6 +406,12 @@ class ProvenanceV2ManifestTests(unittest.TestCase):
         )
         self.assert_rejected(
             lambda: _produce(module_observations=(ProvenanceV2ModuleObservation("/usr/lib/modules/fixture.ko", _sha(99), _SIGNER),)),
+            "CP_PROVENANCE_V2_MANIFEST_PRODUCTION",
+        )
+        self.assert_rejected(
+            lambda: _produce(
+                firmware_observations=(ProvenanceV2FirmwareObservation("/usr/lib/firmware/fixture.bin", _sha(99)),)
+            ),
             "CP_PROVENANCE_V2_MANIFEST_PRODUCTION",
         )
 
@@ -437,6 +448,127 @@ class ProvenanceV2ManifestTests(unittest.TestCase):
         raw = canonical_loads(artifact.manifest_bytes)
         raw["inputs"][0]["source_retrieval_identity"] = "allowed-192.0.2.1"
         self.assertEqual(parse_manifest_v2(canonical_dumps(raw)).raw["inputs"][0]["source_retrieval_identity"], "allowed-192.0.2.1")
+
+    def test_manifest_schema_rejects_tampered_image_geometry(self) -> None:
+        artifact = _produce()
+        for field, value in (
+            ("uuid", "550e8400-e29b-41d4-a716-446655440000"),
+            ("data_block_size", 512),
+            ("hash_block_size", 512),
+            ("squashfs_sha256", "A" * 64),
+            ("squashfs_sha256", "a" * 63),
+        ):
+            raw = canonical_loads(artifact.manifest_bytes)
+            raw["images"]["models"][field] = value
+            self.assert_rejected(
+                lambda raw=raw: parse_manifest_v2(canonical_dumps(raw)),
+                "CP_PROVENANCE_V2_MANIFEST_PRODUCTION",
+            )
+
+    def test_root_lock_projection_matches_parsed_lock_field_by_field(self) -> None:
+        values = _bundle(ip_identity=True)
+        manifest = parse_manifest_v2(
+            produce_provenance_v2(
+                **values,
+                images=_images(),
+                module_observations=_module_observations(),
+                firmware_observations=_firmware_observations(),
+            ).manifest_bytes
+        ).raw
+        lock = parse_lock(values["root_lock_bytes"])
+        self.assertEqual(manifest["lock_schema"], lock.schema)
+        self.assertEqual(manifest["future_cmdline"], lock.future_cmdline)
+        self.assertEqual(
+            manifest["base_image_record"],
+            {
+                name: getattr(lock.base_image_record, name)
+                for name in (
+                    "kind",
+                    "provider",
+                    "identity_namespace",
+                    "identity_name",
+                    "identity_immutable_revision",
+                    "content_sha256",
+                    "content_size_bytes",
+                    "content_media_type",
+                    "availability",
+                    "recorded_retrieval_scheme",
+                    "recorded_retrieval_identity",
+                    "recorded_retrieval_immutable_ref",
+                )
+            },
+        )
+        self.assertEqual(
+            manifest["inputs"],
+            [
+                {
+                    "id": item.id,
+                    "role": item.role,
+                    "sha256": item.sha256,
+                    "size_bytes": item.size_bytes,
+                    "source_retrieval_scheme": item.source_retrieval_scheme,
+                    "source_retrieval_identity": item.source_retrieval_identity,
+                    "source_retrieval_immutable_ref": item.source_retrieval_immutable_ref,
+                    "derivation_kind": item.derivation_kind,
+                    "derivation_recipe_id": item.derivation_recipe_id,
+                    "derivation_parent_ids": list(item.derivation_parent_ids),
+                    "derivation_parameters_sha256": item.derivation_parameters_sha256,
+                    "placements": [
+                        {
+                            "image": placement.image,
+                            "path": placement.path,
+                            "node_type": placement.node_type,
+                            "mode": placement.mode,
+                            "uid": placement.uid,
+                            "gid": placement.gid,
+                            "xattrs": list(placement.xattrs),
+                            "source_input_id": placement.source_input_id,
+                            "target": placement.target,
+                        }
+                        for placement in item.placements
+                    ],
+                }
+                for item in lock.inputs
+            ],
+        )
+        self.assertEqual(
+            manifest["inventory"],
+            {
+                image_id: sorted(
+                    [
+                        {
+                            "path": placement.path,
+                            "node_type": placement.node_type,
+                            "mode": placement.mode,
+                            "uid": placement.uid,
+                            "gid": placement.gid,
+                            "xattrs": list(placement.xattrs),
+                            "sha256": item.sha256 if placement.node_type == "file" else None,
+                            "size_bytes": item.size_bytes if placement.node_type == "file" else None,
+                            "symlink_target": placement.target,
+                            "source_input_id": placement.source_input_id,
+                        }
+                        for item in lock.inputs
+                        for placement in item.placements
+                        if placement.image == image_id
+                    ],
+                    key=lambda item: item["path"],
+                )
+                for image_id in ("models", "runtime-policy")
+            },
+        )
+        inputs_by_id = {item.id: item for item in lock.inputs}
+        self.assertEqual(
+            manifest["toolchain"],
+            [
+                {
+                    "tool_id": tool_id,
+                    "component": inputs_by_id[tool_id].component,
+                    "resolved_path_sha256": inputs_by_id[tool_id].sha256,
+                }
+                for tool_id in lock.tool_ids
+            ],
+        )
 
     def test_runtime_and_tcb_changes_change_execution_but_not_image_geometry(self) -> None:
         baseline = parse_manifest_v2(_produce().manifest_bytes).raw
