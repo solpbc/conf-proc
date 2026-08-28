@@ -51,14 +51,29 @@ SUBPROCESS_CALLS = frozenset(
     }
 )
 PATH_CONSTRUCTION_CALLS = frozenset({"Path", "pathlib.Path", "open", "os.path.join", "posixpath.join"})
-DORMANT_MODULES = frozenset({"conf_proc_provenance_v2", "conf_proc_provenance_render"})
+DORMANT_MODULES = frozenset(
+    {
+        "conf_proc_provenance_v2",
+        "conf_proc_provenance_render",
+        "conf_proc_provenance_v2_spdx",
+        "conf_proc_provenance_v2_build_spdx",
+        "conf_proc_provenance_v2_manifest",
+        "conf_proc_provenance_v2_build_manifest",
+    }
+)
 DORMANT_POLICY_FILES = frozenset(
     {
         "conf_proc_provenance_v2.py",
         "conf_proc_provenance_render.py",
+        "conf_proc_provenance_v2_spdx.py",
+        "conf_proc_provenance_v2_build_spdx.py",
+        "conf_proc_provenance_v2_manifest.py",
+        "conf_proc_provenance_v2_build_manifest.py",
         "test/conf-proc-provenance-v2-selftest.py",
         "test/conf-proc-provenance-render-selftest.py",
         "test/conf-proc-provenance-native-kat-selftest.py",
+        "test/conf-proc-provenance-v2-spdx-selftest.py",
+        "test/conf-proc-provenance-v2-manifest-selftest.py",
     }
 )
 PROHIBITED_RUNTIME_IMPORT_ROOTS = frozenset({"builtins", "importlib", "runpy", "subprocess"})
@@ -739,6 +754,37 @@ class ProvenanceIndependenceTests(unittest.TestCase):
         self.assertEqual(
             _violations("ordinary.py", "import importlib\nimportlib.import_module('verifier.cc_admin')\n"),
             [],
+        )
+        self.assertEqual(
+            DORMANT_MODULES,
+            frozenset(
+                {
+                    "conf_proc_provenance_v2",
+                    "conf_proc_provenance_render",
+                    "conf_proc_provenance_v2_spdx",
+                    "conf_proc_provenance_v2_build_spdx",
+                    "conf_proc_provenance_v2_manifest",
+                    "conf_proc_provenance_v2_build_manifest",
+                }
+            ),
+        )
+        self.assertEqual(
+            DORMANT_POLICY_FILES,
+            frozenset(
+                {
+                    "conf_proc_provenance_v2.py",
+                    "conf_proc_provenance_render.py",
+                    "conf_proc_provenance_v2_spdx.py",
+                    "conf_proc_provenance_v2_build_spdx.py",
+                    "conf_proc_provenance_v2_manifest.py",
+                    "conf_proc_provenance_v2_build_manifest.py",
+                    "test/conf-proc-provenance-v2-selftest.py",
+                    "test/conf-proc-provenance-render-selftest.py",
+                    "test/conf-proc-provenance-native-kat-selftest.py",
+                    "test/conf-proc-provenance-v2-spdx-selftest.py",
+                    "test/conf-proc-provenance-v2-manifest-selftest.py",
+                }
+            ),
         )
 
     def test_dormant_policy_files_reject_all_dynamic_loading_and_subprocesses(self) -> None:
