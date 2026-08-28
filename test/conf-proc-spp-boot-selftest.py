@@ -555,6 +555,7 @@ class SppBootSelftest(unittest.TestCase):
     def test_a_parser_and_source_binding_strictness(self) -> None:
         docs = build_compact_fixture()
         binding = boot.bind_boot_inputs(**docs)
+        self.assertTrue(boot._is_issued_boot_binding(binding))
         self.assertEqual(binding.kernel_feature_contract.kernel_input_sha256, next(item.sha256 for item in binding.lock.inputs if item.role == "kernel"))
         changed = canonical_loads(docs["boot_contract_bytes"])
         changed["unexpected"] = 1
@@ -585,6 +586,7 @@ class SppBootSelftest(unittest.TestCase):
             member.name: getattr(binding, member.name)
             for member in fields(boot.BootBinding)
         })
+        self.assertFalse(boot._is_issued_boot_binding(forged_binding))
         with self.assertRaises(ApplianceError):
             boot.BootTransitionEngine(forged_binding)
 

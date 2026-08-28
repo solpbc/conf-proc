@@ -23,6 +23,7 @@ H4_SEALED_REFERENCE_FILES = frozenset(
         "test/conf-proc-provenance-v2-inspect-documents-sealed-selftest.py",
     }
 )
+H4_ISSUANCE_CONSUMER_FILES = frozenset({"conf_proc_spp_boot_payload.py"})
 REFERENCE_EXEMPT_FILES = {
     THIS_FILE_ID,
     "conf_proc_inspect_provenance_cli.py",
@@ -71,6 +72,7 @@ DORMANT_MODULES = frozenset(
         "conf_proc_provenance_v2_build_manifest",
         "conf_proc_provenance_v2_assemble",
         "conf_proc_spp_boot",
+        "conf_proc_spp_boot_payload",
     }
 )
 DORMANT_INSPECTOR_MODULES = frozenset(
@@ -90,6 +92,7 @@ DORMANT_POLICY_FILES = frozenset(
         "conf_proc_provenance_v2_build_manifest.py",
         "conf_proc_provenance_v2_assemble.py",
         "conf_proc_spp_boot.py",
+        "conf_proc_spp_boot_payload.py",
         "test/conf-proc-provenance-v2-selftest.py",
         "test/conf-proc-provenance-render-selftest.py",
         "test/conf-proc-provenance-native-kat-selftest.py",
@@ -796,6 +799,7 @@ class ProvenanceIndependenceTests(unittest.TestCase):
                     "conf_proc_provenance_v2_build_manifest",
                     "conf_proc_provenance_v2_assemble",
                     "conf_proc_spp_boot",
+                    "conf_proc_spp_boot_payload",
                 }
             ),
         )
@@ -811,6 +815,7 @@ class ProvenanceIndependenceTests(unittest.TestCase):
                     "conf_proc_provenance_v2_build_manifest.py",
                     "conf_proc_provenance_v2_assemble.py",
                     "conf_proc_spp_boot.py",
+                    "conf_proc_spp_boot_payload.py",
                     "test/conf-proc-provenance-v2-selftest.py",
                     "test/conf-proc-provenance-render-selftest.py",
                     "test/conf-proc-provenance-native-kat-selftest.py",
@@ -845,6 +850,8 @@ class ProvenanceIndependenceTests(unittest.TestCase):
             self.assertTrue(_violations("conf_proc_provenance_v2.py", source), source)
 
     def test_exemption_allowlists_are_exact_and_present(self) -> None:
+        self.assertEqual(H4_ISSUANCE_CONSUMER_FILES, frozenset({"conf_proc_spp_boot_payload.py"}))
+        self.assertTrue((ROOT / "conf_proc_spp_boot_payload.py").is_file())
         self.assertEqual(
             REFERENCE_EXEMPT_FILES,
             {
@@ -1049,7 +1056,7 @@ class ProvenanceIndependenceTests(unittest.TestCase):
 
     def test_dormant_inspector_modules_have_no_existing_release_path_reference(self) -> None:
         for path in sorted(ROOT.glob("*.py")):
-            if path.stem in DORMANT_INSPECTOR_MODULES:
+            if path.stem in DORMANT_INSPECTOR_MODULES or path.name in H4_ISSUANCE_CONSUMER_FILES:
                 continue
             source = path.read_text()
             tree = ast.parse(source, filename=str(path))

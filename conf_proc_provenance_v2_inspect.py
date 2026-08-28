@@ -13,6 +13,8 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import weakref
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from typing import Final, Iterator
@@ -72,6 +74,27 @@ class InspectionResult:
     manifest_sha256: str
     spdx_sha256: str
     evidence_ceiling: str
+
+
+_ISSUED_INSPECTION_RESULTS: Final = weakref.WeakValueDictionary[int, InspectionResult]()
+_ISSUED_INSPECTION_RESULTS_LOCK: Final = threading.Lock()
+
+
+def _register_inspection_result(result: InspectionResult) -> InspectionResult:
+    """Record only the exact result emitted by the inspection boundary."""
+
+    with _ISSUED_INSPECTION_RESULTS_LOCK:
+        _ISSUED_INSPECTION_RESULTS[id(result)] = result
+    return result
+
+
+def _is_issued_inspection_result(result: object) -> bool:
+    """Return whether ``result`` is the still-live instance issued by H4."""
+
+    if type(result) is not InspectionResult:
+        return False
+    with _ISSUED_INSPECTION_RESULTS_LOCK:
+        return _ISSUED_INSPECTION_RESULTS.get(id(result)) is result
 
 
 @dataclass(frozen=True)
@@ -323,7 +346,7 @@ def inspect_bundle(
             tool_root=tool_root,
             bundle=bundle,
         )
-        return InspectionResult(**values)
+        return _register_inspection_result(InspectionResult(**values))
     except ApplianceError as exc:
         code = CP_PROVENANCE_V2_INSPECT_CONCURRENT_MUTATION if exc.reason_code == CP_PROVENANCE_INPUT_CHANGED else exc.reason_code
         raise ApplianceError(code, "inspection failed") from exc

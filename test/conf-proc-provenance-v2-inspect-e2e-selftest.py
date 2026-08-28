@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import unittest
+from dataclasses import asdict
 from pathlib import Path
 
 
@@ -31,6 +32,8 @@ class H4InspectorEndToEndTests(unittest.TestCase):
     def test_real_h3_bundle_is_artifact_consistent(self) -> None:
         self.assertEqual(os.stat(self.fixture.bundle).st_dev, os.stat("/var/tmp").st_dev)
         result = inspector.inspect_bundle(**self.fixture.inspect_kwargs())
+        self.assertTrue(inspector._is_issued_inspection_result(result))
+        self.assertFalse(inspector._is_issued_inspection_result(inspector.InspectionResult(**asdict(result))))
         self.assertEqual(set(result.__dataclass_fields__), {
             "state", "hardware_qualification", "artifact_input_sha256", "execution_provenance_sha256",
             "models_squashfs_sha256", "models_verity_sha256", "runtime_policy_squashfs_sha256",
