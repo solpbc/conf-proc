@@ -70,6 +70,7 @@ DORMANT_MODULES = frozenset(
         "conf_proc_provenance_v2_manifest",
         "conf_proc_provenance_v2_build_manifest",
         "conf_proc_provenance_v2_assemble",
+        "conf_proc_spp_boot",
     }
 )
 DORMANT_INSPECTOR_MODULES = frozenset(
@@ -88,6 +89,7 @@ DORMANT_POLICY_FILES = frozenset(
         "conf_proc_provenance_v2_manifest.py",
         "conf_proc_provenance_v2_build_manifest.py",
         "conf_proc_provenance_v2_assemble.py",
+        "conf_proc_spp_boot.py",
         "test/conf-proc-provenance-v2-selftest.py",
         "test/conf-proc-provenance-render-selftest.py",
         "test/conf-proc-provenance-native-kat-selftest.py",
@@ -793,6 +795,7 @@ class ProvenanceIndependenceTests(unittest.TestCase):
                     "conf_proc_provenance_v2_manifest",
                     "conf_proc_provenance_v2_build_manifest",
                     "conf_proc_provenance_v2_assemble",
+                    "conf_proc_spp_boot",
                 }
             ),
         )
@@ -807,6 +810,7 @@ class ProvenanceIndependenceTests(unittest.TestCase):
                     "conf_proc_provenance_v2_manifest.py",
                     "conf_proc_provenance_v2_build_manifest.py",
                     "conf_proc_provenance_v2_assemble.py",
+                    "conf_proc_spp_boot.py",
                     "test/conf-proc-provenance-v2-selftest.py",
                     "test/conf-proc-provenance-render-selftest.py",
                     "test/conf-proc-provenance-native-kat-selftest.py",
