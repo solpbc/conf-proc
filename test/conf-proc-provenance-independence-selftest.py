@@ -16,6 +16,13 @@ SEALED_NAMES = ("conf_proc_inspect_provenance", "conf_proc_inspect_provenance_cl
 THIS_FILE = Path(__file__).name
 THIS_FILE_ID = "test/" + THIS_FILE
 PRODUCER_KAT_FILE_ID = "test/conf-proc-provenance-v2-producer-kat-selftest.py"
+H4_INSPECTOR_ENTRY_FILE_ID = "conf_proc_provenance_v2_inspect.py"
+H4_SEALED_REFERENCE_FILES = frozenset(
+    {
+        H4_INSPECTOR_ENTRY_FILE_ID,
+        "test/conf-proc-provenance-v2-inspect-documents-sealed-selftest.py",
+    }
+)
 REFERENCE_EXEMPT_FILES = {
     THIS_FILE_ID,
     "conf_proc_inspect_provenance_cli.py",
@@ -63,6 +70,13 @@ DORMANT_MODULES = frozenset(
         "conf_proc_provenance_v2_manifest",
         "conf_proc_provenance_v2_build_manifest",
         "conf_proc_provenance_v2_assemble",
+    }
+)
+DORMANT_INSPECTOR_MODULES = frozenset(
+    {
+        "conf_proc_provenance_v2_inspect",
+        "conf_proc_provenance_v2_inspect_documents",
+        "conf_proc_provenance_v2_inspect_surface",
     }
 )
 DORMANT_POLICY_FILES = frozenset(
@@ -660,7 +674,7 @@ def _violations(filename: str, source: str) -> list[str]:
     aliases, constants, mappings = _analysis_context(tree)
     allowed_imports = DIRECT_IMPORT_ALLOWLIST.get(filename, frozenset())
 
-    if filename not in REFERENCE_EXEMPT_FILES:
+    if filename not in REFERENCE_EXEMPT_FILES | H4_SEALED_REFERENCE_FILES:
         for sealed in SEALED_NAMES:
             if sealed in source:
                 violations.append(f"forbidden sealed pathname/module reference: {sealed}")
@@ -674,7 +688,7 @@ def _violations(filename: str, source: str) -> list[str]:
                 if (imported_name == sealed or imported_name.startswith(sealed + ".")) and sealed not in allowed_imports:
                     violations.append(f"forbidden direct import: {imported_name}")
 
-    if filename not in SEALED_OPERATION_EXEMPT_FILES:
+    if filename not in SEALED_OPERATION_EXEMPT_FILES | H4_SEALED_REFERENCE_FILES:
         for call_name in _operation_references(tree, constants, aliases, SEALED_NAMES, mappings):
             violations.append(f"forbidden sealed dynamic/path/subprocess operation: {call_name}")
 
@@ -951,7 +965,7 @@ class ProvenanceIndependenceTests(unittest.TestCase):
 
     def test_dormant_modules_have_no_release_path_importer_or_reference(self) -> None:
         for path in sorted(ROOT.glob("*.py")):
-            if path.stem in DORMANT_MODULES:
+            if path.stem in DORMANT_MODULES | DORMANT_INSPECTOR_MODULES:
                 continue
             source = path.read_text()
             tree = ast.parse(source, filename=str(path))
@@ -1028,6 +1042,46 @@ class ProvenanceIndependenceTests(unittest.TestCase):
                 ),
                 mutated_mapping,
             )
+
+    def test_dormant_inspector_modules_have_no_existing_release_path_reference(self) -> None:
+        for path in sorted(ROOT.glob("*.py")):
+            if path.stem in DORMANT_INSPECTOR_MODULES:
+                continue
+            source = path.read_text()
+            tree = ast.parse(source, filename=str(path))
+            aliases, constants, mappings = _analysis_context(tree)
+            for module_name in DORMANT_INSPECTOR_MODULES:
+                self.assertNotIn(module_name, source, f"{path.name} wires H4 inspector code into a release path")
+            for node in ast.walk(tree):
+                self.assertFalse(
+                    any(
+                        imported == module_name or imported.startswith(module_name + ".")
+                        for imported in _imports(node)
+                        for module_name in DORMANT_INSPECTOR_MODULES
+                    ),
+                    f"{path.name} imports dormant H4 inspector code",
+                )
+            self.assertEqual(_operation_references(tree, constants, aliases, DORMANT_INSPECTOR_MODULES, mappings), [])
+            self.assertEqual(_computed_references(tree, constants, aliases, DORMANT_INSPECTOR_MODULES, mappings), [])
+
+    def test_h4_document_checker_never_delegates_to_the_sealed_adapter(self) -> None:
+        path = ROOT / "conf_proc_provenance_v2_inspect_documents.py"
+        source = path.read_text()
+        tree = ast.parse(source, filename=str(path))
+        imports = {item for node in ast.walk(tree) for item in _imports(node)}
+        self.assertFalse({"subprocess", *SEALED_NAMES} & imports)
+        self.assertNotIn("subprocess", source)
+        for sealed in SEALED_NAMES:
+            self.assertNotIn(sealed, source)
+
+    def test_h4_entrypoint_is_the_only_new_sealed_adapter_subprocess_exception(self) -> None:
+        source = (ROOT / H4_INSPECTOR_ENTRY_FILE_ID).read_text()
+        tree = ast.parse(source, filename=H4_INSPECTOR_ENTRY_FILE_ID)
+        aliases, constants, mappings = _analysis_context(tree)
+        self.assertEqual(_operation_references(tree, constants, aliases, SEALED_NAMES, mappings), ["os.path.join"])
+        self.assertTrue(
+            any(_call_name(node.func, aliases, constants, mappings) == "subprocess.run" for node in ast.walk(tree) if isinstance(node, ast.Call))
+        )
 
 
 if __name__ == "__main__":
