@@ -15,7 +15,8 @@ import hashlib
 import posixpath
 import threading
 import uuid
-from dataclasses import dataclass, field
+import weakref
+from dataclasses import dataclass
 from enum import Enum
 from typing import Final, Protocol
 
@@ -528,10 +529,25 @@ class BootBinding:
     gpt_layout_rules: GPTLayoutRules
     gpt_plan: PredictedGPTPlan
     runtime: _BootRuntimeSnapshot
-    _seal: object | None = field(default=None, repr=False, compare=False)
 
 
-_BOOT_BINDING_SEAL: Final = object()
+_ISSUED_BOOT_BINDINGS: Final = weakref.WeakValueDictionary[int, BootBinding]()
+_ISSUED_BOOT_BINDINGS_LOCK: Final = threading.Lock()
+
+
+def _register_boot_binding(binding: BootBinding) -> BootBinding:
+    """Record only the exact instance created by the authoritative binder."""
+
+    with _ISSUED_BOOT_BINDINGS_LOCK:
+        _ISSUED_BOOT_BINDINGS[id(binding)] = binding
+    return binding
+
+
+def _is_issued_boot_binding(binding: object) -> bool:
+    if type(binding) is not BootBinding:
+        return False
+    with _ISSUED_BOOT_BINDINGS_LOCK:
+        return _ISSUED_BOOT_BINDINGS.get(id(binding)) is binding
 
 
 def _base_record(lock: Lock) -> dict:
@@ -801,12 +817,12 @@ def bind_boot_inputs(
         contract.mutable_control_order,
         kfc.mutable_controls,
     )
-    return BootBinding(
+    return _register_boot_binding(BootBinding(
         root_lock_bytes, runtime_closure_bytes, verity_rules_bytes, tcb_identity_bytes, builder_source_bytes, policy_bytes,
         accepted_manifest_bytes, kernel_feature_contract_bytes, trusted_certificate_bundle_bytes, boot_contract_bytes, module_plan_bytes, gpt_layout_rules_bytes,
         source_digests["root_lock_sha256"], source_digests["runtime_closure_sha256"], source_digests["verity_rules_sha256"], source_digests["tcb_identity_sha256"], source_digests["builder_source_sha256"], source_digests["policy_sha256"], source_digests["accepted_manifest_sha256"], source_digests["kernel_feature_contract_sha256"], source_digests["trusted_certificate_bundle_sha256"], contract_digest, _sha256(module_plan_bytes), _sha256(gpt_layout_rules_bytes),
-        lock, kfc, contract, plan, gpt_rules, gpt_plan, runtime, _BOOT_BINDING_SEAL,
-    )
+        lock, kfc, contract, plan, gpt_rules, gpt_plan, runtime,
+    ))
 
 
 def _validate_module_plan_bound(contract: BootContract, plan: ModuleLoadPlan, manifest: ProvenanceV2Manifest, lock: Lock, contract_digest: str) -> None:
@@ -1163,7 +1179,7 @@ class BootTransitionEngine:
 
     def __init__(self, binding: BootBinding) -> None:
         _require(
-            type(binding) is BootBinding and binding._seal is _BOOT_BINDING_SEAL,
+            _is_issued_boot_binding(binding),
             CP_BOOT_BINDING,
             "boot engine requires a binder-issued sealed binding",
         )

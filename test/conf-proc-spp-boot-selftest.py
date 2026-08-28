@@ -548,13 +548,12 @@ class SppBootSelftest(unittest.TestCase):
         after = boot.BootTransitionEngine(binding)
         _reach(after, boot.BootTransitionState.RUNTIME_MAP)
         self.assertEqual(after.next_effect(), expected_effect)
-        manually_constructed = boot.BootBinding(**{
+        forged_binding = boot.BootBinding(**{
             member.name: getattr(binding, member.name)
             for member in fields(boot.BootBinding)
-            if member.name != "_seal"
         })
         with self.assertRaises(ApplianceError):
-            boot.BootTransitionEngine(manually_constructed)
+            boot.BootTransitionEngine(forged_binding)
 
     def test_a2_canonical_unknown_and_malformed_contract_values_are_rejected(self) -> None:
         docs = build_compact_fixture()
