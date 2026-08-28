@@ -210,6 +210,8 @@ def _validate_image_records(
 ) -> dict[str, dict]:
     if type(images) is not tuple or len(images) != 2:
         raise ApplianceError(CP_PROVENANCE_V2_IMAGE_GEOMETRY, "exactly two image records are required")
+    if tuple(record.image_id for record in images if type(record) is ProvenanceV2ImageRecord) != tuple(sorted(_IMAGE_IDS)):
+        raise ApplianceError(CP_PROVENANCE_V2_IMAGE_GEOMETRY, "image records must be canonically ordered")
     records: dict[str, dict] = {}
     lock_digest = bytes.fromhex(artifact_input_sha256)
     for record in images:
@@ -223,6 +225,8 @@ def _validate_image_records(
             and _is_sha256(record.root_hash)
             and _positive_int(record.squashfs_size_bytes)
             and _positive_int(record.hash_device_size_bytes)
+            and record.squashfs_size_bytes % VERITY_DATA_BLOCK_SIZE == 0
+            and record.hash_device_size_bytes % VERITY_HASH_BLOCK_SIZE == 0
         ):
             raise ApplianceError(CP_PROVENANCE_V2_IMAGE_GEOMETRY, "image record geometry is invalid")
         records[record.image_id] = {
@@ -319,12 +323,16 @@ def _index_module_observations(
     observations: tuple[ProvenanceV2ModuleObservation, ...],
 ) -> dict[str, ProvenanceV2ModuleObservation]:
     result: dict[str, ProvenanceV2ModuleObservation] = {}
+    paths: list[str] = []
     for observation in observations:
         if type(observation) is not ProvenanceV2ModuleObservation or not _observation_path(observation.path):
             raise ApplianceError(CP_PROVENANCE_V2_MANIFEST_PRODUCTION, "module observation is invalid")
         if observation.path in result:
             raise ApplianceError(CP_PROVENANCE_V2_MANIFEST_PRODUCTION, "module observation path is duplicated")
         result[observation.path] = observation
+        paths.append(observation.path)
+    if paths != sorted(paths):
+        raise ApplianceError(CP_PROVENANCE_V2_MANIFEST_PRODUCTION, "module observations must be canonically ordered")
     return result
 
 
@@ -332,12 +340,16 @@ def _index_firmware_observations(
     observations: tuple[ProvenanceV2FirmwareObservation, ...],
 ) -> dict[str, ProvenanceV2FirmwareObservation]:
     result: dict[str, ProvenanceV2FirmwareObservation] = {}
+    paths: list[str] = []
     for observation in observations:
         if type(observation) is not ProvenanceV2FirmwareObservation or not _observation_path(observation.path):
             raise ApplianceError(CP_PROVENANCE_V2_MANIFEST_PRODUCTION, "firmware observation is invalid")
         if observation.path in result:
             raise ApplianceError(CP_PROVENANCE_V2_MANIFEST_PRODUCTION, "firmware observation path is duplicated")
         result[observation.path] = observation
+        paths.append(observation.path)
+    if paths != sorted(paths):
+        raise ApplianceError(CP_PROVENANCE_V2_MANIFEST_PRODUCTION, "firmware observations must be canonically ordered")
     return result
 
 

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import sys
 import unittest
@@ -345,6 +346,19 @@ def _produce(**overrides):
     return produce_provenance_v2(**values)
 
 
+def _run_selfcheck(manifest: dict, spdx: dict) -> None:
+    values = _bundle()
+    _selfcheck(
+        manifest_bytes=canonical_dumps(manifest),
+        spdx_bytes=canonical_dumps(spdx),
+        images=_images(),
+        module_observations=_module_observations(),
+        firmware_observations=_firmware_observations(),
+        initial_inputs=provenance.derive_inputs(**values),
+        **values,
+    )
+
+
 class ProvenanceV2ManifestTests(unittest.TestCase):
     def assert_rejected(self, callback, expected_reason: str) -> None:
         with self.assertRaises(ApplianceError) as ctx:
@@ -378,16 +392,54 @@ class ProvenanceV2ManifestTests(unittest.TestCase):
             {"path": "/usr/lib/modules/fixture.ko", "sha256": _sha(201), "signer_certificate_sha256": _SIGNER}
         ])
 
-    def test_output_is_byte_identical_when_image_tuple_order_changes(self) -> None:
-        first = _produce()
-        second = _produce(images=tuple(reversed(_images())))
-        self.assertEqual(first, second)
+    def test_rejects_noncanonical_observation_order(self) -> None:
+        self.assert_rejected(
+            lambda: _produce(images=tuple(reversed(_images()))),
+            "CP_PROVENANCE_V2_IMAGE_GEOMETRY",
+        )
+        raw = canonical_loads(_bundle()["root_lock_bytes"])
+        raw["inputs"].append(
+            _lock_input(
+                "extra-observed",
+                "runtime_tree_input",
+                _sha(510),
+                1,
+                placements=[
+                    _placement("extra-observed", "/usr/lib/firmware/another.bin"),
+                    _placement("extra-observed", "/usr/lib/modules/another.ko"),
+                ],
+            )
+        )
+        raw["inputs"].sort(key=lambda item: item["id"])
+        root_lock_bytes = canonical_dumps(raw)
+        modules = (
+            ProvenanceV2ModuleObservation("/usr/lib/modules/another.ko", _sha(510), _SIGNER),
+            ProvenanceV2ModuleObservation("/usr/lib/modules/fixture.ko", _sha(201), _SIGNER),
+        )
+        firmware = (
+            ProvenanceV2FirmwareObservation("/usr/lib/firmware/another.bin", _sha(510)),
+            ProvenanceV2FirmwareObservation("/usr/lib/firmware/fixture.bin", _sha(202)),
+        )
+        self.assert_rejected(
+            lambda: _produce(root_lock_bytes=root_lock_bytes, module_observations=tuple(reversed(modules)), firmware_observations=firmware),
+            "CP_PROVENANCE_V2_MANIFEST_PRODUCTION",
+        )
+        self.assert_rejected(
+            lambda: _produce(root_lock_bytes=root_lock_bytes, module_observations=modules, firmware_observations=tuple(reversed(firmware))),
+            "CP_PROVENANCE_V2_MANIFEST_PRODUCTION",
+        )
 
     def test_rejects_invalid_image_records_and_observations(self) -> None:
         self.assert_rejected(
             lambda: _produce(images=(ProvenanceV2ImageRecord("models", "A" * 64, 1, _sha(2), 1, _sha(3)), _images()[1])),
             "CP_PROVENANCE_V2_IMAGE_GEOMETRY",
         )
+        for field in ("squashfs_size_bytes", "hash_device_size_bytes"):
+            values = _images()[0].__dict__ | {field: 4097}
+            self.assert_rejected(
+                lambda values=values: _produce(images=(ProvenanceV2ImageRecord(**values), _images()[1])),
+                "CP_PROVENANCE_V2_IMAGE_GEOMETRY",
+            )
         self.assert_rejected(
             lambda: _produce(module_observations=()),
             "CP_PROVENANCE_V2_MANIFEST_PRODUCTION",
@@ -455,6 +507,8 @@ class ProvenanceV2ManifestTests(unittest.TestCase):
             ("uuid", "550e8400-e29b-41d4-a716-446655440000"),
             ("data_block_size", 512),
             ("hash_block_size", 512),
+            ("squashfs_size_bytes", 4097),
+            ("hash_device_size_bytes", 4097),
             ("squashfs_sha256", "A" * 64),
             ("squashfs_sha256", "a" * 63),
         ):
@@ -611,6 +665,120 @@ class ProvenanceV2ManifestTests(unittest.TestCase):
                 **values,
             ),
             "CP_PROVENANCE_V2_MANIFEST_SELFCHECK",
+        )
+
+    def test_selfcheck_rejects_manifest_mutation_classes(self) -> None:
+        artifact = _produce()
+        baseline_manifest = canonical_loads(artifact.manifest_bytes)
+        baseline_spdx = canonical_loads(artifact.spdx_bytes)
+
+        provenance_paths = (
+            ("artifact_input_sha256",),
+            ("execution_provenance_sha256",),
+            ("runtime_closure", "sha256"),
+            ("verity_rules_sha256",),
+            ("tcb_identity", "sha256"),
+            ("builder_source_sha256",),
+            ("policy_sha256",),
+        )
+        for path in provenance_paths:
+            manifest = copy.deepcopy(baseline_manifest)
+            target = manifest["provenance"]
+            for name in path[:-1]:
+                target = target[name]
+            target[path[-1]] = _sha(799)
+            self.assert_rejected(
+                lambda manifest=manifest: _run_selfcheck(manifest, baseline_spdx),
+                "CP_PROVENANCE_V2_MANIFEST_SELFCHECK",
+            )
+
+        mutations = []
+        manifest = copy.deepcopy(baseline_manifest)
+        manifest["inputs"].pop(0)
+        mutations.append(manifest)
+        manifest = copy.deepcopy(baseline_manifest)
+        manifest["images"]["models"]["root_hash"] = _sha(798)
+        mutations.append(manifest)
+        manifest = copy.deepcopy(baseline_manifest)
+        manifest["bindings"]["runtime-policy"]["configs"].pop()
+        mutations.append(manifest)
+        manifest = copy.deepcopy(baseline_manifest)
+        manifest["module_authority"]["module_inventory"][0]["signer_certificate_sha256"] = _sha(797)
+        mutations.append(manifest)
+        manifest = copy.deepcopy(baseline_manifest)
+        manifest["inventory"]["runtime-policy"].pop(0)
+        mutations.append(manifest)
+        manifest = copy.deepcopy(baseline_manifest)
+        manifest["reproducibility"]["build_epoch"] += 1
+        mutations.append(manifest)
+        manifest = copy.deepcopy(baseline_manifest)
+        manifest["sbom"]["sha256"] = _sha(796)
+        mutations.append(manifest)
+        manifest = copy.deepcopy(baseline_manifest)
+        manifest["unexpected"] = True
+        mutations.append(manifest)
+        for manifest in mutations:
+            self.assert_rejected(
+                lambda manifest=manifest: _run_selfcheck(manifest, baseline_spdx),
+                "CP_PROVENANCE_V2_MANIFEST_SELFCHECK",
+            )
+
+    def test_selfcheck_rejects_spdx_mutation_classes(self) -> None:
+        artifact = _produce()
+        baseline_manifest = canonical_loads(artifact.manifest_bytes)
+        baseline_spdx = canonical_loads(artifact.spdx_bytes)
+        appliance_index = next(
+            index
+            for index, item in enumerate(baseline_spdx["packages"])
+            if item["SPDXID"] == "SPDXRef-Package-appliance"
+        )
+
+        for reference_index in range(7):
+            spdx = copy.deepcopy(baseline_spdx)
+            spdx["packages"][appliance_index]["externalRefs"][reference_index]["referenceLocator"] = f"sha256:{_sha(795)}"
+            self.assert_rejected(
+                lambda spdx=spdx: _run_selfcheck(baseline_manifest, spdx),
+                "CP_PROVENANCE_V2_SPDX_SELFCHECK",
+            )
+
+        mutations = []
+        spdx = copy.deepcopy(baseline_spdx)
+        next(item for item in spdx["packages"] if item["SPDXID"] != "SPDXRef-Package-appliance")["name"] = "mutated"
+        mutations.append(spdx)
+        spdx = copy.deepcopy(baseline_spdx)
+        spdx["files"][0]["checksums"][0]["checksumValue"] = _sha(794)
+        mutations.append(spdx)
+        spdx = copy.deepcopy(baseline_spdx)
+        spdx["relationships"].pop(0)
+        mutations.append(spdx)
+        spdx = copy.deepcopy(baseline_spdx)
+        spdx["creationInfo"]["created"] = "2000-01-01T00:00:00Z"
+        mutations.append(spdx)
+        spdx = copy.deepcopy(baseline_spdx)
+        spdx["documentNamespace"] = "urn:uuid:550e8400-e29b-51d4-a716-446655440000"
+        mutations.append(spdx)
+        spdx = copy.deepcopy(baseline_spdx)
+        spdx["unexpected"] = True
+        mutations.append(spdx)
+        for spdx in mutations:
+            self.assert_rejected(
+                lambda spdx=spdx: _run_selfcheck(baseline_manifest, spdx),
+                "CP_PROVENANCE_V2_SPDX_SELFCHECK",
+            )
+
+        swapped_manifest = copy.deepcopy(baseline_manifest)
+        swapped_spdx = copy.deepcopy(baseline_spdx)
+        artifact_input = swapped_manifest["provenance"]["artifact_input_sha256"]
+        execution = swapped_manifest["provenance"]["execution_provenance_sha256"]
+        swapped_manifest["provenance"]["artifact_input_sha256"] = execution
+        swapped_manifest["provenance"]["execution_provenance_sha256"] = artifact_input
+        appliance = swapped_spdx["packages"][appliance_index]
+        references = {item["referenceType"]: item for item in appliance["externalRefs"]}
+        references["conf-proc-artifact-input"]["referenceLocator"] = f"sha256:{execution}"
+        references["conf-proc-execution-provenance"]["referenceLocator"] = f"sha256:{artifact_input}"
+        self.assert_rejected(
+            lambda: _run_selfcheck(swapped_manifest, swapped_spdx),
+            "CP_PROVENANCE_V2_SPDX_SELFCHECK",
         )
 
 

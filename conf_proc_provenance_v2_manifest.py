@@ -190,6 +190,8 @@ def _validate_images(value: object) -> None:
             and _is_sha256(image["salt"])
             and _positive_int(image["squashfs_size_bytes"])
             and _positive_int(image["hash_device_size_bytes"])
+            and image["squashfs_size_bytes"] % 4096 == 0
+            and image["hash_device_size_bytes"] % 4096 == 0
             and image["data_block_size"] == 4096
             and image["hash_block_size"] == 4096
             and image["hash_algorithm"] == "sha256"

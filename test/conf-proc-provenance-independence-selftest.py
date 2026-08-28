@@ -15,10 +15,12 @@ ROOT = Path(__file__).resolve().parents[1]
 SEALED_NAMES = ("conf_proc_inspect_provenance", "conf_proc_inspect_provenance_cli")
 THIS_FILE = Path(__file__).name
 THIS_FILE_ID = "test/" + THIS_FILE
+PRODUCER_KAT_FILE_ID = "test/conf-proc-provenance-v2-producer-kat-selftest.py"
 REFERENCE_EXEMPT_FILES = {
     THIS_FILE_ID,
     "conf_proc_inspect_provenance_cli.py",
     "test/conf-proc-provenance-oracle-selftest.py",
+    PRODUCER_KAT_FILE_ID,
 }
 DIRECT_IMPORT_ALLOWLIST = {
     "test/conf-proc-provenance-oracle-selftest.py": frozenset({"conf_proc_inspect_provenance"}),
@@ -26,6 +28,7 @@ DIRECT_IMPORT_ALLOWLIST = {
 SEALED_OPERATION_EXEMPT_FILES = {
     "conf_proc_inspect_provenance_cli.py",
     "test/conf-proc-provenance-oracle-selftest.py",
+    PRODUCER_KAT_FILE_ID,
 }
 DYNAMIC_LOAD_CALLS = frozenset(
     {
@@ -810,6 +813,7 @@ class ProvenanceIndependenceTests(unittest.TestCase):
                 THIS_FILE_ID,
                 "conf_proc_inspect_provenance_cli.py",
                 "test/conf-proc-provenance-oracle-selftest.py",
+                PRODUCER_KAT_FILE_ID,
             },
         )
         self.assertEqual(
@@ -818,7 +822,7 @@ class ProvenanceIndependenceTests(unittest.TestCase):
         )
         self.assertEqual(
             SEALED_OPERATION_EXEMPT_FILES,
-            {"conf_proc_inspect_provenance_cli.py", "test/conf-proc-provenance-oracle-selftest.py"},
+            {"conf_proc_inspect_provenance_cli.py", "test/conf-proc-provenance-oracle-selftest.py", PRODUCER_KAT_FILE_ID},
         )
         for filename in REFERENCE_EXEMPT_FILES:
             path = ROOT / filename
@@ -829,6 +833,100 @@ class ProvenanceIndependenceTests(unittest.TestCase):
                 "import importlib\ntarget = ''.join(('conf_proc_inspect_', 'provenance'))\nimportlib.import_module(target)\n",
             ),
             "an exempt basename at another repository-relative path must not inherit the exemption",
+        )
+
+    def test_producer_kat_has_exact_independent_import_boundary(self) -> None:
+        source = (ROOT / PRODUCER_KAT_FILE_ID).read_text()
+        tree = ast.parse(source, filename=PRODUCER_KAT_FILE_ID)
+        imports = {
+            name.split(".", 1)[0]
+            for node in ast.walk(tree)
+            for name in _imports(node)
+        }
+        self.assertEqual(
+            imports,
+            {
+                "__future__",
+                "copy",
+                "datetime",
+                "hashlib",
+                "json",
+                "os",
+                "pathlib",
+                "re",
+                "subprocess",
+                "sys",
+                "tempfile",
+                "time",
+                "unittest",
+                "uuid",
+                "conf_proc_provenance_v2_build_manifest",
+            },
+        )
+        self.assertNotIn("conf_proc_inspect_provenance.py", source)
+        aliases, constants, mappings = _analysis_context(tree)
+        product_imports = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Import, ast.ImportFrom))
+            and any(
+                name == "conf_proc_provenance_v2_build_manifest"
+                or name.startswith("conf_proc_provenance_v2_build_manifest.")
+                for name in _imports(node)
+            )
+        ]
+        self.assertEqual(len(product_imports), 1)
+        self.assertIsInstance(product_imports[0], ast.Import)
+        self.assertEqual(
+            [(item.name, item.asname) for item in product_imports[0].names],
+            [("conf_proc_provenance_v2_build_manifest", "producer")],
+        )
+        runtime_calls = [
+            _call_name(node.func, aliases, constants, mappings)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+        ]
+        self.assertEqual(
+            [
+                call_name
+                for call_name in runtime_calls
+                if call_name in DYNAMIC_LOAD_CALLS
+                or call_name in SUBPROCESS_CALLS
+                or call_name in {"compile", "eval", "exec", "builtins.compile", "builtins.eval", "builtins.exec"}
+            ],
+            ["subprocess.run"],
+        )
+        self.assertEqual(
+            set(_computed_references(tree, constants, aliases, SEALED_NAMES, mappings)),
+            {"conf_proc_inspect_provenance_cli.py"},
+        )
+        producer_references = [node for node in ast.walk(tree) if isinstance(node, ast.Name) and node.id == "producer"]
+        producer_call = next(
+            node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_call_producer"
+        )
+        self.assertEqual(len(producer_references), sum(1 for node in ast.walk(producer_call) if isinstance(node, ast.Name) and node.id == "producer"))
+        self.assertEqual(
+            {
+                node.attr
+                for node in ast.walk(producer_call)
+                if isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "producer"
+            },
+            {
+                "ProvenanceV2FirmwareObservation",
+                "ProvenanceV2ImageRecord",
+                "ProvenanceV2ModuleObservation",
+                "produce_provenance_v2",
+            },
+        )
+        self.assertFalse(
+            {
+                _call_name(node.func, aliases, constants, mappings)
+                for node in ast.walk(producer_call)
+                if isinstance(node, ast.Call)
+            }
+            & {"getattr", "builtins.getattr", "vars", "builtins.vars"}
         )
 
     def test_dormant_modules_have_no_release_path_importer_or_reference(self) -> None:
