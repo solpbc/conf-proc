@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from contextlib import nullcontext
 
 from conf_proc_guard import HermeticGuard
 from conf_proc_lock import Lock, LockInput, Placement
@@ -37,6 +38,7 @@ def assemble_tree(
     image: str,
     input_root: str,
     staging_root: str,
+    pin_sources: bool = False,
 ) -> list[str]:
     """Materialize one image's declared tree; return sorted pseudo-file lines."""
 
@@ -48,7 +50,14 @@ def assemble_tree(
         for placement in lock_input.placements:
             if placement.image != image:
                 continue
-            _materialize(guard, lock_input, placement, input_root=input_root, staging_root=staging_root)
+            _materialize(
+                guard,
+                lock_input,
+                placement,
+                input_root=input_root,
+                staging_root=staging_root,
+                pin_source=pin_sources,
+            )
             pseudo_lines.append(_pseudo_line(placement))
             if placement.node_type == "directory":
                 declared_dirs.add(placement.path)
@@ -64,6 +73,7 @@ def _materialize(
     *,
     input_root: str,
     staging_root: str,
+    pin_source: bool,
 ) -> None:
     check_prohibited_path(placement.path)
     dest = os.path.join(staging_root, placement.path.lstrip("/"))
@@ -76,34 +86,38 @@ def _materialize(
 
     if placement.node_type == "file":
         source_path = os.path.join(input_root, lock_input.source_local_path)
-        source_stat = os.lstat(source_path)
-        node_type = classify_node_type(source_stat.st_mode)
-        validate_node_metadata(source_path, mode=source_stat.st_mode, node_type=node_type, nlink=source_stat.st_nlink)
-        content = guard.read_bytes(source_path)
-        if len(content) != lock_input.size_bytes:
-            raise ApplianceError(
-                CP_LOCK_SIZE_MISMATCH,
-                f"{lock_input.id}: source content is {len(content)} bytes, locked size_bytes is {lock_input.size_bytes}",
-            )
-        actual_sha256 = hashlib.sha256(content).hexdigest()
-        if actual_sha256 != lock_input.sha256:
-            raise ApplianceError(
-                CP_LOCK_DIGEST_MISMATCH,
-                f"{lock_input.id}: source content digest {actual_sha256} does not match locked {lock_input.sha256}",
-            )
-        check_content_markers(placement.path, content)
-        with open(dest, "wb") as handle:
-            handle.write(content)
+        pinned = guard.pin_reads((source_path,)) if pin_source else nullcontext()
+        with pinned:
+            source_stat = guard.stat_read(source_path) if pin_source else os.lstat(source_path)
+            node_type = classify_node_type(source_stat.st_mode)
+            validate_node_metadata(source_path, mode=source_stat.st_mode, node_type=node_type, nlink=source_stat.st_nlink)
+            content = guard.read_bytes(source_path)
+            if len(content) != lock_input.size_bytes:
+                raise ApplianceError(
+                    CP_LOCK_SIZE_MISMATCH,
+                    f"{lock_input.id}: source content is {len(content)} bytes, locked size_bytes is {lock_input.size_bytes}",
+                )
+            actual_sha256 = hashlib.sha256(content).hexdigest()
+            if actual_sha256 != lock_input.sha256:
+                raise ApplianceError(
+                    CP_LOCK_DIGEST_MISMATCH,
+                    f"{lock_input.id}: source content digest {actual_sha256} does not match locked {lock_input.sha256}",
+                )
+            check_content_markers(placement.path, content)
+            with open(dest, "wb") as handle:
+                handle.write(content)
 
-        actual_xattr_names = sorted(name for name in os.listxattr(source_path) if name in ALLOWED_XATTRS)
-        validate_xattr_names(source_path, sorted(os.listxattr(source_path)))
-        if set(actual_xattr_names) != set(placement.xattrs):
-            raise ApplianceError(
-                CP_TREE_XATTR,
-                f"{lock_input.id}: source xattrs {actual_xattr_names} do not match declared {list(placement.xattrs)}",
-            )
-        for name in placement.xattrs:
-            os.setxattr(dest, name, os.getxattr(source_path, name))
+            source_xattrs = sorted(guard.listxattr_read(source_path) if pin_source else os.listxattr(source_path))
+            actual_xattr_names = sorted(name for name in source_xattrs if name in ALLOWED_XATTRS)
+            validate_xattr_names(source_path, source_xattrs)
+            if set(actual_xattr_names) != set(placement.xattrs):
+                raise ApplianceError(
+                    CP_TREE_XATTR,
+                    f"{lock_input.id}: source xattrs {actual_xattr_names} do not match declared {list(placement.xattrs)}",
+                )
+            for name in placement.xattrs:
+                value = guard.getxattr_read(source_path, name) if pin_source else os.getxattr(source_path, name)
+                os.setxattr(dest, name, value)
         return
 
     if placement.node_type == "symlink":

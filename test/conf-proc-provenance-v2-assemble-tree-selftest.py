@@ -140,6 +140,69 @@ class H3TreeTests(unittest.TestCase):
             assembler._assert_tree_snapshots({"models": tree}, snapshots)
         self.assertEqual(context.exception.reason_code, "CP_TREE_UNEXPECTED")
 
+        transient_tree = os.path.join(self.base, "transient-tree")
+        os.makedirs(transient_tree)
+        transient_payload = os.path.join(transient_tree, "payload")
+        saved_payload = transient_payload + ".saved"
+        replacement_payload = transient_payload + ".replacement"
+        Path(transient_payload).write_bytes(b"original")
+        transient_snapshot = {"models": assembler._tree_snapshot(transient_tree)}
+        Path(replacement_payload).write_bytes(b"replacement")
+        os.rename(transient_payload, saved_payload)
+        os.rename(replacement_payload, transient_payload)
+        os.unlink(transient_payload)
+        os.rename(saved_payload, transient_payload)
+        with self.assertRaises(ApplianceError) as context:
+            assembler._assert_tree_snapshots({"models": transient_tree}, transient_snapshot)
+        self.assertEqual(context.exception.reason_code, "CP_TREE_UNEXPECTED")
+
+        pseudo = os.path.join(self.base, "models.pseudo")
+        Path(pseudo).write_text("/payload m 0644 0 0\n", encoding="utf-8")
+        pseudo_snapshot = assembler._freeze_file(pseudo)
+        assembler._assert_file_snapshot(pseudo, pseudo_snapshot)
+        os.chmod(pseudo, 0o644)
+        Path(pseudo).write_text("/payload m 0755 0 0\n", encoding="utf-8")
+        with self.assertRaises(ApplianceError) as context:
+            assembler._assert_file_snapshot(pseudo, pseudo_snapshot)
+        self.assertEqual(context.exception.reason_code, "CP_TREE_UNEXPECTED")
+
+    def test_pseudo_authority_is_inode_anchored_for_child_use(self) -> None:
+        pseudo = os.path.join(self.base, "models.pseudo")
+        saved = pseudo + ".saved"
+        replacement = pseudo + ".replacement"
+        original = b"/payload m 0644 0 0\n"
+        Path(pseudo).write_bytes(original)
+        snapshot = assembler._freeze_file(pseudo)
+        Path(replacement).write_bytes(b"/payload m 0755 0 0\n")
+        with self.assertRaises(ApplianceError) as context:
+            with assembler._pinned_file(pseudo, snapshot) as descriptor:
+                os.rename(pseudo, saved)
+                os.rename(replacement, pseudo)
+                self.assertEqual(Path(f"/proc/self/fd/{descriptor}").read_bytes(), original)
+                os.unlink(pseudo)
+                os.rename(saved, pseudo)
+        self.assertEqual(context.exception.reason_code, "CP_TREE_UNEXPECTED")
+
+    def test_activation_dropin_directory_alias_is_rejected(self) -> None:
+        with self.assertRaises(ApplianceError) as context:
+            assembler._validate_image_symlink(
+                "runtime-policy",
+                "/etc/systemd/system/h3.service.d",
+                "../../../dropins",
+            )
+        self.assertEqual(context.exception.reason_code, "CP_TREE_SYMLINK")
+
+    def test_declared_root_rejects_descendant_symlink(self) -> None:
+        input_root = os.path.join(self.base, "inputs")
+        outside = os.path.join(self.base, "outside")
+        os.makedirs(input_root)
+        os.makedirs(outside)
+        Path(os.path.join(outside, "payload")).write_bytes(b"tree")
+        os.symlink(outside, os.path.join(input_root, "linked"))
+        with self.assertRaises(ApplianceError) as context:
+            assembler._validate_rooted_regular(input_root, os.path.join(input_root, "linked", "payload"), "input")
+        self.assertEqual(context.exception.reason_code, "CP_TREE_UNEXPECTED")
+
     def test_privileged_placement_mode_is_rejected_before_chmod(self) -> None:
         tree = os.path.join(self.base, "privileged-mode")
         os.makedirs(tree)

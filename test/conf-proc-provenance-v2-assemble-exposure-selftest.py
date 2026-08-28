@@ -120,6 +120,36 @@ class H3ExposureTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.base, ignore_errors=True)
         self.fixture = _Fixture(self.base)
 
+    def test_output_root_creation_is_private_and_unsafe_ancestor_is_rejected(self) -> None:
+        created = os.path.join(self.base, "created-output")
+        old_umask = os.umask(0)
+        try:
+            assembler._validate_output_root(created)
+        finally:
+            os.umask(old_umask)
+        self.assertEqual(stat.S_IMODE(os.lstat(created).st_mode), 0o700)
+
+        nested = os.path.join(self.base, "nested", "one", "two", "output")
+        old_umask = os.umask(0)
+        try:
+            assembler._validate_output_root(nested)
+        finally:
+            os.umask(old_umask)
+        current = os.path.join(self.base, "nested")
+        for component in ("one", "two", "output"):
+            self.assertEqual(stat.S_IMODE(os.lstat(current).st_mode), 0o700)
+            current = os.path.join(current, component)
+        self.assertEqual(stat.S_IMODE(os.lstat(current).st_mode), 0o700)
+
+        unsafe_parent = os.path.join(self.base, "unsafe-parent")
+        os.mkdir(unsafe_parent, 0o700)
+        unsafe_output = os.path.join(unsafe_parent, "output")
+        os.mkdir(unsafe_output, 0o700)
+        os.chmod(unsafe_parent, 0o777)
+        with self.assertRaises(ApplianceError) as context:
+            assembler._validate_output_root(unsafe_output)
+        self.assertEqual(context.exception.reason_code, "CP_PROVENANCE_V2_STAGING")
+
     def test_every_fault_phase_cleans_private_stage_and_exposes_nothing(self) -> None:
         phases = (("authority-read", 1), ("guard-built", 1), ("tree-built", 1), ("tree-built", 2), ("trees-frozen", 1), ("policy-observed", 1), ("modules-observed", 1), ("image-built", 1), ("image-built", 2), ("documents-built", 1), ("local-gate", 1), ("bundle-readonly", 1), ("pre-rename", 1))
         for phase, occurrence in phases:
@@ -146,6 +176,7 @@ class H3ExposureTests(unittest.TestCase):
             Path(path).write_bytes(("different-" + name).encode())
             os.chmod(path, 0o444)
             original[name] = Path(path).read_bytes()
+        os.chmod(destination, 0o555)
         with self.assertRaises(ApplianceError) as context:
             self.fixture.assemble()
         self.assertEqual(context.exception.reason_code, "CP_PROVENANCE_V2_SAME_ADDRESS_DISAGREEMENT")
@@ -169,6 +200,112 @@ class H3ExposureTests(unittest.TestCase):
         os.symlink("target", os.path.join(shape, assembler.BUNDLE_FILES[0]))
         with self.assertRaises(ApplianceError):
             assembler._assert_bundle_shape(shape, readonly=False)
+
+    def test_existing_bundle_directory_must_remain_readonly(self) -> None:
+        result = self.fixture.assemble()
+        os.chmod(result.bundle_path, 0o755)
+        with self.assertRaises(ApplianceError) as context:
+            self.fixture.assemble()
+        self.assertEqual(context.exception.reason_code, "CP_PROVENANCE_V2_BUNDLE_READONLY")
+
+    def test_bundle_hash_and_hardening_use_pinned_file_descriptors(self) -> None:
+        digest_shape = os.path.join(self.base, "digest-race")
+        os.mkdir(digest_shape)
+        for name in assembler.BUNDLE_FILES:
+            Path(os.path.join(digest_shape, name)).write_bytes(name.encode("ascii"))
+        digest_target = os.path.join(digest_shape, assembler.BUNDLE_FILES[0])
+        digest_saved = digest_target + ".saved"
+        external_digest = os.path.join(self.base, "external-digest")
+        Path(external_digest).write_bytes(b"external")
+        original_sha256_fd = assembler._sha256_fd
+        raced = False
+
+        def race_digest(descriptor: int) -> str:
+            nonlocal raced
+            if not raced:
+                raced = True
+                os.rename(digest_target, digest_saved)
+                os.symlink(external_digest, digest_target)
+            return original_sha256_fd(descriptor)
+
+        assembler._sha256_fd = race_digest
+        try:
+            with self.assertRaises(ApplianceError) as context:
+                assembler._bundle_digests(digest_shape, readonly=False)
+        finally:
+            assembler._sha256_fd = original_sha256_fd
+        self.assertEqual(context.exception.reason_code, "CP_PROVENANCE_V2_BUNDLE_SHAPE")
+        self.assertEqual(Path(external_digest).read_bytes(), b"external")
+
+        mode_shape = os.path.join(self.base, "mode-race")
+        os.mkdir(mode_shape)
+        for name in assembler.BUNDLE_FILES:
+            path = os.path.join(mode_shape, name)
+            Path(path).write_bytes(name.encode("ascii"))
+            os.chmod(path, 0o600)
+        mode_target = os.path.join(mode_shape, assembler.BUNDLE_FILES[0])
+        mode_saved = mode_target + ".saved"
+        external_mode = os.path.join(self.base, "external-mode")
+        Path(external_mode).write_bytes(b"external")
+        os.chmod(external_mode, 0o600)
+        original_fchmod = assembler.os.fchmod
+        raced = False
+
+        def race_mode(descriptor: int, mode: int) -> None:
+            nonlocal raced
+            if not raced:
+                raced = True
+                os.rename(mode_target, mode_saved)
+                os.symlink(external_mode, mode_target)
+            original_fchmod(descriptor, mode)
+
+        assembler.os.fchmod = race_mode
+        try:
+            with self.assertRaises(ApplianceError) as context:
+                assembler._make_bundle_readonly(mode_shape)
+        finally:
+            assembler.os.fchmod = original_fchmod
+        self.assertEqual(context.exception.reason_code, "CP_PROVENANCE_V2_BUNDLE_SHAPE")
+        self.assertEqual(stat.S_IMODE(os.lstat(external_mode).st_mode), 0o600)
+
+    def test_readonly_digest_rechecks_modes_after_hashing(self) -> None:
+        shape = os.path.join(self.base, "readonly-race")
+        os.mkdir(shape)
+        for name in assembler.BUNDLE_FILES:
+            path = os.path.join(shape, name)
+            Path(path).write_bytes(name.encode("ascii"))
+            os.chmod(path, 0o444)
+        os.chmod(shape, 0o555)
+        target = os.path.join(shape, assembler.BUNDLE_FILES[0])
+        original_sha256_fd = assembler._sha256_fd
+        raced = False
+
+        def race_modes(descriptor: int) -> str:
+            nonlocal raced
+            if not raced:
+                raced = True
+                os.chmod(shape, 0o755)
+                os.chmod(target, 0o644)
+            return original_sha256_fd(descriptor)
+
+        assembler._sha256_fd = race_modes
+        try:
+            with self.assertRaises(ApplianceError) as context:
+                assembler._bundle_digests(shape, readonly=True)
+        finally:
+            assembler._sha256_fd = original_sha256_fd
+        self.assertEqual(context.exception.reason_code, "CP_PROVENANCE_V2_BUNDLE_READONLY")
+
+        tight = os.path.join(self.base, "readonly-tight")
+        os.mkdir(tight)
+        for name in assembler.BUNDLE_FILES:
+            path = os.path.join(tight, name)
+            Path(path).write_bytes(name.encode("ascii"))
+            os.chmod(path, 0o400)
+        os.chmod(tight, 0o500)
+        with self.assertRaises(ApplianceError) as context:
+            assembler._bundle_digests(tight, readonly=True)
+        self.assertEqual(context.exception.reason_code, "CP_PROVENANCE_V2_BUNDLE_READONLY")
 
     def test_stale_scavenging_and_suspicious_or_live_nodes_fail_closed(self) -> None:
         name = "-".join(self.fixture.address)
@@ -254,6 +391,33 @@ class H3ExposureTests(unittest.TestCase):
             assembler._prepare_destination_parent(other.output, other.address)
         self.assertEqual(context.exception.reason_code, "CP_PROVENANCE_V2_STAGING")
         self.assertEqual(os.listdir(outside_bundle), [])
+
+        lock_target = os.path.join(self.base, "outside-lock-target")
+        Path(lock_target).write_bytes(b"unchanged")
+        os.makedirs(os.path.join(other.output, ".h3-locks"), exist_ok=True)
+        lock_path = os.path.join(other.output, ".h3-locks", "-".join(other.address) + ".lock")
+        os.symlink(lock_target, lock_path)
+        with self.assertRaises(ApplianceError) as context:
+            with assembler._address_lease(other.output, other.address):
+                self.fail("symlinked address lock must not be acquired")
+        self.assertEqual(context.exception.reason_code, "CP_PROVENANCE_V2_LEASE")
+        self.assertEqual(Path(lock_target).read_bytes(), b"unchanged")
+
+        hardlink_fixture = _Fixture(os.path.join(self.base, "hardlinked-lock"))
+        hardlink_target = os.path.join(self.base, "outside-hardlink-target")
+        Path(hardlink_target).write_bytes(b"unchanged")
+        os.makedirs(os.path.join(hardlink_fixture.output, ".h3-locks"), exist_ok=True)
+        hardlink_path = os.path.join(
+            hardlink_fixture.output,
+            ".h3-locks",
+            "-".join(hardlink_fixture.address) + ".lock",
+        )
+        os.link(hardlink_target, hardlink_path)
+        with self.assertRaises(ApplianceError) as context:
+            with assembler._address_lease(hardlink_fixture.output, hardlink_fixture.address):
+                self.fail("hardlinked address lock must not be acquired")
+        self.assertEqual(context.exception.reason_code, "CP_PROVENANCE_V2_LEASE")
+        self.assertEqual(Path(hardlink_target).read_bytes(), b"unchanged")
 
 
 if __name__ == "__main__":

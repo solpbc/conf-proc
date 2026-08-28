@@ -25,8 +25,14 @@ from typing import Final
 from conf_proc_reasons import CP_POLICY_UNSUPPORTED_ACTIVATION, ApplianceError
 
 
-_SECTION_RE: Final = re.compile(r"^\[([A-Za-z]+)\]$")
-_UDEV_ACTION_RE: Final = re.compile(r'(RUN\{[^}]*\}|RUN|PROGRAM|IMPORT\{program\})\s*[+:]?=\s*"([^"]*)"')
+_SECTION_RE: Final = re.compile(r"^\[(D-BUS Service|[A-Za-z]+)\]$")
+_UDEV_ACTION_RE: Final = re.compile(
+    r'(RUN(?:\{[^}]*\})?|PROGRAM|IMPORT\{[^}]*\})\s*(==|!=|\+=|:=|=)\s*"([^"]*)"'
+)
+_UDEV_ACTION_CANDIDATE_RE: Final = re.compile(
+    r'(RUN(?:\{[^}]*\})?|PROGRAM|IMPORT\{[^}]*\})\s*([!+:]?=)'
+)
+_UDEV_SYSTEMD_TAG_RE: Final = re.compile(r'TAG\s*(?:\+=|:=|=)\s*"systemd"')
 _FORBIDDEN_SHELL_CHARS: Final = frozenset("$`|<>&;*?~(){}[]'\"\\")
 _CRON_LINE_RE: Final = re.compile(
     r"^\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+(?P<user>\S+)\s+(?P<command>.+)$"
@@ -63,7 +69,7 @@ def parse_exec_line(value: str) -> list[str]:
     return tokens
 
 
-def parse_udev_actions(text: str) -> list[str]:
+def parse_udev_actions(text: str, *, reject_unmodeled: bool = False) -> list[str]:
     """Extract absolute RUN/PROGRAM/IMPORT{program} commands from udev rules."""
 
     commands = []
@@ -71,15 +77,41 @@ def parse_udev_actions(text: str) -> list[str]:
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
-        for _keyword, value in _UDEV_ACTION_RE.findall(line):
-            command = value.split()[0] if value.split() else ""
+        if reject_unmodeled and "\\" in line:
+            raise ApplianceError(CP_POLICY_UNSUPPORTED_ACTIVATION, "udev line continuation or escaping is not modeled")
+        matches = _UDEV_ACTION_RE.findall(line)
+        candidates = _UDEV_ACTION_CANDIDATE_RE.findall(line)
+        if reject_unmodeled and len(matches) != len(candidates):
+            raise ApplianceError(CP_POLICY_UNSUPPORTED_ACTIVATION, "udev action syntax is not fully modeled")
+        if reject_unmodeled and any(
+            marker in line
+            for marker in ("SYSTEMD_WANTS", "SYSTEMD_USER_WANTS", "SYSTEMD_ALIAS")
+        ):
+            raise ApplianceError(CP_POLICY_UNSUPPORTED_ACTIVATION, "udev systemd activation is not modeled")
+        if reject_unmodeled and _UDEV_SYSTEMD_TAG_RE.search(line):
+            raise ApplianceError(CP_POLICY_UNSUPPORTED_ACTIVATION, "udev systemd activation is not modeled")
+        for keyword, operator, value in matches:
+            if reject_unmodeled and (
+                keyword not in ("RUN", "RUN{program}", "PROGRAM")
+                or keyword.startswith("RUN") and operator not in ("+=", ":=", "=")
+                or keyword == "PROGRAM" and operator not in ("==", "!=", "=")
+            ):
+                raise ApplianceError(CP_POLICY_UNSUPPORTED_ACTIVATION, "udev action operator is not modeled")
+            tokens = value.split()
+            command = tokens[0] if tokens else ""
             if not command.startswith("/"):
                 raise ApplianceError(CP_POLICY_UNSUPPORTED_ACTIVATION, f"udev action must invoke an absolute path: {value!r}")
+            if reject_unmodeled and (
+                len(tokens) != 1
+                or any(character in value for character in _FORBIDDEN_SHELL_CHARS)
+                or "%" in value
+            ):
+                raise ApplianceError(CP_POLICY_UNSUPPORTED_ACTIVATION, "udev action arguments or indirection are not modeled")
             commands.append(command)
     return commands
 
 
-def parse_crontab_lines(text: str) -> list[str]:
+def parse_crontab_lines(text: str, *, reject_unmodeled: bool = False) -> list[str]:
     """Extract absolute commands from /etc/crontab or /etc/cron.d/* syntax."""
 
     commands = []
@@ -90,9 +122,17 @@ def parse_crontab_lines(text: str) -> list[str]:
         match = _CRON_LINE_RE.match(line)
         if not match:
             raise ApplianceError(CP_POLICY_UNSUPPORTED_ACTIVATION, f"unsupported crontab line syntax: {line!r}")
-        command = match.group("command").split()[0]
+        command_value = match.group("command")
+        tokens = command_value.split()
+        command = tokens[0]
         if not command.startswith("/"):
             raise ApplianceError(CP_POLICY_UNSUPPORTED_ACTIVATION, f"cron command must be an absolute path: {command!r}")
+        if reject_unmodeled and (
+            len(tokens) != 1
+            or any(character in command_value for character in _FORBIDDEN_SHELL_CHARS)
+            or "%" in command_value
+        ):
+            raise ApplianceError(CP_POLICY_UNSUPPORTED_ACTIVATION, "cron arguments or indirection are not modeled")
         commands.append(command)
     return commands
 

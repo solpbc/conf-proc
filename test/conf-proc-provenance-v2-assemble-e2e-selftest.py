@@ -108,7 +108,7 @@ class _Fixture:
     def _write_inputs(self) -> None:
         self.contents = {
             "kernel.bin": b"fixture kernel\n",
-            "stub.sh": b"#!/bin/sh\nexit 0\n",
+            "stub.sh": b"",
             "unit.service": b"[Service]\nExecStart=/usr/bin/spp-systemd-stub\nIPAddressDeny=any\nCapabilityBoundingSet=CAP_NET_BIND_SERVICE\nAmbientCapabilities=\nNoNewPrivileges=yes\n",
             "firmware.bin": b"fixture firmware\n",
             "sglang.bin": b"fixture sglang\n",
@@ -470,6 +470,7 @@ class H3AssemblyEndToEndTests(unittest.TestCase):
         self.assertEqual(first.state, "built_unverified")
         self.assertEqual(first.bundle_path, expected)
         self.assertEqual(sorted(os.listdir(expected)), sorted(assembler.BUNDLE_FILES))
+        self.assertEqual(stat.S_IMODE(os.lstat(expected).st_mode) & 0o222, 0)
         for name in assembler.BUNDLE_FILES:
             metadata = os.lstat(os.path.join(expected, name))
             self.assertTrue(stat.S_ISREG(metadata.st_mode))
@@ -532,7 +533,7 @@ class H3AssemblyEndToEndTests(unittest.TestCase):
         self.assertNotIn("H3-HOSTILE", str(context.exception))
         self.assertNotIn(self.base, str(context.exception))
 
-    def test_post_rename_directory_hardening_failure_is_nonfatal(self) -> None:
+    def test_pre_rename_directory_hardening_failure_exposes_nothing(self) -> None:
         inputs = provenance.derive_inputs(
             root_lock_bytes=self.fixture.lock_bytes,
             runtime_closure_bytes=Path(self.fixture.closure_path).read_bytes(),
@@ -547,22 +548,62 @@ class H3AssemblyEndToEndTests(unittest.TestCase):
             inputs.artifact_input_sha256,
             inputs.execution_provenance_sha256,
         )
-        original_chmod = assembler.os.chmod
+        original_fchmod = assembler.os.fchmod
 
-        def reject_visible_directory(path: str, mode: int, *args, **kwargs) -> None:
-            if path == destination and mode == 0o555:
-                raise OSError("test-only visible-directory hardening failure")
-            original_chmod(path, mode, *args, **kwargs)
+        def reject_stage_directory(descriptor: int, mode: int, *args, **kwargs) -> None:
+            target = os.readlink(f"/proc/self/fd/{descriptor}")
+            if os.path.basename(target).startswith(".h3-ready-") and mode == 0o555:
+                raise OSError("test-only pre-rename directory hardening failure")
+            original_fchmod(descriptor, mode, *args, **kwargs)
 
-        assembler.os.chmod = reject_visible_directory
+        assembler.os.fchmod = reject_stage_directory
         try:
-            result = self.fixture.assemble()
+            with self.assertRaises(ApplianceError) as context:
+                self.fixture.assemble()
         finally:
-            assembler.os.chmod = original_chmod
-        self.assertEqual(result.bundle_path, destination)
-        self.assertEqual(sorted(os.listdir(destination)), sorted(assembler.BUNDLE_FILES))
-        for name in assembler.BUNDLE_FILES:
-            self.assertEqual(stat.S_IMODE(os.lstat(os.path.join(destination, name)).st_mode) & 0o333, 0)
+            assembler.os.fchmod = original_fchmod
+        self.assertEqual(context.exception.reason_code, "CP_PROVENANCE_V2_BUNDLE_READONLY")
+        self.assertFalse(os.path.exists(destination))
+        artifact_parent = os.path.dirname(destination)
+        self.assertFalse(
+            os.path.isdir(artifact_parent)
+            and any(name.startswith(".h3-ready-") for name in os.listdir(artifact_parent))
+        )
+
+    def test_fault_hook_mutation_is_revalidated_before_exposure(self) -> None:
+        inputs = provenance.derive_inputs(
+            root_lock_bytes=self.fixture.lock_bytes,
+            runtime_closure_bytes=Path(self.fixture.closure_path).read_bytes(),
+            verity_rules_bytes=Path(self.fixture.rules_path).read_bytes(),
+            tcb_identity_bytes=Path(self.fixture.tcb_path).read_bytes(),
+            builder_source_bytes=Path(self.fixture._input("source.py")).read_bytes(),
+            policy_bytes=Path(self.fixture.policy_path).read_bytes(),
+        )
+        destination = os.path.join(
+            self.fixture.output,
+            "built_unverified",
+            inputs.artifact_input_sha256,
+            inputs.execution_provenance_sha256,
+        )
+
+        for phase in ("bundle-readonly", "pre-rename"):
+            def mutate(current: str) -> None:
+                if current != phase:
+                    return
+                if phase == "bundle-readonly":
+                    candidates = list(Path(self.fixture.output, ".h3-staging").glob("*/models.squashfs"))
+                else:
+                    candidates = list(Path(os.path.dirname(destination)).glob(".h3-ready-*/models.squashfs"))
+                self.assertEqual(len(candidates), 1)
+                candidate = candidates[0]
+                os.chmod(candidate.parent, 0o755)
+                os.chmod(candidate, 0o644)
+                data = candidate.read_bytes()
+                candidate.write_bytes(bytes([data[0] ^ 1]) + data[1:])
+
+            with self.assertRaises(ApplianceError):
+                self.fixture.assemble(fault_hook=mutate)
+            self.assertFalse(os.path.exists(destination))
 
     def test_post_rename_lease_teardown_failure_is_nonfatal(self) -> None:
         original_flock = assembler.fcntl.flock

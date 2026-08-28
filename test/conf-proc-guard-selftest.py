@@ -64,6 +64,30 @@ class HermeticGuardTests(unittest.TestCase):
             self.guard.read_bytes(self.undeclared_file)
         self.assertEqual(ctx.exception.reason_code, "CP_HERMETIC_UNLISTED_READ")
 
+    def test_pinned_read_is_inode_anchored_across_transient_replacement(self) -> None:
+        saved = self.declared_file + ".saved"
+        replacement = self.declared_file + ".replacement"
+        Path(replacement).write_bytes(b"replacement")
+        with self.assertRaises(ApplianceError) as ctx:
+            with self.guard.pin_reads((self.declared_file,)):
+                os.rename(self.declared_file, saved)
+                os.rename(replacement, self.declared_file)
+                self.assertEqual(self.guard.read_bytes(self.declared_file), b"declared content")
+                os.unlink(self.declared_file)
+                os.rename(saved, self.declared_file)
+        self.assertEqual(ctx.exception.reason_code, "CP_PROVENANCE_INPUT_CHANGED")
+        self.assertEqual(Path(self.declared_file).read_bytes(), b"declared content")
+
+    def test_pinned_read_rejects_persistent_path_replacement(self) -> None:
+        saved = self.declared_file + ".saved"
+        replacement = self.declared_file + ".replacement"
+        Path(replacement).write_bytes(b"replacement")
+        with self.assertRaises(ApplianceError) as ctx:
+            with self.guard.pin_reads((self.declared_file,)):
+                os.rename(self.declared_file, saved)
+                os.rename(replacement, self.declared_file)
+        self.assertEqual(ctx.exception.reason_code, "CP_PROVENANCE_INPUT_CHANGED")
+
     def test_run_declared_tool(self) -> None:
         result = self.guard.run_tool([self.true_path], cwd=self.tmp)
         self.assertEqual(result.returncode, 0)

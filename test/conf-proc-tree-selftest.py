@@ -202,6 +202,19 @@ class TreeBuildAndInspectTests(unittest.TestCase):
         self.assertEqual(inventory["/usr/bin/spp-systemd-stub"].mode, 0o755)
         self.assertEqual(inventory["/usr/bin/stub-link"].symlink_target, "/usr/bin/spp-systemd-stub")
 
+    def test_legacy_tree_path_retains_symlinked_input_root_compatibility(self) -> None:
+        alias = os.path.join(self.base, "input-root-alias")
+        os.symlink(self.input_root, alias)
+        staging = os.path.join(self.base, "legacy-symlink-staging")
+        build_tree.assemble_tree(
+            self.guard,
+            self.lock,
+            image="runtime-policy",
+            input_root=alias,
+            staging_root=staging,
+        )
+        self.assertEqual(Path(os.path.join(staging, "etc/spp.conf")).read_bytes(), self.conf_bytes)
+
     def test_undeclared_path_in_image_is_rejected(self) -> None:
         inventory = self._build_and_inspect(self.lock)
         # Drop a real, present placement from the trusted lock copy used for

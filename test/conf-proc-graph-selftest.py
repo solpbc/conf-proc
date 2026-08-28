@@ -47,6 +47,26 @@ class UnitParserTests(unittest.TestCase):
     def test_parse_udev_actions(self) -> None:
         text = 'SUBSYSTEM=="foo", RUN+="/usr/bin/bar --flag"\n'
         self.assertEqual(unit_parser.parse_udev_actions(text), ["/usr/bin/bar"])
+        self.assertEqual(unit_parser.parse_udev_actions('PROGRAM=="/usr/bin/check"\n'), ["/usr/bin/check"])
+        self.assertEqual(unit_parser.parse_udev_actions('PROGRAM!="/usr/bin/check"\n'), ["/usr/bin/check"])
+        for unmodeled in (
+            'TAG += "systemd"\n',
+            'TAG = "systemd"\n',
+            'TAG := "systemd"\n',
+            'IMPORT{builtin}="systemd"\n',
+            'IMPORT{program}="/usr/bin/check"\n',
+            'ENV{SYSTEMD_\\\nWANTS}+="evil.service"\n',
+        ):
+            with self.assertRaises(ApplianceError):
+                unit_parser.parse_udev_actions(unmodeled, reject_unmodeled=True)
+
+    def test_systemd_section_extension_is_exactly_dbus(self) -> None:
+        self.assertEqual(
+            unit_parser.parse_systemd_unit("[D-BUS Service]\nExec=/usr/bin/app\n"),
+            {"D-BUS Service": {"Exec": ["/usr/bin/app"]}},
+        )
+        with self.assertRaises(ApplianceError):
+            unit_parser.parse_systemd_unit("[X-Foo]\nKey=value\n")
 
     def test_parse_crontab_lines(self) -> None:
         text = "*/5 * * * * root /usr/bin/cronjob --x\n"

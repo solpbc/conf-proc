@@ -29,6 +29,7 @@ from conf_proc_reasons import (
     CP_HERMETIC_PATH_ESCAPE,
     CP_HERMETIC_UNLISTED_READ,
     CP_HERMETIC_UNLISTED_SUBPROCESS,
+    CP_PROVENANCE_INPUT_CHANGED,
     CP_TOOL_DIGEST_MISMATCH,
     CP_TOOL_INVOCATION_FAILED,
     CP_TOOL_MISSING,
@@ -56,6 +57,13 @@ class _PinnedTool:
     sha256: str
 
 
+@dataclass(frozen=True)
+class _PinnedRead:
+    descriptor: int
+    identity: tuple[int, int, int, int, int]
+    sha256: str
+
+
 class HermeticGuard:
     """Chokepoint for every file read and subprocess call the builder makes."""
 
@@ -78,6 +86,7 @@ class HermeticGuard:
         self._env = dict(env)
         self._build_epoch = build_epoch
         self._pinned_tools: dict[str, _PinnedTool] = {}
+        self._pinned_reads: dict[str, _PinnedRead] = {}
 
     @property
     def build_epoch(self) -> int:
@@ -90,11 +99,53 @@ class HermeticGuard:
     def read_bytes(self, path: str) -> bytes:
         """Read a file, failing loud if it was never declared as an input."""
 
+        pinned = self._pinned_reads.get(os.path.abspath(path))
+        if pinned is not None:
+            return _read_fd(pinned.descriptor)
         real_path = os.path.realpath(path)
         if real_path not in self._allowed_reads:
             raise ApplianceError(CP_HERMETIC_UNLISTED_READ, f"undeclared host read: {path!r}")
         with open(real_path, "rb") as handle:
             return handle.read()
+
+    def stat_read(self, path: str) -> os.stat_result:
+        """Return metadata for a declared read, anchored to its pinned inode."""
+
+        pinned = self._pinned_reads.get(os.path.abspath(path))
+        if pinned is not None:
+            return os.fstat(pinned.descriptor)
+        real_path = self._declared_read_path(path)
+        return os.stat(real_path, follow_symlinks=False)
+
+    def listxattr_read(self, path: str) -> list[str]:
+        """List xattrs for a declared read, anchored to its pinned inode."""
+
+        pinned = self._pinned_reads.get(os.path.abspath(path))
+        if pinned is not None:
+            return os.listxattr(pinned.descriptor)
+        return os.listxattr(self._declared_read_path(path))
+
+    def getxattr_read(self, path: str, name: str) -> bytes:
+        """Read an xattr for a declared read, anchored to its pinned inode."""
+
+        pinned = self._pinned_reads.get(os.path.abspath(path))
+        if pinned is not None:
+            return os.getxattr(pinned.descriptor, name)
+        return os.getxattr(self._declared_read_path(path), name)
+
+    def pinned_path(self, path: str) -> str:
+        """Return the procfs path for a currently pinned declared read."""
+
+        pinned = self._pinned_reads.get(os.path.abspath(path))
+        if pinned is None:
+            raise ApplianceError(CP_PROVENANCE_INPUT_CHANGED, "declared read is not pinned")
+        return f"/proc/self/fd/{pinned.descriptor}"
+
+    def _declared_read_path(self, path: str) -> str:
+        real_path = os.path.realpath(path)
+        if real_path not in self._allowed_reads:
+            raise ApplianceError(CP_HERMETIC_UNLISTED_READ, f"undeclared host read: {path!r}")
+        return real_path
 
     def resolve_tool(self, argv0: str) -> str:
         """Resolve and digest-verify a declared build tool absolute path."""
@@ -121,12 +172,14 @@ class HermeticGuard:
         cwd: str,
         input: bytes | None = None,
         check: bool = True,
+        pass_fds: tuple[int, ...] = (),
     ) -> subprocess.CompletedProcess:
         """Invoke a declared tool with the guard's fixed, allowlisted environment."""
 
         if not argv:
             raise ApplianceError(CP_HERMETIC_UNLISTED_SUBPROCESS, "empty argv")
         pinned = self._pinned_tools.get(argv[0])
+        inherited_fds = tuple(dict.fromkeys((*pass_fds, *(item.descriptor for item in self._pinned_reads.values()))))
         if pinned is None:
             self.resolve_tool(argv[0])
             result = subprocess.run(
@@ -136,6 +189,7 @@ class HermeticGuard:
                 input=input,
                 capture_output=True,
                 check=False,
+                pass_fds=inherited_fds,
             )
         else:
             try:
@@ -146,7 +200,7 @@ class HermeticGuard:
                     input=input,
                     capture_output=True,
                     check=False,
-                    pass_fds=(pinned.descriptor,),
+                    pass_fds=tuple(dict.fromkeys((pinned.descriptor, *inherited_fds))),
                 )
             except OSError as exc:
                 raise ApplianceError(CP_TOOL_PIN_UNAVAILABLE, "could not execute the pinned tool inode") from exc
@@ -159,6 +213,65 @@ class HermeticGuard:
 
     def allowed_reads(self) -> frozenset[str]:
         return self._allowed_reads
+
+    @contextmanager
+    def pin_reads(self, absolute_paths: Iterable[str]) -> Iterator[None]:
+        """Read selected declared inputs only from validated open inodes."""
+
+        paths = tuple(os.path.abspath(path) for path in absolute_paths)
+        if not paths or len(paths) != len(set(paths)):
+            raise ApplianceError(CP_PROVENANCE_INPUT_CHANGED, "pinned read paths must be a non-empty unique set")
+        if self._pinned_reads:
+            raise ApplianceError(CP_PROVENANCE_INPUT_CHANGED, "nested pinned read contexts are unsupported")
+
+        pinned: dict[str, _PinnedRead] = {}
+        try:
+            for path in paths:
+                if os.path.realpath(path) not in self._allowed_reads:
+                    raise ApplianceError(CP_HERMETIC_UNLISTED_READ, f"undeclared host read: {path!r}")
+                try:
+                    descriptor = _open_nofollow_regular(path)
+                except OSError as exc:
+                    raise ApplianceError(CP_PROVENANCE_INPUT_CHANGED, "could not pin declared read") from exc
+                try:
+                    before = os.fstat(descriptor)
+                    if not stat.S_ISREG(before.st_mode):
+                        raise ApplianceError(CP_PROVENANCE_INPUT_CHANGED, "declared read is not a regular file")
+                    pinned[path] = _PinnedRead(
+                        descriptor=descriptor,
+                        identity=_stat_identity(before),
+                        sha256=_sha256_fd(descriptor),
+                    )
+                except Exception:
+                    os.close(descriptor)
+                    raise
+
+            self._pinned_reads = pinned
+            yield
+        finally:
+            self._pinned_reads = {}
+            pin_error: ApplianceError | None = None
+            for path, pinned_read in pinned.items():
+                try:
+                    after = os.fstat(pinned_read.descriptor)
+                    current_descriptor = _open_nofollow_regular(path)
+                    try:
+                        current = os.fstat(current_descriptor)
+                        if (
+                            _stat_identity(after) != pinned_read.identity
+                            or _sha256_fd(pinned_read.descriptor) != pinned_read.sha256
+                            or (current.st_dev, current.st_ino) != (after.st_dev, after.st_ino)
+                        ):
+                            pin_error = ApplianceError(CP_PROVENANCE_INPUT_CHANGED, "pinned declared read changed during assembly")
+                    finally:
+                        os.close(current_descriptor)
+                except OSError as exc:
+                    pin_error = ApplianceError(CP_PROVENANCE_INPUT_CHANGED, "could not recheck pinned declared read")
+                    pin_error.__cause__ = exc
+                finally:
+                    os.close(pinned_read.descriptor)
+            if pin_error is not None:
+                raise pin_error
 
     @contextmanager
     def pin_tools(self, absolute_paths: Iterable[str]) -> Iterator[None]:
@@ -183,7 +296,7 @@ class HermeticGuard:
                 if declaration is None or not os.path.isabs(path):
                     raise ApplianceError(CP_TOOL_PIN_UNAVAILABLE, "pinned tool is not a declared absolute path")
                 try:
-                    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+                    descriptor = _open_nofollow_regular(path)
                 except OSError as exc:
                     raise ApplianceError(CP_TOOL_PIN_UNAVAILABLE, "could not open declared tool without following links") from exc
                 try:
@@ -238,6 +351,44 @@ def _sha256_fd(descriptor: int) -> str:
         digest.update(chunk)
     os.lseek(descriptor, 0, os.SEEK_SET)
     return digest.hexdigest()
+
+
+def _read_fd(descriptor: int) -> bytes:
+    chunks: list[bytes] = []
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    while True:
+        chunk = os.read(descriptor, 1024 * 1024)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    return b"".join(chunks)
+
+
+def _open_nofollow_regular(path: str) -> int:
+    """Open an absolute regular file without following any path symlink."""
+
+    absolute = os.path.abspath(path)
+    components = [component for component in absolute.split(os.sep) if component]
+    if not components:
+        raise OSError("path has no leaf")
+    parent = os.open(os.sep, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        for component in components[:-1]:
+            next_parent = os.open(
+                component,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=parent,
+            )
+            os.close(parent)
+            parent = next_parent
+        return os.open(
+            components[-1],
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            dir_fd=parent,
+        )
+    finally:
+        os.close(parent)
 
 
 @contextmanager
