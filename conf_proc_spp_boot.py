@@ -22,7 +22,18 @@ from typing import Final, Protocol
 
 from conf_proc_geometry import derive_build_epoch, derive_verity_salt, derive_verity_uuid
 from conf_proc_json import canonical_dumps, canonical_loads
-from conf_proc_lock import Lock, ROLE_KERNEL_TRUSTED_CERT_BUNDLE, parse_lock
+from conf_proc_lock import (
+    Lock,
+    ROLE_ASR_MODEL,
+    ROLE_BUILD_TOOL,
+    ROLE_CONF_PROC_SOURCE,
+    ROLE_INFERENCE_MODEL,
+    ROLE_KERNEL_TRUSTED_CERT_BUNDLE,
+    ROLE_POLICY_TREE_INPUT,
+    ROLE_RUNTIME_TREE_INPUT,
+    ROLE_SGLANG_IMAGE,
+    parse_lock,
+)
 from conf_proc_module_authority import check_authorized_signers_match_bundle
 from conf_proc_policy import Policy, parse_policy
 from conf_proc_provenance_v2 import (
@@ -35,15 +46,23 @@ from conf_proc_provenance_v2 import (
 from conf_proc_provenance_v2_manifest import ProvenanceV2Manifest, parse_manifest_v2
 from conf_proc_reasons import (
     CP_BOOT_BINDING,
+    CP_BOOT_BOOTSTRAP_MOUNT,
     CP_BOOT_CONTROL,
+    CP_BOOT_FAILURE_TRANSPORT,
+    CP_BOOT_GOLDEN_ORDER,
     CP_BOOT_GPT,
+    CP_BOOT_JIT_POLICY,
     CP_BOOT_LATCH,
     CP_BOOT_MANIFEST,
     CP_BOOT_MODULE_PLAN,
+    CP_BOOT_MUTABLE_ROOT_CLASS,
+    CP_BOOT_NETWORK_POLICY,
     CP_BOOT_OBSERVATION,
     CP_BOOT_PCR,
     CP_BOOT_PROTOCOL,
     CP_BOOT_SCHEMA,
+    CP_BOOT_SERVING_SESSION,
+    CP_BOOT_TRANSPORT_EPOCH,
     ApplianceError,
 )
 
@@ -1610,3 +1629,1097 @@ class BootTransitionEngine:
         else:
             self._failure_kind = None  # type: ignore[assignment]
         return self.state
+
+
+# v2 is deliberately adjacent to, rather than interleaved with, the v1
+# authority above.  The v1 dataclasses, parser, table, and reducer remain the
+# published v1 contract; these types add a second, independently sealed walk.
+BOOT_CONTRACT_V2_SCHEMA: Final = "conf-proc-spp-boot-contract/v2"
+_CONTROL_ORDER_V2: Final = _CONTROL_ORDER[1:]
+JIT_COMPILER_LOADER_ARGS_V2: Final = ("--jit-workspace=/run/spp-jit", "--isolated")
+
+
+@dataclass(frozen=True)
+class BootstrapMountV2:
+    source: str
+    target: str
+    fs_type: str
+    flags: tuple[str, ...]
+    mode: int
+    size_bytes: int | None
+
+
+BOOTSTRAP_MOUNTS_V2: Final = (
+    BootstrapMountV2("proc", "/proc", "proc", ("nosuid", "nodev", "noexec"), 0o555, None),
+    BootstrapMountV2("sysfs", "/sys", "sysfs", ("nosuid", "nodev", "noexec"), 0o555, None),
+    BootstrapMountV2("devtmpfs", "/dev", "devtmpfs", ("nosuid", "noexec"), 0o755, None),
+    BootstrapMountV2("tmpfs", "/run", "tmpfs", ("nosuid", "nodev", "noexec"), 0o755, 67108864),
+)
+
+
+@dataclass(frozen=True)
+class JitWorkspaceV2:
+    path: str
+    mode: int
+    size_bytes: int
+
+
+@dataclass(frozen=True)
+class JitInputV2:
+    kind: str
+    input_id: str
+    role: str
+    image_id: str
+    path: str
+    sha256: str
+    size_bytes: int
+    mode: int
+
+
+@dataclass(frozen=True)
+class JitPolicyV2:
+    workspace: JitWorkspaceV2
+    compiler_loader_args: tuple[str, ...]
+    inputs: tuple[JitInputV2, ...]
+
+
+@dataclass(frozen=True)
+class BootContractV2:
+    predecessor_sha256: tuple[tuple[str, str], ...]
+    image_order: tuple[str, str]
+    boot_modules: tuple[ModuleIdentity, ...]
+    serving_modules: tuple[ModuleIdentity, ...]
+    non_runtime_loadable_modules: tuple[ModuleIdentity, ...]
+    tmpfs_mounts: tuple[TmpfsDescription, ...]
+    mutable_control_order: tuple[str, ...]
+    observation_contract_sha256: str
+    gpt_layout_rules_sha256: str
+    jit_policy: JitPolicyV2 | None
+
+
+_OBSERVATION_SHAPE_V2: Final = {
+    "schema": "conf-proc-spp-boot-observation-shape/v2",
+    "states": [
+        "bootstrap_proc", "bootstrap_sysfs", "bootstrap_devtmpfs", "bootstrap_run",
+        "initial_network_apply", "initial_network_readback", "cmdline", "pcr15_zero",
+        "disk_locators", "runtime_map", "runtime_verify", "runtime_mapping_identity",
+        "models_map", "models_verify", "models_mapping_identity", "runtime_mount",
+        "runtime_executable_confinement", "models_mount", "mutable_roots_pre", "tmpfs_create",
+        "mutable_roots_post", "modules", "modules_disabled", "mutable_control", "pcr15_extend",
+        "pcr15_readback", "boot_transport_closed", "serving_transport_claimed", "jit_inputs_checked",
+        "jit_prepare", "jit_outputs_checked", "jit_disabled", "serving_network_apply",
+        "serving_network_readback", "listener_create", "listener_bind", "service_start",
+        "serving_ready", "network_activate", "serving_available",
+    ],
+}
+_OBSERVATION_SHAPE_V2_BYTES: Final = canonical_dumps(_OBSERVATION_SHAPE_V2)
+OBSERVATION_CONTRACT_SHA256_V2: Final = _sha256(_OBSERVATION_SHAPE_V2_BYTES)
+
+_JIT_ROLES_V2: Final = {
+    "source": frozenset((ROLE_CONF_PROC_SOURCE, ROLE_SGLANG_IMAGE)),
+    "compiler": frozenset((ROLE_BUILD_TOOL,)),
+    "native_library": frozenset((ROLE_RUNTIME_TREE_INPUT, ROLE_SGLANG_IMAGE)),
+    "model": frozenset((ROLE_SGLANG_IMAGE, ROLE_INFERENCE_MODEL, ROLE_ASR_MODEL)),
+    "config": frozenset((ROLE_POLICY_TREE_INPUT,)),
+}
+
+
+def _parse_tmpfs_mounts_v2(raw: object) -> tuple[TmpfsDescription, ...]:
+    _require(type(raw) is list and raw, CP_BOOT_SCHEMA, "v2 tmpfs mounts are invalid")
+    mounts: list[TmpfsDescription] = []
+    for item in raw:
+        _require(type(item) is dict and set(item) == {"path", "size_bytes", "mode"}, CP_BOOT_SCHEMA, "v2 tmpfs fields are invalid")
+        _require(_absolute_path(item["path"]) and type(item["size_bytes"]) is int and item["size_bytes"] > 0 and type(item["mode"]) is int and 0 <= item["mode"] <= 0o777, CP_BOOT_SCHEMA, "v2 tmpfs mount is invalid")
+        mounts.append(TmpfsDescription(item["path"], item["size_bytes"], item["mode"]))
+    _require([item.path for item in mounts] == sorted(item.path for item in mounts) and len({item.path for item in mounts}) == len(mounts), CP_BOOT_SCHEMA, "v2 tmpfs mounts must be sorted and unique")
+    _require(all(not _paths_overlap(left.path, right.path) for index, left in enumerate(mounts) for right in mounts[index + 1:]), CP_BOOT_SCHEMA, "v2 tmpfs mount paths overlap")
+    return tuple(mounts)
+
+
+def _parse_jit_policy_v2(raw: object, mounts: tuple[TmpfsDescription, ...]) -> JitPolicyV2 | None:
+    if raw is None:
+        return None
+    _require(type(raw) is dict and set(raw) == {"workspace", "compiler_loader_args", "inputs"}, CP_BOOT_JIT_POLICY, "JIT policy fields are invalid")
+    workspace = raw["workspace"]
+    _require(type(workspace) is dict and set(workspace) == {"path", "mode", "size_bytes"}, CP_BOOT_JIT_POLICY, "JIT workspace fields are invalid")
+    _require(workspace["path"] == "/run/spp-jit" and workspace["mode"] == 0o700 and type(workspace["size_bytes"]) is int and workspace["size_bytes"] > 0, CP_BOOT_JIT_POLICY, "JIT workspace is invalid")
+    _require(raw["compiler_loader_args"] == list(JIT_COMPILER_LOADER_ARGS_V2), CP_BOOT_JIT_POLICY, "JIT compiler/loader arguments are invalid")
+    entries = raw["inputs"]
+    _require(type(entries) is list and entries, CP_BOOT_JIT_POLICY, "JIT inputs are invalid")
+    parsed: list[JitInputV2] = []
+    for item in entries:
+        _require(type(item) is dict and set(item) == {"kind", "input_id", "role", "image_id", "path", "sha256", "size_bytes", "mode"}, CP_BOOT_JIT_POLICY, "JIT input fields are invalid")
+        _require(type(item["kind"]) is str and item["kind"] in _JIT_ROLES_V2 and type(item["input_id"]) is str and item["input_id"] and item["role"] in _JIT_ROLES_V2[item["kind"]] and item["image_id"] in _IMAGE_ORDER and _absolute_path(item["path"]) and _sha(item["sha256"]) and type(item["size_bytes"]) is int and item["size_bytes"] > 0 and type(item["mode"]) is int and 0 <= item["mode"] <= 0o777, CP_BOOT_JIT_POLICY, "JIT input is invalid")
+        parsed.append(JitInputV2(item["kind"], item["input_id"], item["role"], item["image_id"], item["path"], item["sha256"], item["size_bytes"], item["mode"]))
+    keys = [(item.kind, item.input_id, item.image_id, item.path) for item in parsed]
+    _require(keys == sorted(keys) and len(set(keys)) == len(keys) and len({item.input_id for item in parsed}) == len(parsed), CP_BOOT_JIT_POLICY, "JIT inputs must be sorted and unique")
+    result = JitPolicyV2(JitWorkspaceV2(workspace["path"], workspace["mode"], workspace["size_bytes"]), tuple(raw["compiler_loader_args"]), tuple(parsed))
+    _require(all(not _paths_overlap(result.workspace.path, mount.path) for mount in mounts), CP_BOOT_JIT_POLICY, "JIT workspace overlaps an application mutable root")
+    return result
+
+
+def parse_boot_contract_v2(data: bytes) -> BootContractV2:
+    """Parse the fixed v2 boot authority; policy and mount vocabularies are engine-owned."""
+
+    raw = canonical_loads(data)
+    expected = {
+        "schema", "contract_version", "predecessor_sha256", "image_order", "module_roles",
+        "non_runtime_loadable_modules", "tmpfs_mounts", "mutable_control_order",
+        "observation_contract_sha256", "gpt_layout_rules_sha256", "jit_policy",
+    }
+    _require(type(raw) is dict and set(raw) == expected, CP_BOOT_SCHEMA, "v2 boot contract fields are invalid")
+    _require(raw["schema"] == BOOT_CONTRACT_V2_SCHEMA and raw["contract_version"] == 2, CP_BOOT_SCHEMA, "v2 boot contract schema is invalid")
+    digests = raw["predecessor_sha256"]
+    _require(type(digests) is dict and set(digests) == _PREDECESSOR_DIGEST_KEYS and all(_sha(value) for value in digests.values()), CP_BOOT_SCHEMA, "v2 predecessor digest set is invalid")
+    _require(raw["image_order"] == list(_IMAGE_ORDER), CP_BOOT_SCHEMA, "v2 image order is invalid")
+    roles = raw["module_roles"]
+    _require(type(roles) is dict and set(roles) == {"boot", "serving"}, CP_BOOT_SCHEMA, "v2 module roles are invalid")
+    boot = _parse_identity_list(roles["boot"], CP_BOOT_SCHEMA, "v2 boot module roles", nonempty=True)
+    serving = _parse_identity_list(roles["serving"], CP_BOOT_SCHEMA, "v2 serving module roles", nonempty=True)
+    _require(not set(boot) & set(serving), CP_BOOT_SCHEMA, "v2 module roles overlap")
+    non_runtime = _parse_identity_list(raw["non_runtime_loadable_modules"], CP_BOOT_SCHEMA, "v2 non-runtime modules", nonempty=False)
+    _require(not (set(non_runtime) & (set(boot) | set(serving))), CP_BOOT_SCHEMA, "v2 role module cannot be non-runtime")
+    mounts = _parse_tmpfs_mounts_v2(raw["tmpfs_mounts"])
+    _require(raw["mutable_control_order"] == list(_CONTROL_ORDER_V2), CP_BOOT_SCHEMA, "v2 mutable control order is invalid")
+    _require(raw["observation_contract_sha256"] == OBSERVATION_CONTRACT_SHA256_V2 and _sha(raw["gpt_layout_rules_sha256"]), CP_BOOT_SCHEMA, "v2 engine-owned digest is invalid")
+    jit = _parse_jit_policy_v2(raw["jit_policy"], mounts)
+    _require(
+        jit is not None or all(not _paths_overlap(mount.path, "/run/spp-jit") for mount in mounts),
+        CP_BOOT_JIT_POLICY,
+        "JIT workspace path requires a JIT policy",
+    )
+    return BootContractV2(tuple(sorted(digests.items())), tuple(raw["image_order"]), boot, serving, non_runtime, mounts, tuple(raw["mutable_control_order"]), raw["observation_contract_sha256"], raw["gpt_layout_rules_sha256"], jit)
+
+
+def parse_boot_contract_document(data: bytes) -> BootContract | BootContractV2:
+    """Dispatch strictly by the raw document's schema without changing v1 parsing."""
+
+    raw = canonical_loads(data)
+    _require(type(raw) is dict and type(raw.get("schema")) is str, CP_BOOT_SCHEMA, "boot contract schema is invalid")
+    if raw["schema"] == BOOT_CONTRACT_SCHEMA:
+        return parse_boot_contract(data)
+    if raw["schema"] == BOOT_CONTRACT_V2_SCHEMA:
+        return parse_boot_contract_v2(data)
+    raise ApplianceError(CP_BOOT_SCHEMA, "unsupported boot contract schema")
+
+
+@dataclass(frozen=True)
+class BootBindingV2:
+    root_lock_bytes: bytes
+    runtime_closure_bytes: bytes
+    verity_rules_bytes: bytes
+    tcb_identity_bytes: bytes
+    builder_source_bytes: bytes
+    policy_bytes: bytes
+    accepted_manifest_bytes: bytes
+    kernel_feature_contract_bytes: bytes
+    trusted_certificate_bundle_bytes: bytes
+    boot_contract_bytes: bytes
+    module_plan_bytes: bytes
+    gpt_layout_rules_bytes: bytes
+    root_lock_sha256: str
+    runtime_closure_sha256: str
+    verity_rules_sha256: str
+    tcb_identity_sha256: str
+    builder_source_sha256: str
+    policy_sha256: str
+    accepted_manifest_sha256: str
+    kernel_feature_contract_sha256: str
+    trusted_certificate_bundle_sha256: str
+    boot_contract_sha256: str
+    module_plan_sha256: str
+    gpt_layout_rules_sha256: str
+    lock: Lock
+    kernel_feature_contract: KernelFeatureContract
+    boot_contract: BootContractV2
+    module_plan: ModuleLoadPlan
+    gpt_layout_rules: GPTLayoutRules
+    gpt_plan: PredictedGPTPlan
+    runtime: _BootRuntimeSnapshot
+
+
+_ISSUED_BOOT_BINDINGS_V2: Final = weakref.WeakValueDictionary[int, BootBindingV2]()
+_ISSUED_BOOT_BINDINGS_V2_LOCK: Final = threading.Lock()
+
+
+def _register_boot_binding_v2(binding: BootBindingV2) -> BootBindingV2:
+    with _ISSUED_BOOT_BINDINGS_V2_LOCK:
+        _ISSUED_BOOT_BINDINGS_V2[id(binding)] = binding
+    return binding
+
+
+def _is_issued_boot_binding_v2(binding: object) -> bool:
+    return type(binding) is BootBindingV2 and _ISSUED_BOOT_BINDINGS_V2.get(id(binding)) is binding
+
+
+def _validate_jit_policy_bound(jit: JitPolicyV2 | None, lock: Lock, policy: Policy, runtime_closure: dict) -> None:
+    if jit is None:
+        return
+    inputs = {item.id: item for item in lock.inputs}
+    closure_entries = runtime_closure["entries"]
+    for claimed in jit.inputs:
+        item = inputs.get(claimed.input_id)
+        _require(item is not None and item.role == claimed.role and item.sha256 == claimed.sha256 and item.size_bytes == claimed.size_bytes, CP_BOOT_JIT_POLICY, "JIT input lock projection disagrees")
+        placements = [placement for placement in item.placements if placement.image == claimed.image_id and placement.path == claimed.path]
+        _require(len(placements) == 1 and placements[0].node_type == "file" and placements[0].mode == claimed.mode and placements[0].source_input_id == claimed.input_id, CP_BOOT_JIT_POLICY, "JIT input placement disagrees")
+        closure = [entry for entry in closure_entries if entry["root_lock_input_id"] == claimed.input_id]
+        _require(closure, CP_BOOT_JIT_POLICY, "JIT input lacks runtime closure binding")
+        node = [node for node in policy.images[claimed.image_id].nodes if node.path == claimed.path]
+        _require(len(node) == 1 and node[0].node_type == "file" and node[0].source_input_id == claimed.input_id and node[0].mode == claimed.mode, CP_BOOT_JIT_POLICY, "JIT input lacks policy binding")
+        classes = _bindings(policy, claimed.image_id)
+        permitted = {
+            "source": ("runtime_inputs", "configs"), "compiler": ("executables", "runtime_inputs"),
+            "native_library": ("runtime_inputs", "executables"), "model": ("models",), "config": ("configs",),
+        }[claimed.kind]
+        _require(any(claimed.path in classes[group] for group in permitted), CP_BOOT_JIT_POLICY, "JIT input content class is invalid")
+
+
+def bind_boot_inputs_v2(**kwargs: bytes) -> BootBindingV2:
+    """Bind v2 bytes through the same predecessor authorities as v1."""
+
+    required = {
+        "root_lock_bytes", "runtime_closure_bytes", "verity_rules_bytes", "tcb_identity_bytes", "builder_source_bytes", "policy_bytes", "accepted_manifest_bytes", "kernel_feature_contract_bytes", "trusted_certificate_bundle_bytes", "boot_contract_bytes", "module_plan_bytes", "gpt_layout_rules_bytes",
+    }
+    _require(set(kwargs) == required and all(type(value) is bytes for value in kwargs.values()), CP_BOOT_SCHEMA, "all v2 boot authority inputs must be bytes")
+    root_lock_bytes = kwargs["root_lock_bytes"]
+    runtime_closure_bytes = kwargs["runtime_closure_bytes"]
+    verity_rules_bytes = kwargs["verity_rules_bytes"]
+    tcb_identity_bytes = kwargs["tcb_identity_bytes"]
+    builder_source_bytes = kwargs["builder_source_bytes"]
+    policy_bytes = kwargs["policy_bytes"]
+    accepted_manifest_bytes = kwargs["accepted_manifest_bytes"]
+    kernel_feature_contract_bytes = kwargs["kernel_feature_contract_bytes"]
+    trusted_certificate_bundle_bytes = kwargs["trusted_certificate_bundle_bytes"]
+    boot_contract_bytes = kwargs["boot_contract_bytes"]
+    module_plan_bytes = kwargs["module_plan_bytes"]
+    gpt_layout_rules_bytes = kwargs["gpt_layout_rules_bytes"]
+    inputs = derive_inputs(root_lock_bytes=root_lock_bytes, runtime_closure_bytes=runtime_closure_bytes, verity_rules_bytes=verity_rules_bytes, tcb_identity_bytes=tcb_identity_bytes, builder_source_bytes=builder_source_bytes, policy_bytes=policy_bytes)
+    lock = parse_lock(root_lock_bytes)
+    closure = parse_runtime_closure(runtime_closure_bytes)
+    parse_verity_rules(verity_rules_bytes)
+    tcb = parse_tcb_identity(tcb_identity_bytes)
+    policy = parse_policy(policy_bytes)
+    manifest = parse_manifest_v2(accepted_manifest_bytes)
+    kfc = parse_kernel_feature_contract(kernel_feature_contract_bytes)
+    contract = parse_boot_contract_v2(boot_contract_bytes)
+    plan = parse_module_load_plan(module_plan_bytes)
+    gpt_rules = parse_gpt_layout_rules(gpt_layout_rules_bytes)
+    source_digests = {
+        "root_lock_sha256": _sha256(root_lock_bytes), "runtime_closure_sha256": _sha256(runtime_closure_bytes), "verity_rules_sha256": _sha256(verity_rules_bytes), "tcb_identity_sha256": _sha256(tcb_identity_bytes), "builder_source_sha256": _sha256(builder_source_bytes), "policy_sha256": _sha256(policy_bytes), "accepted_manifest_sha256": _sha256(accepted_manifest_bytes), "kernel_feature_contract_sha256": _sha256(kernel_feature_contract_bytes), "trusted_certificate_bundle_sha256": _sha256(trusted_certificate_bundle_bytes),
+    }
+    contract_digest = _sha256(boot_contract_bytes)
+    _require(dict(contract.predecessor_sha256) == source_digests and contract.gpt_layout_rules_sha256 == _sha256(gpt_layout_rules_bytes), CP_BOOT_BINDING, "v2 contract predecessor binding disagrees")
+    _require(plan.boot_contract_sha256 == contract_digest, CP_BOOT_MODULE_PLAN, "module plan is not bound to v2 contract bytes")
+    _require(tcb["kernel_feature_contract"] == {"schema": KERNEL_FEATURE_CONTRACT_SCHEMA, "sha256": source_digests["kernel_feature_contract_sha256"]}, CP_BOOT_BINDING, "TCB kernel feature binding disagrees")
+    kernel_inputs = [item for item in lock.inputs if item.role == "kernel"]
+    _require(len(kernel_inputs) == 1 and kfc.kernel_input_sha256 == kernel_inputs[0].sha256, CP_BOOT_BINDING, "kernel feature contract is not bound to lock kernel input")
+    policy_snapshot = _validate_policy_usable(policy)
+    _validate_manifest(manifest=manifest, lock=lock, policy=policy, inputs=inputs, trusted_certificate_bundle_bytes=trusted_certificate_bundle_bytes)
+    _validate_module_plan_bound(contract, plan, manifest, lock, contract_digest)
+    _validate_jit_policy_bound(contract.jit_policy, lock, policy, closure)
+    images = _snapshot_manifest_images(manifest)
+    gpt_plan = _derive_gpt_plan(source_digests["root_lock_sha256"], _sha256(gpt_layout_rules_bytes), gpt_rules, images)
+    runtime = _BootRuntimeSnapshot(lock.future_cmdline, tuple(_locator(item) for item in gpt_plan.partitions), _verity_pair(gpt_plan, "runtime-policy"), _verity_pair(gpt_plan, "models"), policy_snapshot.runtime_policy_destination, policy_snapshot.models_destination, policy_snapshot.executable_paths, contract.tmpfs_mounts, plan.entries, contract.mutable_control_order, kfc.mutable_controls)
+    immutable_mounts = (runtime.runtime_policy_destination, runtime.models_destination)
+    _require(all(not _paths_overlap(mount.path, immutable) for mount in runtime.tmpfs_mounts for immutable in immutable_mounts), CP_BOOT_BINDING, "v2 tmpfs mounts overlap immutable image mounts")
+    return _register_boot_binding_v2(BootBindingV2(
+        root_lock_bytes, runtime_closure_bytes, verity_rules_bytes, tcb_identity_bytes, builder_source_bytes, policy_bytes, accepted_manifest_bytes, kernel_feature_contract_bytes, trusted_certificate_bundle_bytes, boot_contract_bytes, module_plan_bytes, gpt_layout_rules_bytes,
+        source_digests["root_lock_sha256"], source_digests["runtime_closure_sha256"], source_digests["verity_rules_sha256"], source_digests["tcb_identity_sha256"], source_digests["builder_source_sha256"], source_digests["policy_sha256"], source_digests["accepted_manifest_sha256"], source_digests["kernel_feature_contract_sha256"], source_digests["trusted_certificate_bundle_sha256"], contract_digest, _sha256(module_plan_bytes), _sha256(gpt_layout_rules_bytes), lock, kfc, contract, plan, gpt_rules, gpt_plan, runtime,
+    ))
+
+
+@dataclass(frozen=True)
+class NetworkPolicyV2:
+    phase: str
+    ingress: tuple[str, ...]
+    loopback_upstreams: tuple[tuple[str, str], ...]
+    entitlement: tuple[str, ...]
+
+
+INITIAL_NETWORK_POLICY_V2: Final = NetworkPolicyV2("initial-deny-all", (), (), ())
+SERVING_NETWORK_POLICY_V2: Final = NetworkPolicyV2(
+    "serving",
+    ("tcp+ra-tls://0.0.0.0:9443",),
+    (("inference", "127.0.0.1:8000"), ("asr", "127.0.0.1:8100")),
+    (
+        "a:services.solstone.app", "dns:udp,tcp:168.63.129.16:53",
+        "tcp:resolved-ipv4:443", "sni:services.solstone.app", "path:/internal/spp/authorize",
+        "redirects:none", "proxy:none",
+    ),
+)
+NETWORK_ACTIVATION_POLICY_V2: Final = NetworkPolicyV2(
+    "network-activate", ("tcp+ra-tls://0.0.0.0:9443",), (), (),
+)
+
+
+@dataclass(frozen=True)
+class BootstrapMountEffectV2(BootEffect):
+    mount: BootstrapMountV2
+
+
+@dataclass(frozen=True)
+class BootstrapMountReadbackV2(BootObservation):
+    mount: BootstrapMountV2
+
+
+@dataclass(frozen=True)
+class ApplyNetworkPolicyEffectV2(BootEffect):
+    policy: NetworkPolicyV2
+
+
+@dataclass(frozen=True)
+class ReadNetworkPolicyEffectV2(BootEffect):
+    policy: NetworkPolicyV2
+
+
+@dataclass(frozen=True)
+class NetworkPolicyReadbackV2(BootObservation):
+    policy: NetworkPolicyV2
+
+
+@dataclass(frozen=True)
+class MutableRootV2:
+    path: str
+    size_bytes: int
+    mode: int
+    uid: int
+    gid: int
+    flags: tuple[str, ...]
+    root_class: str
+
+
+@dataclass(frozen=True)
+class CheckMutableRootClassesEffectV2(BootEffect):
+    phase: str
+    bootstrap_mounts: tuple[BootstrapMountV2, ...]
+    application_roots: tuple[MutableRootV2, ...]
+
+
+@dataclass(frozen=True)
+class MutableRootClassesReadbackV2(BootObservation):
+    phase: str
+    bootstrap_mounts: tuple[BootstrapMountV2, ...]
+    application_roots: tuple[MutableRootV2, ...]
+
+
+@dataclass(frozen=True)
+class CreateTmpfsEffectV2(BootEffect):
+    root: MutableRootV2
+
+
+@dataclass(frozen=True)
+class TmpfsReadbackV2(BootObservation):
+    root: MutableRootV2
+
+
+@dataclass(frozen=True)
+class JitPolicyEffectV2(BootEffect):
+    action: str
+    policy: JitPolicyV2 | None
+
+
+@dataclass(frozen=True)
+class JitPolicyReadbackV2(BootObservation):
+    action: str
+    policy: JitPolicyV2 | None
+
+
+@dataclass(frozen=True)
+class ActivationEffectV2(BootEffect):
+    action: str
+    policy: NetworkPolicyV2 | None
+
+
+@dataclass(frozen=True)
+class ActivationReadbackV2(BootObservation):
+    action: str
+    policy: NetworkPolicyV2 | None
+
+
+@dataclass(frozen=True, init=False)
+class ServingReadyEffectV2(BootEffect):
+    def __init__(self, *_args: object, **_kwargs: object) -> None:
+        raise TypeError("ServingReadyEffectV2 is engine-issued")
+
+
+def _new_serving_ready_effect_v2(contract_sha256: str) -> ServingReadyEffectV2:
+    effect = object.__new__(ServingReadyEffectV2)
+    object.__setattr__(effect, "contract_sha256", contract_sha256)
+    return effect
+
+
+@dataclass(frozen=True)
+class ServingReadyReadbackV2(BootObservation):
+    ready: bool
+
+
+class BootTransitionStateV2(Enum):
+    BOOTSTRAP_PROC = "bootstrap_proc"
+    BOOTSTRAP_SYSFS = "bootstrap_sysfs"
+    BOOTSTRAP_DEVTMPFS = "bootstrap_devtmpfs"
+    BOOTSTRAP_RUN = "bootstrap_run"
+    INITIAL_NETWORK_APPLY = "initial_network_apply"
+    INITIAL_NETWORK_READBACK = "initial_network_readback"
+    CMDLINE = "cmdline"
+    PCR15_ZERO = "pcr15_zero"
+    DISK_LOCATORS = "disk_locators"
+    RUNTIME_MAP = "runtime_map"
+    RUNTIME_VERIFY = "runtime_verify"
+    RUNTIME_MAPPING_IDENTITY = "runtime_mapping_identity"
+    MODELS_MAP = "models_map"
+    MODELS_VERIFY = "models_verify"
+    MODELS_MAPPING_IDENTITY = "models_mapping_identity"
+    RUNTIME_MOUNT = "runtime_mount"
+    RUNTIME_EXECUTABLE_CONFINEMENT = "runtime_executable_confinement"
+    MODELS_MOUNT = "models_mount"
+    MUTABLE_ROOTS_PRE = "mutable_roots_pre"
+    TMPFS_CREATE = "tmpfs_create"
+    MUTABLE_ROOTS_POST = "mutable_roots_post"
+    MODULES = "modules"
+    MODULES_DISABLED = "modules_disabled"
+    MUTABLE_CONTROL = "mutable_control"
+    PCR15_EXTEND = "pcr15_extend"
+    PCR15_READBACK = "pcr15_readback"
+    BOOT_TRANSPORT_CLOSED = "boot_transport_closed"
+    SERVING_TRANSPORT_CLAIMED = "serving_transport_claimed"
+    JIT_INPUTS_CHECKED = "jit_inputs_checked"
+    JIT_PREPARE = "jit_prepare"
+    JIT_OUTPUTS_CHECKED = "jit_outputs_checked"
+    JIT_DISABLED = "jit_disabled"
+    SERVING_NETWORK_APPLY = "serving_network_apply"
+    SERVING_NETWORK_READBACK = "serving_network_readback"
+    LISTENER_CREATE = "listener_create"
+    LISTENER_BIND = "listener_bind"
+    SERVICE_START = "service_start"
+    SERVING_READY = "serving_ready"
+    NETWORK_ACTIVATE = "network_activate"
+    SERVING_AVAILABLE = "serving_available"
+    FAILED_NON_SERVING = "failed_non_serving"
+    POWEROFF = "poweroff"
+
+
+@dataclass(frozen=True)
+class StateEffectPostconditionV2:
+    state: BootTransitionStateV2
+    effect_name: str
+    postcondition: str
+
+
+BOOT_TRANSITION_TABLE_V2: Final = (
+    StateEffectPostconditionV2(BootTransitionStateV2.BOOTSTRAP_PROC, "BootstrapMountEffectV2", "fixed proc bootstrap mount"),
+    StateEffectPostconditionV2(BootTransitionStateV2.BOOTSTRAP_SYSFS, "BootstrapMountEffectV2", "fixed sysfs bootstrap mount"),
+    StateEffectPostconditionV2(BootTransitionStateV2.BOOTSTRAP_DEVTMPFS, "BootstrapMountEffectV2", "fixed devtmpfs bootstrap mount"),
+    StateEffectPostconditionV2(BootTransitionStateV2.BOOTSTRAP_RUN, "BootstrapMountEffectV2", "fixed run tmpfs bootstrap mount"),
+    StateEffectPostconditionV2(BootTransitionStateV2.INITIAL_NETWORK_APPLY, "ApplyNetworkPolicyEffectV2", "fixed deny-all policy"),
+    StateEffectPostconditionV2(BootTransitionStateV2.INITIAL_NETWORK_READBACK, "ReadNetworkPolicyEffectV2", "independent deny-all readback"),
+    StateEffectPostconditionV2(BootTransitionStateV2.CMDLINE, "CheckCmdlineEffect", "exact cmdline and no companions"),
+    StateEffectPostconditionV2(BootTransitionStateV2.PCR15_ZERO, "ReadPcr15Effect", "PCR15 is exactly zero"),
+    StateEffectPostconditionV2(BootTransitionStateV2.DISK_LOCATORS, "LocateExpectedDiskEffect", "four exact locators"),
+    StateEffectPostconditionV2(BootTransitionStateV2.RUNTIME_MAP, "MapVerityEffect", "runtime mapped"),
+    StateEffectPostconditionV2(BootTransitionStateV2.RUNTIME_VERIFY, "VerifyVerityEffect", "runtime verified"),
+    StateEffectPostconditionV2(BootTransitionStateV2.RUNTIME_MAPPING_IDENTITY, "ReadMappingIdentityEffect", "runtime mapping independently read"),
+    StateEffectPostconditionV2(BootTransitionStateV2.MODELS_MAP, "MapVerityEffect", "models mapped"),
+    StateEffectPostconditionV2(BootTransitionStateV2.MODELS_VERIFY, "VerifyVerityEffect", "models verified"),
+    StateEffectPostconditionV2(BootTransitionStateV2.MODELS_MAPPING_IDENTITY, "ReadMappingIdentityEffect", "models mapping independently read"),
+    StateEffectPostconditionV2(BootTransitionStateV2.RUNTIME_MOUNT, "MountImageEffect", "runtime mount is restrictive"),
+    StateEffectPostconditionV2(BootTransitionStateV2.RUNTIME_EXECUTABLE_CONFINEMENT, "ConfineRuntimeExecutablesEffect", "exact executable closure"),
+    StateEffectPostconditionV2(BootTransitionStateV2.MODELS_MOUNT, "MountImageEffect", "models mount is restrictive"),
+    StateEffectPostconditionV2(BootTransitionStateV2.MUTABLE_ROOTS_PRE, "CheckMutableRootClassesEffectV2", "mutable roots are absent before creation"),
+    StateEffectPostconditionV2(BootTransitionStateV2.TMPFS_CREATE, "CreateTmpfsEffectV2", "one declared root per effect"),
+    StateEffectPostconditionV2(BootTransitionStateV2.MUTABLE_ROOTS_POST, "CheckMutableRootClassesEffectV2", "all and only declared roots exist"),
+    StateEffectPostconditionV2(BootTransitionStateV2.MODULES, "LoadModulesEffect", "exact ordered modules"),
+    StateEffectPostconditionV2(BootTransitionStateV2.MODULES_DISABLED, "CloseModulesEffect", "module loading is closed"),
+    StateEffectPostconditionV2(BootTransitionStateV2.MUTABLE_CONTROL, "CloseMutableControlEffect", "each v2 mutable control is closed"),
+    StateEffectPostconditionV2(BootTransitionStateV2.PCR15_EXTEND, "ExtendPcr15Effect", "shared one-process PCR request"),
+    StateEffectPostconditionV2(BootTransitionStateV2.PCR15_READBACK, "ReadPcr15Effect", "v2 predicted PCR readback"),
+    StateEffectPostconditionV2(BootTransitionStateV2.BOOT_TRANSPORT_CLOSED, "CloseTransportEffect", "PCR transport is closed"),
+    StateEffectPostconditionV2(BootTransitionStateV2.JIT_INPUTS_CHECKED, "JitPolicyEffectV2", "sealed JIT inputs are checked"),
+    StateEffectPostconditionV2(BootTransitionStateV2.JIT_PREPARE, "JitPolicyEffectV2", "sealed JIT preparation"),
+    StateEffectPostconditionV2(BootTransitionStateV2.JIT_OUTPUTS_CHECKED, "JitPolicyEffectV2", "JIT outputs are checked"),
+    StateEffectPostconditionV2(BootTransitionStateV2.JIT_DISABLED, "JitPolicyEffectV2", "JIT remains disabled"),
+    StateEffectPostconditionV2(BootTransitionStateV2.SERVING_NETWORK_APPLY, "ActivationEffectV2", "fixed serving policy"),
+    StateEffectPostconditionV2(BootTransitionStateV2.SERVING_NETWORK_READBACK, "ReadNetworkPolicyEffectV2", "independent serving policy readback"),
+    StateEffectPostconditionV2(BootTransitionStateV2.LISTENER_CREATE, "ActivationEffectV2", "one fixed RA-TLS listener"),
+    StateEffectPostconditionV2(BootTransitionStateV2.LISTENER_BIND, "ActivationEffectV2", "listener bound"),
+    StateEffectPostconditionV2(BootTransitionStateV2.SERVICE_START, "ActivationEffectV2", "service started"),
+    StateEffectPostconditionV2(BootTransitionStateV2.SERVING_READY, "ServingReadyEffectV2", "serving becomes ready"),
+    StateEffectPostconditionV2(BootTransitionStateV2.NETWORK_ACTIVATE, "ActivationEffectV2", "only named ingress exposed"),
+)
+
+
+class BootTransitionEngineV2:
+    """Strict v2 boot reducer with engine-scoped normal transport epochs.
+
+    PCR-15 intentionally remains the sole process-global epoch and calls the
+    unchanged v1 latch helpers below.  Boot, failure, activation, and session
+    identities are private to this engine instance.
+    """
+
+    def __init__(self, binding: BootBindingV2) -> None:
+        _require(_is_issued_boot_binding_v2(binding), CP_BOOT_BINDING, "v2 boot engine requires a binder-issued sealed binding")
+        self.binding = binding
+        self.state = BootTransitionStateV2.BOOTSTRAP_PROC
+        self._pending: BootEffect | None = None
+        self._boot_transport: BootTransport | None = None
+        self._failure_transport: BootTransport | None = None
+        self._activation_transport: BootTransport | None = None
+        self._extend_transport: BootTransport | None = None
+        self._extend_request_issued = False
+        self._runtime_mapping: str | None = None
+        self._models_mapping: str | None = None
+        self._tmpfs_index = 0
+        self._control_index = 0
+        self._failure_kind: FailureEffectKind | None = None
+        self._failure_code = CP_BOOT_FAILURE_TRANSPORT
+        self._failure_stage = self.state.value
+        self._live_session_ids: set[int] = set()
+
+    @property
+    def contract_sha256(self) -> str:
+        return self.binding.boot_contract_sha256
+
+    @property
+    def pcr15_measurement_v2(self) -> bytes:
+        frame = lambda value: len(value).to_bytes(8, "big") + value
+        material = (
+            b"sol-spp-appliance-manifest-v2" + b"\0"
+            + frame(self.binding.accepted_manifest_bytes)
+            + frame(self.binding.boot_contract_bytes)
+            + frame(self.binding.module_plan_bytes)
+            + frame(self.binding.kernel_feature_contract_bytes)
+            + frame(self.binding.gpt_layout_rules_bytes)
+            + frame(self.binding.root_lock_bytes)
+            + frame(self.binding.runtime_closure_bytes)
+            + frame(self.binding.policy_bytes)
+            + frame(_OBSERVATION_SHAPE_V2_BYTES)
+        )
+        return hashlib.sha256(material).digest()
+
+    @property
+    def predicted_pcr15_v2(self) -> bytes:
+        return hashlib.sha256(b"\0" * 32 + self.pcr15_measurement_v2).digest()
+
+    @property
+    def application_roots(self) -> tuple[MutableRootV2, ...]:
+        ordinary = tuple(
+            MutableRootV2(item.path, item.size_bytes, item.mode, 0, 0, ("nosuid", "nodev", "noexec"), "ordinary")
+            for item in self.binding.runtime.tmpfs_mounts
+        )
+        jit = self.binding.boot_contract.jit_policy
+        if jit is None:
+            return ordinary
+        root = jit.workspace
+        return ordinary + (MutableRootV2(root.path, root.size_bytes, root.mode, 0, 0, ("nosuid", "nodev"), "jit_workspace"),)
+
+    def claim_boot_transports(self, boot_transport: BootTransport, failure_transport: BootTransport) -> None:
+        _require(self.state is BootTransitionStateV2.BOOTSTRAP_PROC and self._boot_transport is None and self._failure_transport is None, CP_BOOT_TRANSPORT_EPOCH, "boot transports must be claimed before bootstrap")
+        _require(boot_transport is not failure_transport, CP_BOOT_TRANSPORT_EPOCH, "boot and failure transports must differ")
+        self._boot_transport = boot_transport
+        self._failure_transport = failure_transport
+
+    def claim_activation_transport(self, activation_transport: BootTransport) -> None:
+        _require(self.state is BootTransitionStateV2.SERVING_TRANSPORT_CLAIMED and self._pending is None and self._activation_transport is None, CP_BOOT_TRANSPORT_EPOCH, "activation transport is not claimable")
+        _require(activation_transport is not self._boot_transport and activation_transport is not self._failure_transport, CP_BOOT_TRANSPORT_EPOCH, "activation transport must be a distinct epoch")
+        self._activation_transport = activation_transport
+        self.state = BootTransitionStateV2.JIT_INPUTS_CHECKED
+
+    def next_effect(self) -> BootEffect | None:
+        if self._pending is not None:
+            return self._pending
+        if self.state in (BootTransitionStateV2.SERVING_AVAILABLE, BootTransitionStateV2.POWEROFF):
+            return None
+        if self.state is BootTransitionStateV2.FAILED_NON_SERVING:
+            return self._failure_effect()
+        _require(self._boot_transport is not None and self._failure_transport is not None, CP_BOOT_TRANSPORT_EPOCH, "boot and failure transports must be claimed")
+        _require(self.state is not BootTransitionStateV2.SERVING_TRANSPORT_CLAIMED, CP_BOOT_GOLDEN_ORDER, "activation transport must be claimed before activation")
+        if self.state is BootTransitionStateV2.PCR15_EXTEND:
+            if not _claim_extend_transport():
+                self._fatal(CP_BOOT_LATCH)
+                raise ApplianceError(CP_BOOT_LATCH, "a PCR15 extend transport was already claimed for this process")
+            self._extend_transport = self._boot_transport
+            self._extend_request_issued = True
+            self._pending = _new_extend_pcr15_effect(self.contract_sha256, self.pcr15_measurement_v2)
+            return self._pending
+        self._pending = self._effect_for_state()
+        return self._pending
+
+    def advance(self, transport: BootTransport) -> BootTransitionStateV2:
+        if self.state is BootTransitionStateV2.FAILED_NON_SERVING:
+            return self._advance_failure(transport)
+        effect = self.next_effect()
+        _require(effect is not None, CP_BOOT_GOLDEN_ORDER, "v2 boot transition has no further normal effect")
+        expected = self._boot_transport if self.state.value <= BootTransitionStateV2.BOOT_TRANSPORT_CLOSED.value else self._activation_transport
+        # Enum string comparison is intentionally not used for authority: PCR
+        # closure is the hard epoch boundary.
+        if self.state in (
+            BootTransitionStateV2.BOOTSTRAP_PROC, BootTransitionStateV2.BOOTSTRAP_SYSFS, BootTransitionStateV2.BOOTSTRAP_DEVTMPFS, BootTransitionStateV2.BOOTSTRAP_RUN,
+            BootTransitionStateV2.INITIAL_NETWORK_APPLY, BootTransitionStateV2.INITIAL_NETWORK_READBACK, BootTransitionStateV2.CMDLINE, BootTransitionStateV2.PCR15_ZERO,
+            BootTransitionStateV2.DISK_LOCATORS, BootTransitionStateV2.RUNTIME_MAP, BootTransitionStateV2.RUNTIME_VERIFY, BootTransitionStateV2.RUNTIME_MAPPING_IDENTITY,
+            BootTransitionStateV2.MODELS_MAP, BootTransitionStateV2.MODELS_VERIFY, BootTransitionStateV2.MODELS_MAPPING_IDENTITY, BootTransitionStateV2.RUNTIME_MOUNT,
+            BootTransitionStateV2.RUNTIME_EXECUTABLE_CONFINEMENT, BootTransitionStateV2.MODELS_MOUNT, BootTransitionStateV2.MUTABLE_ROOTS_PRE, BootTransitionStateV2.TMPFS_CREATE,
+            BootTransitionStateV2.MUTABLE_ROOTS_POST, BootTransitionStateV2.MODULES, BootTransitionStateV2.MODULES_DISABLED, BootTransitionStateV2.MUTABLE_CONTROL,
+            BootTransitionStateV2.PCR15_EXTEND, BootTransitionStateV2.PCR15_READBACK, BootTransitionStateV2.BOOT_TRANSPORT_CLOSED,
+        ):
+            expected = self._boot_transport
+        else:
+            expected = self._activation_transport
+        if transport is not expected:
+            self._pending = None
+            self._fatal(CP_BOOT_TRANSPORT_EPOCH)
+            raise ApplianceError(CP_BOOT_TRANSPORT_EPOCH, "normal effect used a transport from another epoch")
+        try:
+            observation = transport.execute(effect)
+        except Exception:
+            self._pending = None
+            self._fatal(CP_BOOT_FAILURE_TRANSPORT)
+            raise ApplianceError(CP_BOOT_FAILURE_TRANSPORT, "typed normal transport failed") from None
+        return self._accept_normal(observation)
+
+    def accept(self, observation: BootObservation) -> BootTransitionStateV2:
+        """Accept a typed normal observation for deterministic reducer tests only."""
+
+        _require(self.state is not BootTransitionStateV2.FAILED_NON_SERVING, CP_BOOT_FAILURE_TRANSPORT, "failure acknowledgements require the failure transport")
+        return self._accept_normal(observation)
+
+    def _accept_normal(self, observation: BootObservation) -> BootTransitionStateV2:
+        effect = self._pending
+        if effect is None or observation.contract_sha256 != self.contract_sha256:
+            self._fatal(CP_BOOT_GOLDEN_ORDER)
+            raise ApplianceError(CP_BOOT_GOLDEN_ORDER, "v2 observation is stale, unordered, or from another contract")
+        self._pending = None
+        try:
+            self._check_observation(observation)
+        except ApplianceError:
+            code = CP_BOOT_PCR if self.state in (BootTransitionStateV2.PCR15_EXTEND, BootTransitionStateV2.PCR15_READBACK) else CP_BOOT_GOLDEN_ORDER
+            self._fatal(code)
+            raise
+        return self.state
+
+    def _effect_for_state(self) -> BootEffect:
+        contract = self.contract_sha256
+        runtime = self.binding.runtime
+        bootstrap_states = (BootTransitionStateV2.BOOTSTRAP_PROC, BootTransitionStateV2.BOOTSTRAP_SYSFS, BootTransitionStateV2.BOOTSTRAP_DEVTMPFS, BootTransitionStateV2.BOOTSTRAP_RUN)
+        if self.state in bootstrap_states:
+            return BootstrapMountEffectV2(contract, BOOTSTRAP_MOUNTS_V2[bootstrap_states.index(self.state)])
+        if self.state is BootTransitionStateV2.INITIAL_NETWORK_APPLY:
+            return ApplyNetworkPolicyEffectV2(contract, INITIAL_NETWORK_POLICY_V2)
+        if self.state is BootTransitionStateV2.INITIAL_NETWORK_READBACK:
+            return ReadNetworkPolicyEffectV2(contract, INITIAL_NETWORK_POLICY_V2)
+        if self.state is BootTransitionStateV2.CMDLINE:
+            return CheckCmdlineEffect(contract, runtime.cmdline)
+        if self.state is BootTransitionStateV2.PCR15_ZERO:
+            return ReadPcr15Effect(contract, b"\0" * 32)
+        if self.state is BootTransitionStateV2.DISK_LOCATORS:
+            return LocateExpectedDiskEffect(contract, self.binding.gpt_plan.disk_guid, runtime.disk_locators)
+        if self.state is BootTransitionStateV2.RUNTIME_MAP:
+            return MapVerityEffect(contract, runtime.runtime_policy_verity)
+        if self.state is BootTransitionStateV2.RUNTIME_VERIFY:
+            return VerifyVerityEffect(contract, runtime.runtime_policy_verity, self._mapping("runtime-policy"))
+        if self.state is BootTransitionStateV2.RUNTIME_MAPPING_IDENTITY:
+            return ReadMappingIdentityEffect(contract, runtime.runtime_policy_verity, self._mapping("runtime-policy"))
+        if self.state is BootTransitionStateV2.MODELS_MAP:
+            return MapVerityEffect(contract, runtime.models_verity)
+        if self.state is BootTransitionStateV2.MODELS_VERIFY:
+            return VerifyVerityEffect(contract, runtime.models_verity, self._mapping("models"))
+        if self.state is BootTransitionStateV2.MODELS_MAPPING_IDENTITY:
+            return ReadMappingIdentityEffect(contract, runtime.models_verity, self._mapping("models"))
+        if self.state is BootTransitionStateV2.RUNTIME_MOUNT:
+            return MountImageEffect(contract, "runtime-policy", runtime.runtime_policy_destination, ("ro", "nodev", "nosuid"))
+        if self.state is BootTransitionStateV2.RUNTIME_EXECUTABLE_CONFINEMENT:
+            return ConfineRuntimeExecutablesEffect(contract, runtime.executable_paths)
+        if self.state is BootTransitionStateV2.MODELS_MOUNT:
+            return MountImageEffect(contract, "models", runtime.models_destination, ("ro", "nodev", "nosuid", "noexec"))
+        if self.state is BootTransitionStateV2.MUTABLE_ROOTS_PRE:
+            return CheckMutableRootClassesEffectV2(contract, "pre", BOOTSTRAP_MOUNTS_V2, ())
+        if self.state is BootTransitionStateV2.TMPFS_CREATE:
+            return CreateTmpfsEffectV2(contract, self.application_roots[self._tmpfs_index])
+        if self.state is BootTransitionStateV2.MUTABLE_ROOTS_POST:
+            return CheckMutableRootClassesEffectV2(contract, "post", BOOTSTRAP_MOUNTS_V2, self.application_roots)
+        if self.state is BootTransitionStateV2.MODULES:
+            return LoadModulesEffect(contract, runtime.module_entries)
+        if self.state is BootTransitionStateV2.MODULES_DISABLED:
+            return CloseModulesEffect(contract)
+        if self.state is BootTransitionStateV2.MUTABLE_CONTROL:
+            return CloseMutableControlEffect(contract, runtime.mutable_control_order[self._control_index])
+        if self.state is BootTransitionStateV2.PCR15_READBACK:
+            return ReadPcr15Effect(contract, self.predicted_pcr15_v2)
+        if self.state is BootTransitionStateV2.BOOT_TRANSPORT_CLOSED:
+            return CloseTransportEffect(contract)
+        if self.state is BootTransitionStateV2.JIT_INPUTS_CHECKED:
+            return JitPolicyEffectV2(contract, "inputs_checked", self.binding.boot_contract.jit_policy)
+        if self.state is BootTransitionStateV2.JIT_PREPARE:
+            return JitPolicyEffectV2(contract, "prepare", self.binding.boot_contract.jit_policy)
+        if self.state is BootTransitionStateV2.JIT_OUTPUTS_CHECKED:
+            return JitPolicyEffectV2(contract, "outputs_checked", self.binding.boot_contract.jit_policy)
+        if self.state is BootTransitionStateV2.JIT_DISABLED:
+            return JitPolicyEffectV2(contract, "disabled", None)
+        if self.state is BootTransitionStateV2.SERVING_NETWORK_APPLY:
+            return ActivationEffectV2(contract, "serving_network_apply", SERVING_NETWORK_POLICY_V2)
+        if self.state is BootTransitionStateV2.SERVING_NETWORK_READBACK:
+            return ReadNetworkPolicyEffectV2(contract, SERVING_NETWORK_POLICY_V2)
+        if self.state in (BootTransitionStateV2.LISTENER_CREATE, BootTransitionStateV2.LISTENER_BIND, BootTransitionStateV2.SERVICE_START, BootTransitionStateV2.NETWORK_ACTIVATE):
+            return ActivationEffectV2(contract, self.state.value, SERVING_NETWORK_POLICY_V2 if self.state is BootTransitionStateV2.NETWORK_ACTIVATE else None)
+        if self.state is BootTransitionStateV2.SERVING_READY:
+            return _new_serving_ready_effect_v2(contract)
+        raise ApplianceError(CP_BOOT_GOLDEN_ORDER, "v2 state has no normal effect")
+
+    def _check_observation(self, observation: BootObservation) -> None:
+        state = self.state
+        runtime = self.binding.runtime
+        bootstrap_states = (BootTransitionStateV2.BOOTSTRAP_PROC, BootTransitionStateV2.BOOTSTRAP_SYSFS, BootTransitionStateV2.BOOTSTRAP_DEVTMPFS, BootTransitionStateV2.BOOTSTRAP_RUN)
+        if state in bootstrap_states:
+            expected = BOOTSTRAP_MOUNTS_V2[bootstrap_states.index(state)]
+            _require(type(observation) is BootstrapMountReadbackV2 and observation.mount == expected, CP_BOOT_BOOTSTRAP_MOUNT, "bootstrap mount readback is invalid")
+            self.state = BootTransitionStateV2(bootstrap_states[bootstrap_states.index(state) + 1].value) if state is not BootTransitionStateV2.BOOTSTRAP_RUN else BootTransitionStateV2.INITIAL_NETWORK_APPLY
+        elif state in (BootTransitionStateV2.INITIAL_NETWORK_APPLY, BootTransitionStateV2.INITIAL_NETWORK_READBACK):
+            _require(type(observation) is NetworkPolicyReadbackV2 and observation.policy == INITIAL_NETWORK_POLICY_V2, CP_BOOT_NETWORK_POLICY, "initial deny-all network readback is invalid")
+            self.state = BootTransitionStateV2.INITIAL_NETWORK_READBACK if state is BootTransitionStateV2.INITIAL_NETWORK_APPLY else BootTransitionStateV2.CMDLINE
+        elif state is BootTransitionStateV2.CMDLINE:
+            _require(type(observation) is CmdlineObservation and observation.cmdline == runtime.cmdline and observation.external_companions == (), CP_BOOT_OBSERVATION, "cmdline observation is invalid")
+            self.state = BootTransitionStateV2.PCR15_ZERO
+        elif state in (BootTransitionStateV2.PCR15_ZERO, BootTransitionStateV2.PCR15_READBACK):
+            expected = b"\0" * 32 if state is BootTransitionStateV2.PCR15_ZERO else self.predicted_pcr15_v2
+            _require(type(observation) is Pcr15Readback and observation.value == expected, CP_BOOT_PCR, "PCR15 readback disagrees")
+            self.state = BootTransitionStateV2.DISK_LOCATORS if state is BootTransitionStateV2.PCR15_ZERO else BootTransitionStateV2.BOOT_TRANSPORT_CLOSED
+        elif state is BootTransitionStateV2.DISK_LOCATORS:
+            _require(type(observation) is DiskLocatorsObservation and observation.disk_guid == self.binding.gpt_plan.disk_guid and observation.locators == runtime.disk_locators, CP_BOOT_OBSERVATION, "disk locator observation is invalid")
+            self.state = BootTransitionStateV2.RUNTIME_MAP
+        elif state in (BootTransitionStateV2.RUNTIME_MAP, BootTransitionStateV2.MODELS_MAP):
+            image = "runtime-policy" if state is BootTransitionStateV2.RUNTIME_MAP else "models"
+            pair = runtime.runtime_policy_verity if image == "runtime-policy" else runtime.models_verity
+            _require(type(observation) is VerityMappedObservation and observation.pair == pair and type(observation.mapping_identity) is str and observation.mapping_identity, CP_BOOT_OBSERVATION, "verity map observation is invalid")
+            if image == "runtime-policy":
+                self._runtime_mapping = observation.mapping_identity
+                self.state = BootTransitionStateV2.RUNTIME_VERIFY
+            else:
+                self._models_mapping = observation.mapping_identity
+                self.state = BootTransitionStateV2.MODELS_VERIFY
+        elif state in (BootTransitionStateV2.RUNTIME_VERIFY, BootTransitionStateV2.MODELS_VERIFY, BootTransitionStateV2.RUNTIME_MAPPING_IDENTITY, BootTransitionStateV2.MODELS_MAPPING_IDENTITY):
+            image = "runtime-policy" if state in (BootTransitionStateV2.RUNTIME_VERIFY, BootTransitionStateV2.RUNTIME_MAPPING_IDENTITY) else "models"
+            pair = runtime.runtime_policy_verity if image == "runtime-policy" else runtime.models_verity
+            _require(type(observation) in (VerityVerifiedObservation, MappingIdentityObservation) and observation.pair == pair and observation.mapping_identity == self._mapping(image), CP_BOOT_OBSERVATION, "verity identity observation is invalid")
+            transitions = {BootTransitionStateV2.RUNTIME_VERIFY: BootTransitionStateV2.RUNTIME_MAPPING_IDENTITY, BootTransitionStateV2.RUNTIME_MAPPING_IDENTITY: BootTransitionStateV2.MODELS_MAP, BootTransitionStateV2.MODELS_VERIFY: BootTransitionStateV2.MODELS_MAPPING_IDENTITY, BootTransitionStateV2.MODELS_MAPPING_IDENTITY: BootTransitionStateV2.RUNTIME_MOUNT}
+            self.state = transitions[state]
+        elif state in (BootTransitionStateV2.RUNTIME_MOUNT, BootTransitionStateV2.MODELS_MOUNT):
+            image = "runtime-policy" if state is BootTransitionStateV2.RUNTIME_MOUNT else "models"
+            destination = runtime.runtime_policy_destination if image == "runtime-policy" else runtime.models_destination
+            flags = ("ro", "nodev", "nosuid") if image == "runtime-policy" else ("ro", "nodev", "nosuid", "noexec")
+            _require(type(observation) is MountReadback and (observation.image_id, observation.destination, observation.flags) == (image, destination, flags), CP_BOOT_OBSERVATION, "image mount readback is invalid")
+            self.state = BootTransitionStateV2.RUNTIME_EXECUTABLE_CONFINEMENT if image == "runtime-policy" else BootTransitionStateV2.MUTABLE_ROOTS_PRE
+        elif state is BootTransitionStateV2.RUNTIME_EXECUTABLE_CONFINEMENT:
+            _require(type(observation) is RuntimeExecutableObservation and observation.executable_paths == runtime.executable_paths, CP_BOOT_OBSERVATION, "runtime executable confinement disagrees")
+            self.state = BootTransitionStateV2.MODELS_MOUNT
+        elif state in (BootTransitionStateV2.MUTABLE_ROOTS_PRE, BootTransitionStateV2.MUTABLE_ROOTS_POST):
+            roots = () if state is BootTransitionStateV2.MUTABLE_ROOTS_PRE else self.application_roots
+            phase = "pre" if state is BootTransitionStateV2.MUTABLE_ROOTS_PRE else "post"
+            _require(type(observation) is MutableRootClassesReadbackV2 and (observation.phase, observation.bootstrap_mounts, observation.application_roots) == (phase, BOOTSTRAP_MOUNTS_V2, roots), CP_BOOT_MUTABLE_ROOT_CLASS, "mutable root class readback is invalid")
+            self.state = BootTransitionStateV2.TMPFS_CREATE if state is BootTransitionStateV2.MUTABLE_ROOTS_PRE else BootTransitionStateV2.MODULES
+        elif state is BootTransitionStateV2.TMPFS_CREATE:
+            root = self.application_roots[self._tmpfs_index]
+            _require(type(observation) is TmpfsReadbackV2 and observation.root == root, CP_BOOT_MUTABLE_ROOT_CLASS, "tmpfs root readback is invalid")
+            self._tmpfs_index += 1
+            self.state = BootTransitionStateV2.TMPFS_CREATE if self._tmpfs_index < len(self.application_roots) else BootTransitionStateV2.MUTABLE_ROOTS_POST
+        elif state is BootTransitionStateV2.MODULES:
+            _require(type(observation) is ModuleReadback and observation.entries == tuple(item.identity for item in runtime.module_entries), CP_BOOT_OBSERVATION, "module readback is invalid")
+            self.state = BootTransitionStateV2.MODULES_DISABLED
+        elif state is BootTransitionStateV2.MODULES_DISABLED:
+            _require(type(observation) is ModulesDisabledReadback and observation.status is ModulesDisabledStatus.SET_TO_1, CP_BOOT_CONTROL, "modules_disabled readback is invalid")
+            self.state = BootTransitionStateV2.MUTABLE_CONTROL
+        elif state is BootTransitionStateV2.MUTABLE_CONTROL:
+            control = runtime.mutable_control_order[self._control_index]
+            _require(type(observation) is ControlReadback and observation.control == control and observation.status in (ControlReadbackStatus.DISABLED, ControlReadbackStatus.NOT_APPLICABLE_NONEXISTENT), CP_BOOT_CONTROL, "mutable control readback is invalid")
+            if observation.status is ControlReadbackStatus.NOT_APPLICABLE_NONEXISTENT:
+                _require(self._control_support(control) is KernelControlSupport.CONDITIONAL, CP_BOOT_CONTROL, "required mutable control is missing")
+            self._control_index += 1
+            self.state = BootTransitionStateV2.MUTABLE_CONTROL if self._control_index < len(runtime.mutable_control_order) else BootTransitionStateV2.PCR15_EXTEND
+        elif state is BootTransitionStateV2.PCR15_EXTEND:
+            _require(self._extend_request_issued and self._extend_transport is self._boot_transport and type(observation) is Pcr15ExtendObservation and type(observation.outcome) is Pcr15ExtendOutcome, CP_BOOT_LATCH, "v2 PCR extend has no shared-latch transport")
+            _record_extend_outcome(observation.outcome)
+            self.state = BootTransitionStateV2.PCR15_READBACK
+        elif state is BootTransitionStateV2.BOOT_TRANSPORT_CLOSED:
+            _require(type(observation) is TransportClosedObservation and observation.status is TransportClosureStatus.CLOSED, CP_BOOT_LATCH, "v2 boot transport closure is invalid")
+            _record_extend_transport_closed()
+            self._extend_transport = None
+            self.state = BootTransitionStateV2.SERVING_TRANSPORT_CLAIMED
+        elif state in (BootTransitionStateV2.JIT_INPUTS_CHECKED, BootTransitionStateV2.JIT_PREPARE, BootTransitionStateV2.JIT_OUTPUTS_CHECKED, BootTransitionStateV2.JIT_DISABLED):
+            action = {BootTransitionStateV2.JIT_INPUTS_CHECKED: "inputs_checked", BootTransitionStateV2.JIT_PREPARE: "prepare", BootTransitionStateV2.JIT_OUTPUTS_CHECKED: "outputs_checked", BootTransitionStateV2.JIT_DISABLED: "disabled"}[state]
+            policy = None if state is BootTransitionStateV2.JIT_DISABLED else self.binding.boot_contract.jit_policy
+            _require(type(observation) is JitPolicyReadbackV2 and (observation.action, observation.policy) == (action, policy), CP_BOOT_JIT_POLICY, "JIT policy observation is invalid")
+            if state is BootTransitionStateV2.JIT_INPUTS_CHECKED:
+                self.state = BootTransitionStateV2.JIT_PREPARE if policy is not None else BootTransitionStateV2.JIT_DISABLED
+            elif state is BootTransitionStateV2.JIT_PREPARE:
+                self.state = BootTransitionStateV2.JIT_OUTPUTS_CHECKED
+            else:
+                self.state = BootTransitionStateV2.SERVING_NETWORK_APPLY
+        elif state is BootTransitionStateV2.SERVING_NETWORK_READBACK:
+            _require(type(observation) is NetworkPolicyReadbackV2 and observation.policy == SERVING_NETWORK_POLICY_V2, CP_BOOT_NETWORK_POLICY, "serving network readback is invalid")
+            self.state = BootTransitionStateV2.LISTENER_CREATE
+        elif state in (BootTransitionStateV2.SERVING_NETWORK_APPLY, BootTransitionStateV2.LISTENER_CREATE, BootTransitionStateV2.LISTENER_BIND, BootTransitionStateV2.SERVICE_START, BootTransitionStateV2.NETWORK_ACTIVATE):
+            action = state.value
+            policy = SERVING_NETWORK_POLICY_V2 if state in (BootTransitionStateV2.SERVING_NETWORK_APPLY, BootTransitionStateV2.NETWORK_ACTIVATE) else None
+            _require(type(observation) is ActivationReadbackV2 and (observation.action, observation.policy) == (action, policy), CP_BOOT_NETWORK_POLICY, "activation observation is invalid")
+            transitions = {BootTransitionStateV2.SERVING_NETWORK_APPLY: BootTransitionStateV2.SERVING_NETWORK_READBACK, BootTransitionStateV2.SERVING_NETWORK_READBACK: BootTransitionStateV2.LISTENER_CREATE, BootTransitionStateV2.LISTENER_CREATE: BootTransitionStateV2.LISTENER_BIND, BootTransitionStateV2.LISTENER_BIND: BootTransitionStateV2.SERVICE_START, BootTransitionStateV2.SERVICE_START: BootTransitionStateV2.SERVING_READY, BootTransitionStateV2.NETWORK_ACTIVATE: BootTransitionStateV2.SERVING_AVAILABLE}
+            self.state = transitions[state]
+        elif state is BootTransitionStateV2.SERVING_READY:
+            _require(type(observation) is ServingReadyReadbackV2 and observation.ready, CP_BOOT_GOLDEN_ORDER, "serving ready observation is invalid")
+            self.state = BootTransitionStateV2.NETWORK_ACTIVATE
+        else:
+            raise ApplianceError(CP_BOOT_GOLDEN_ORDER, "v2 state cannot accept a normal observation")
+
+    def _mapping(self, image_id: str) -> str:
+        mapping = self._runtime_mapping if image_id == "runtime-policy" else self._models_mapping
+        _require(mapping is not None, CP_BOOT_GOLDEN_ORDER, "verity mapping identity is unavailable")
+        return mapping
+
+    def _control_support(self, control: str) -> KernelControlSupport:
+        for feature in self.binding.runtime.mutable_controls:
+            if feature.name == control:
+                return feature.support
+        raise ApplianceError(CP_BOOT_CONTROL, "v2 boot binding lacks a mutable control")
+
+    def _fatal(self, code: str) -> None:
+        if self.state not in (BootTransitionStateV2.FAILED_NON_SERVING, BootTransitionStateV2.SERVING_AVAILABLE, BootTransitionStateV2.POWEROFF):
+            self._failure_stage = self.state.value
+            self._failure_code = code
+            self.state = BootTransitionStateV2.FAILED_NON_SERVING
+            self._pending = None
+            self._failure_kind = FailureEffectKind.DIAGNOSTIC
+
+    def _failure_effect(self) -> BootEffect | None:
+        if self._failure_kind is FailureEffectKind.DIAGNOSTIC:
+            return SafeDiagnosticEffect(self.contract_sha256, SafeDiagnostic(self._failure_code, self._failure_stage, self.contract_sha256[:16]))
+        if self._failure_kind is FailureEffectKind.CLOSE_SERVING_NETWORK:
+            return CloseServingNetworkEffect(self.contract_sha256)
+        if self._failure_kind is FailureEffectKind.POWEROFF:
+            return PoweroffEffect(self.contract_sha256)
+        return None
+
+    def _advance_failure(self, transport: BootTransport) -> BootTransitionStateV2:
+        _require(transport is self._failure_transport and self._failure_kind is not None, CP_BOOT_FAILURE_TRANSPORT, "only the claimed failure transport may acknowledge appliance failure")
+        effect = self._failure_effect()
+        _require(effect is not None, CP_BOOT_FAILURE_TRANSPORT, "failure protocol is complete")
+        try:
+            observation = transport.execute(effect)
+        except Exception:
+            raise ApplianceError(CP_BOOT_FAILURE_TRANSPORT, "failure transport acknowledgement is pending") from None
+        _require(type(observation) is FailureEffectAcknowledgement and observation.contract_sha256 == self.contract_sha256 and observation.kind is self._failure_kind, CP_BOOT_FAILURE_TRANSPORT, "failure transport acknowledgement is invalid")
+        if self._failure_kind is FailureEffectKind.DIAGNOSTIC:
+            self._failure_kind = FailureEffectKind.CLOSE_SERVING_NETWORK
+        elif self._failure_kind is FailureEffectKind.CLOSE_SERVING_NETWORK:
+            self._failure_kind = FailureEffectKind.POWEROFF
+        else:
+            self._failure_kind = None
+            self.state = BootTransitionStateV2.POWEROFF
+        return self.state
+
+    def admit_serving_session(self, session_transport: BootTransport) -> "ServingSessionReducer":
+        _require(self.state is BootTransitionStateV2.SERVING_AVAILABLE, CP_BOOT_SERVING_SESSION, "serving session is unavailable before activation")
+        forbidden = (self._boot_transport, self._failure_transport, self._activation_transport)
+        _require(session_transport not in forbidden and id(session_transport) not in self._live_session_ids, CP_BOOT_TRANSPORT_EPOCH, "session transport must be fresh and epoch-disjoint")
+        identity = id(session_transport)
+        self._live_session_ids.add(identity)
+        return ServingSessionReducer(session_transport, lambda: self._live_session_ids.discard(identity))
+
+
+class ServingSessionState(Enum):
+    SESSION_CLAIMED = "session_claimed"
+    REQUEST_STARTED = "request_started"
+    CREDENTIAL_OBSERVED = "credential_observed"
+    ENTITLEMENT_DNS_QUERY = "entitlement_dns_query"
+    ENTITLEMENT_DNS_RESULT = "entitlement_dns_result"
+    ENTITLEMENT_TLS_CONNECT = "entitlement_tls_connect"
+    ENTITLEMENT_TLS_VERIFIED = "entitlement_tls_verified"
+    ENTITLEMENT_AUTHORIZE_REQUEST = "entitlement_authorize_request"
+    ENTITLEMENT_AUTHORIZED = "entitlement_authorized"
+    UPSTREAM_OPEN = "upstream_open"
+    UPSTREAM_OPENED = "upstream_opened"
+    REJECT_413 = "reject_413"
+    DRAIN_EXACT = "drain_exact"
+    REQUEST_CLOSED = "request_closed"
+    SESSION_CLOSED = "session_closed"
+
+
+@dataclass(frozen=True, init=False)
+class ServingSessionEffect(BootEffect):
+    action: str
+    upstream_role: str | None
+    body_length: int | None
+    bearer_sha256: str | None
+
+    def __init__(self, *_args: object, **_kwargs: object) -> None:
+        raise TypeError("ServingSessionEffect is reducer-issued")
+
+
+def _new_session_effect(action: str, *, upstream_role: str | None = None, body_length: int | None = None, bearer_sha256: str | None = None) -> ServingSessionEffect:
+    effect = object.__new__(ServingSessionEffect)
+    object.__setattr__(effect, "contract_sha256", "serving-session/v2")
+    object.__setattr__(effect, "action", action)
+    object.__setattr__(effect, "upstream_role", upstream_role)
+    object.__setattr__(effect, "body_length", body_length)
+    object.__setattr__(effect, "bearer_sha256", bearer_sha256)
+    return effect
+
+
+@dataclass(frozen=True)
+class ServingSessionReadback(BootObservation):
+    action: str
+    accepted: bool = True
+    close_requested: bool = False
+
+
+@dataclass(frozen=True)
+class CredentialObservedV2(BootObservation):
+    opaque_handle: object
+    bearer_sha256: str
+
+
+@dataclass(frozen=True)
+class EntitlementDnsResultV2(BootObservation):
+    ipv4_address: str
+    ttl_seconds: int
+
+
+@dataclass(frozen=True)
+class DrainExactReadbackV2(BootObservation):
+    drained_bytes: int
+    close_requested: bool = False
+
+
+class ServingSessionReducer:
+    """One channel-local entitlement reducer with no failure-transport surface."""
+
+    _OVERSIZE_AUDIO_BYTES: Final = 11534336
+    _HARD_CLOSE_AUDIO_BYTES: Final = 67108864
+
+    def __init__(self, session_transport: BootTransport, close_callback: object) -> None:
+        _require(callable(close_callback), CP_BOOT_SERVING_SESSION, "session close callback is invalid")
+        self._session_transport = session_transport
+        self._close_callback = close_callback
+        self.state = ServingSessionState.SESSION_CLAIMED
+        self._pending: ServingSessionEffect | None = None
+        self._path: str | None = None
+        self._body_length: int | None = None
+        self._opaque_handle: object | None = None
+        self._bearer_sha256: str | None = None
+        self._first_bearer_sha256: str | None = None
+        self._closed = False
+
+    def begin_request(self, *, path: str, body_length: int, opaque_handle: object) -> None:
+        _require(self.state in (ServingSessionState.SESSION_CLAIMED, ServingSessionState.REQUEST_CLOSED), CP_BOOT_SERVING_SESSION, "session cannot begin another request")
+        _require(type(path) is str and path.startswith("/") and type(body_length) is int and body_length >= 0, CP_BOOT_SERVING_SESSION, "request shape is invalid")
+        self._path = path
+        self._body_length = body_length
+        self._opaque_handle = opaque_handle
+        self._bearer_sha256 = None
+        self._pending = None
+        self.state = ServingSessionState.REQUEST_STARTED
+
+    def close(self) -> None:
+        if self.state is not ServingSessionState.SESSION_CLOSED:
+            self.state = ServingSessionState.SESSION_CLOSED
+            self._pending = None
+            if not self._closed:
+                self._closed = True
+                self._close_callback()  # private identity-release callback only
+
+    def next_effect(self) -> ServingSessionEffect | None:
+        if self._pending is not None:
+            return self._pending
+        if self.state in (ServingSessionState.SESSION_CLAIMED, ServingSessionState.REQUEST_CLOSED, ServingSessionState.SESSION_CLOSED):
+            return None
+        action = self.state.value
+        if self.state is ServingSessionState.UPSTREAM_OPEN:
+            action = "upstream_open"
+        if self.state is ServingSessionState.DRAIN_EXACT:
+            action = "drain_exact"
+        self._pending = _new_session_effect(
+            action,
+            upstream_role=self._upstream_role() if self.state is ServingSessionState.UPSTREAM_OPEN else None,
+            body_length=self._body_length if self.state in (ServingSessionState.REJECT_413, ServingSessionState.DRAIN_EXACT) else None,
+            bearer_sha256=self._bearer_sha256 if self.state is ServingSessionState.ENTITLEMENT_AUTHORIZE_REQUEST else None,
+        )
+        return self._pending
+
+    def advance(self, transport: BootTransport) -> ServingSessionState:
+        _require(transport is self._session_transport, CP_BOOT_SERVING_SESSION, "session effect requires its claimed transport")
+        effect = self.next_effect()
+        _require(effect is not None, CP_BOOT_SERVING_SESSION, "session state has no effect")
+        try:
+            observation = transport.execute(effect)
+        except Exception:
+            self.close()
+            raise ApplianceError(CP_BOOT_SERVING_SESSION, "session transport failed") from None
+        return self.accept(observation)
+
+    def accept(self, observation: BootObservation) -> ServingSessionState:
+        effect = self._pending
+        if effect is None or observation.contract_sha256 != "serving-session/v2":
+            self.close()
+            raise ApplianceError(CP_BOOT_SERVING_SESSION, "session observation is stale or malformed")
+        self._pending = None
+        try:
+            self._check_observation(observation)
+        except ApplianceError:
+            self.close()
+            raise
+        return self.state
+
+    def _check_observation(self, observation: BootObservation) -> None:
+        state = self.state
+        if state is ServingSessionState.CREDENTIAL_OBSERVED:
+            _require(type(observation) is CredentialObservedV2 and observation.opaque_handle is self._opaque_handle and _sha(observation.bearer_sha256), CP_BOOT_SERVING_SESSION, "credential observation is invalid")
+            if self._first_bearer_sha256 is not None:
+                _require(observation.bearer_sha256 == self._first_bearer_sha256, CP_BOOT_SERVING_SESSION, "later request used a different bearer address")
+            else:
+                self._first_bearer_sha256 = observation.bearer_sha256
+            self._bearer_sha256 = observation.bearer_sha256
+            self.state = ServingSessionState.ENTITLEMENT_DNS_QUERY
+            return
+        if state is ServingSessionState.ENTITLEMENT_DNS_RESULT:
+            _require(type(observation) is EntitlementDnsResultV2 and type(observation.ipv4_address) is str and observation.ipv4_address.count(".") == 3 and type(observation.ttl_seconds) is int and 1 <= observation.ttl_seconds <= 86400, CP_BOOT_SERVING_SESSION, "DNS observation is invalid")
+            self.state = ServingSessionState.ENTITLEMENT_TLS_CONNECT
+            return
+        if state is ServingSessionState.DRAIN_EXACT:
+            _require(type(observation) is DrainExactReadbackV2 and observation.drained_bytes == self._body_length, CP_BOOT_SERVING_SESSION, "oversize audio drain was not exact")
+            if observation.close_requested or (self._body_length or 0) > self._HARD_CLOSE_AUDIO_BYTES:
+                self.close()
+            else:
+                self.state = ServingSessionState.REQUEST_CLOSED
+            return
+        _require(type(observation) is ServingSessionReadback and observation.action == state.value, CP_BOOT_SERVING_SESSION, "session readback is invalid")
+        if state is ServingSessionState.REQUEST_STARTED:
+            self.state = ServingSessionState.CREDENTIAL_OBSERVED
+        elif state is ServingSessionState.ENTITLEMENT_DNS_QUERY:
+            self.state = ServingSessionState.ENTITLEMENT_DNS_RESULT
+        elif state is ServingSessionState.ENTITLEMENT_TLS_CONNECT:
+            self.state = ServingSessionState.ENTITLEMENT_TLS_VERIFIED
+        elif state is ServingSessionState.ENTITLEMENT_TLS_VERIFIED:
+            _require(observation.accepted, CP_BOOT_SERVING_SESSION, "entitlement TLS verification failed")
+            self.state = ServingSessionState.ENTITLEMENT_AUTHORIZE_REQUEST
+        elif state is ServingSessionState.ENTITLEMENT_AUTHORIZE_REQUEST:
+            self.state = ServingSessionState.ENTITLEMENT_AUTHORIZED
+        elif state is ServingSessionState.ENTITLEMENT_AUTHORIZED:
+            _require(observation.accepted, CP_BOOT_SERVING_SESSION, "entitlement was denied")
+            if self._is_oversize_audio():
+                self.state = ServingSessionState.REJECT_413
+            else:
+                self.state = ServingSessionState.UPSTREAM_OPEN
+        elif state is ServingSessionState.UPSTREAM_OPEN:
+            _require(observation.accepted, CP_BOOT_SERVING_SESSION, "upstream open failed")
+            self.state = ServingSessionState.UPSTREAM_OPENED
+        elif state is ServingSessionState.UPSTREAM_OPENED:
+            self.state = ServingSessionState.REQUEST_CLOSED
+        elif state is ServingSessionState.REJECT_413:
+            if observation.close_requested or (self._body_length or 0) > self._HARD_CLOSE_AUDIO_BYTES:
+                self.close()
+            else:
+                self.state = ServingSessionState.DRAIN_EXACT
+        else:
+            raise ApplianceError(CP_BOOT_SERVING_SESSION, "session action is unavailable")
+
+    def _is_oversize_audio(self) -> bool:
+        return bool(self._path and self._path.startswith("/v1/audio/") and (self._body_length or 0) > self._OVERSIZE_AUDIO_BYTES)
+
+    def _upstream_role(self) -> str:
+        _require(self._path is not None, CP_BOOT_SERVING_SESSION, "session request path is unavailable")
+        return "asr" if self._path.startswith("/v1/audio/") else "inference"
