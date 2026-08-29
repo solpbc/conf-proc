@@ -139,6 +139,42 @@ def _reach(engine: boot.BootTransitionEngineV2, target: boot.BootTransitionState
             engine.advance(boot_transport if engine.state.value != boot.BootTransitionStateV2.JIT_INPUTS_CHECKED.value and engine._activation_transport is None else (activation if engine._activation_transport is not None else boot_transport))
 
 
+def _serving_engine() -> boot.BootTransitionEngineV2:
+    engine = boot.BootTransitionEngineV2(_binding())
+    engine.claim_boot_transports(_Transport(), _Transport())
+    engine.state = boot.BootTransitionStateV2.SERVING_AVAILABLE
+    return engine
+
+
+def _advance_to_dns_result(session: boot.ServingSessionReducer, handle: object) -> boot.ServingSessionEffect:
+    effect = session.next_effect()
+    assert effect is not None
+    session.accept(boot.ServingSessionReadback(effect.contract_sha256, effect.action))
+    effect = session.next_effect()
+    assert effect is not None
+    session.accept(boot.CredentialObservedV2(effect.contract_sha256, handle, _sha(b"session bearer")))
+    effect = session.next_effect()
+    assert effect is not None
+    session.accept(boot.ServingSessionReadback(effect.contract_sha256, effect.action))
+    effect = session.next_effect()
+    assert effect is not None
+    return effect
+
+
+def _dns_result_pending(engine: boot.BootTransitionEngineV2) -> tuple[boot.ServingSessionReducer, boot.ServingSessionEffect]:
+    session = engine.admit_serving_session(_Transport())
+    handle = object()
+    session.begin_request(path="/v1/chat/completions", body_length=1, opaque_handle=handle)
+    return session, _advance_to_dns_result(session, handle)
+
+
+def _finish_request(session: boot.ServingSessionReducer) -> None:
+    while session.state is not boot.ServingSessionState.REQUEST_CLOSED:
+        effect = session.next_effect()
+        assert effect is not None
+        session.accept(boot.ServingSessionReadback(effect.contract_sha256, effect.action))
+
+
 class BootV2Tests(unittest.TestCase):
     def test_a_schema_matrix_and_dispatch(self) -> None:
         docs = _v2_docs()
@@ -313,7 +349,7 @@ class BootV2Tests(unittest.TestCase):
         empty.close()
         self.assertIsNone(empty.next_effect())
 
-        def accept_until_closed(session: boot.ServingSessionReducer, *, path: str, body_length: int, bearer: str) -> list[boot.ServingSessionEffect]:
+        def accept_until_closed(session: boot.ServingSessionReducer, *, path: str, body_length: int, bearer: str, dns_address: str, dns_ttl: int, tls_age: int = 0) -> list[boot.ServingSessionEffect]:
             handle = object()
             session.begin_request(path=path, body_length=body_length, opaque_handle=handle)
             effects: list[boot.ServingSessionEffect] = []
@@ -325,7 +361,9 @@ class BootV2Tests(unittest.TestCase):
                 if session.state is boot.ServingSessionState.CREDENTIAL_OBSERVED:
                     observation = boot.CredentialObservedV2(effect.contract_sha256, handle, bearer)
                 elif session.state is boot.ServingSessionState.ENTITLEMENT_DNS_RESULT:
-                    observation = boot.EntitlementDnsResultV2(effect.contract_sha256, "203.0.113.8", 60)
+                    observation = boot.EntitlementDnsResultV2(effect.contract_sha256, effect.token, dns_address, dns_ttl)
+                elif session.state is boot.ServingSessionState.ENTITLEMENT_TLS_CONNECT:
+                    observation = boot.EntitlementTlsConnectedV2(effect.contract_sha256, effect.token, effect.ipv4_address, tls_age)
                 else:
                     observation = boot.ServingSessionReadback(effect.contract_sha256, effect.action)
                 session.accept(observation)
@@ -333,7 +371,7 @@ class BootV2Tests(unittest.TestCase):
 
         bearer = _sha(b"session bearer")
         session = engine.admit_serving_session(_Transport())
-        effects = accept_until_closed(session, path="/v1/chat/completions", body_length=4, bearer=bearer)
+        effects = accept_until_closed(session, path="/v1/chat/completions", body_length=4, bearer=bearer, dns_address="203.0.113.8", dns_ttl=60)
         self.assertEqual(
             [effect.action for effect in effects],
             [
@@ -347,13 +385,18 @@ class BootV2Tests(unittest.TestCase):
         authorization = next(effect for effect in effects if effect.action == "entitlement_authorize_request")
         self.assertEqual(authorization.bearer_sha256, bearer)
         self.assertFalse(hasattr(authorization, "opaque_handle"))
-        accept_until_closed(session, path="/v1/audio/transcriptions", body_length=1, bearer=bearer)
+        tls_connect = next(effect for effect in effects if effect.action == "entitlement_tls_connect")
+        self.assertEqual((tls_connect.ipv4_address, tls_connect.ttl_seconds), ("203.0.113.8", 60))
+        audio_effects = accept_until_closed(session, path="/v1/audio/transcriptions", body_length=1, bearer=bearer, dns_address="198.51.100.44", dns_ttl=3600)
+        audio_tls_connect = next(effect for effect in audio_effects if effect.action == "entitlement_tls_connect")
+        self.assertEqual((audio_tls_connect.ipv4_address, audio_tls_connect.ttl_seconds), ("198.51.100.44", 3600))
         with self.assertRaises(ApplianceError):
-            accept_until_closed(session, path="/v1/chat/completions", body_length=1, bearer=_sha(b"another bearer"))
+            accept_until_closed(session, path="/v1/chat/completions", body_length=1, bearer=_sha(b"another bearer"), dns_address="203.0.113.8", dns_ttl=60)
         self.assertIs(session.state, boot.ServingSessionState.SESSION_CLOSED)
 
         oversized = engine.admit_serving_session(_Transport())
         handle = object()
+        oversized_address, oversized_ttl, oversized_age = "192.0.2.55", 300, 299
         oversized.begin_request(path="/v1/audio/transcriptions", body_length=11534337, opaque_handle=handle)
         while oversized.state is not boot.ServingSessionState.REJECT_413:
             effect = oversized.next_effect()
@@ -362,7 +405,10 @@ class BootV2Tests(unittest.TestCase):
             if oversized.state is boot.ServingSessionState.CREDENTIAL_OBSERVED:
                 observation = boot.CredentialObservedV2(effect.contract_sha256, handle, bearer)
             elif oversized.state is boot.ServingSessionState.ENTITLEMENT_DNS_RESULT:
-                observation = boot.EntitlementDnsResultV2(effect.contract_sha256, "203.0.113.8", 60)
+                observation = boot.EntitlementDnsResultV2(effect.contract_sha256, effect.token, oversized_address, oversized_ttl)
+            elif oversized.state is boot.ServingSessionState.ENTITLEMENT_TLS_CONNECT:
+                self.assertEqual((effect.ipv4_address, effect.ttl_seconds), (oversized_address, oversized_ttl))
+                observation = boot.EntitlementTlsConnectedV2(effect.contract_sha256, effect.token, effect.ipv4_address, oversized_age)
             else:
                 observation = boot.ServingSessionReadback(effect.contract_sha256, effect.action)
             oversized.accept(observation)
@@ -409,6 +455,150 @@ class BootV2Tests(unittest.TestCase):
         session.begin_request(path="/v1/chat/completions", body_length=1, opaque_handle=object())
         with self.assertRaises(ApplianceError):
             session.advance(session_transport)
+        self.assertIs(session.state, boot.ServingSessionState.SESSION_CLOSED)
+
+    def test_m_serving_session_dns_requires_canonical_ipv4_and_ttl(self) -> None:
+        for address in ("0.0.0.0", "255.255.255.255", "0.255.0.255", "10.0.255.1"):
+            with self.subTest(valid_address=address):
+                session, effect = _dns_result_pending(_serving_engine())
+                self.assertIs(
+                    session.accept(boot.EntitlementDnsResultV2(effect.contract_sha256, effect.token, address, 60)),
+                    boot.ServingSessionState.ENTITLEMENT_TLS_CONNECT,
+                )
+
+        invalid_cases = (
+            ("non_numeric", "a.b.c.d", 60),
+            ("octet_too_large", "256.1.1.1", 60),
+            ("too_few_parts", "1.2.3", 60),
+            ("five_parts", "1.2.3.4.5", 60),
+            ("whitespace", " 1.2.3.4", 60),
+            ("signed", "-1.2.3.4", 60),
+            ("unicode_digit", "۱.2.3.4", 60),
+            ("leading_zero", "01.2.3.4", 60),
+            ("ipv6", "::1", 60),
+            ("empty", "", 60),
+            ("ttl_zero", "203.0.113.8", 0),
+            ("ttl_too_large", "203.0.113.8", 86401),
+            ("ttl_bool", "203.0.113.8", True),
+            ("ttl_string", "203.0.113.8", "60"),
+        )
+        for label, address, ttl in invalid_cases:
+            with self.subTest(invalid_case=label):
+                session, effect = _dns_result_pending(_serving_engine())
+                with self.assertRaises(ApplianceError):
+                    session.accept(boot.EntitlementDnsResultV2(effect.contract_sha256, effect.token, address, ttl))
+                self.assertIs(session.state, boot.ServingSessionState.SESSION_CLOSED)
+
+    def test_n_serving_session_dns_tokens_are_session_and_request_local(self) -> None:
+        engine = _serving_engine()
+        first, first_effect = _dns_result_pending(engine)
+        second, second_effect = _dns_result_pending(engine)
+        self.assertIsNot(first_effect.token, second_effect.token)
+        with self.assertRaises(ApplianceError):
+            first.accept(boot.EntitlementDnsResultV2(first_effect.contract_sha256, second_effect.token, "203.0.113.8", 60))
+        self.assertIs(first.state, boot.ServingSessionState.SESSION_CLOSED)
+        self.assertIs(second.state, boot.ServingSessionState.ENTITLEMENT_DNS_RESULT)
+
+        session, first_dns_effect = _dns_result_pending(_serving_engine())
+        first_dns_observation = boot.EntitlementDnsResultV2(first_dns_effect.contract_sha256, first_dns_effect.token, "203.0.113.8", 60)
+        session.accept(first_dns_observation)
+        first_tls_effect = session.next_effect()
+        self.assertIsNotNone(first_tls_effect)
+        assert first_tls_effect is not None
+        self.assertEqual((first_tls_effect.ipv4_address, first_tls_effect.ttl_seconds), ("203.0.113.8", 60))
+        session.accept(boot.EntitlementTlsConnectedV2(first_tls_effect.contract_sha256, first_tls_effect.token, first_tls_effect.ipv4_address, 0))
+        _finish_request(session)
+        self.assertIs(session.state, boot.ServingSessionState.REQUEST_CLOSED)
+
+        second_handle = object()
+        session.begin_request(path="/v1/chat/completions", body_length=1, opaque_handle=second_handle)
+        second_dns_effect = _advance_to_dns_result(session, second_handle)
+        self.assertIsNot(first_dns_effect.token, second_dns_effect.token)
+        with self.assertRaises(ApplianceError):
+            session.accept(first_dns_observation)
+        self.assertIs(session.state, boot.ServingSessionState.SESSION_CLOSED)
+
+    def test_o_serving_session_tls_connect_ack_is_typed_and_bound(self) -> None:
+        for age in (0, 59):
+            with self.subTest(valid_age=age):
+                session, dns_effect = _dns_result_pending(_serving_engine())
+                session.accept(boot.EntitlementDnsResultV2(dns_effect.contract_sha256, dns_effect.token, "203.0.113.8", 60))
+                effect = session.next_effect()
+                self.assertIsNotNone(effect)
+                assert effect is not None
+                self.assertIs(
+                    session.accept(boot.EntitlementTlsConnectedV2(effect.contract_sha256, effect.token, effect.ipv4_address, age)),
+                    boot.ServingSessionState.ENTITLEMENT_TLS_VERIFIED,
+                )
+
+        invalid_cases = (
+            ("ttl_boundary", "203.0.113.8", 60),
+            ("older_than_ttl", "203.0.113.8", 120),
+            ("negative_age", "203.0.113.8", -1),
+            ("bool_age", "203.0.113.8", True),
+            ("string_age", "203.0.113.8", "0"),
+            ("changed_address", "198.51.100.44", 0),
+        )
+        for label, address, age in invalid_cases:
+            with self.subTest(invalid_case=label):
+                session, dns_effect = _dns_result_pending(_serving_engine())
+                session.accept(boot.EntitlementDnsResultV2(dns_effect.contract_sha256, dns_effect.token, "203.0.113.8", 60))
+                effect = session.next_effect()
+                self.assertIsNotNone(effect)
+                assert effect is not None
+                with self.assertRaises(ApplianceError):
+                    session.accept(boot.EntitlementTlsConnectedV2(effect.contract_sha256, effect.token, address, age))
+                self.assertIs(session.state, boot.ServingSessionState.SESSION_CLOSED)
+
+        session, dns_effect = _dns_result_pending(_serving_engine())
+        session.accept(boot.EntitlementDnsResultV2(dns_effect.contract_sha256, dns_effect.token, "203.0.113.8", 60))
+        effect = session.next_effect()
+        self.assertIsNotNone(effect)
+        assert effect is not None
+        replayed = boot.EntitlementTlsConnectedV2(effect.contract_sha256, effect.token, effect.ipv4_address, 0)
+        session.accept(replayed)
+        with self.assertRaises(ApplianceError):
+            session.accept(replayed)
+        self.assertIs(session.state, boot.ServingSessionState.SESSION_CLOSED)
+
+        engine = _serving_engine()
+        first, first_dns_effect = _dns_result_pending(engine)
+        second, second_dns_effect = _dns_result_pending(engine)
+        first.accept(boot.EntitlementDnsResultV2(first_dns_effect.contract_sha256, first_dns_effect.token, "203.0.113.8", 60))
+        second.accept(boot.EntitlementDnsResultV2(second_dns_effect.contract_sha256, second_dns_effect.token, "203.0.113.8", 60))
+        first_tls_effect = first.next_effect()
+        second_tls_effect = second.next_effect()
+        self.assertIsNotNone(first_tls_effect)
+        self.assertIsNotNone(second_tls_effect)
+        assert first_tls_effect is not None and second_tls_effect is not None
+        self.assertIsNot(first_tls_effect.token, second_tls_effect.token)
+        with self.assertRaises(ApplianceError):
+            first.accept(boot.EntitlementTlsConnectedV2(first_tls_effect.contract_sha256, second_tls_effect.token, first_tls_effect.ipv4_address, 0))
+        self.assertIs(first.state, boot.ServingSessionState.SESSION_CLOSED)
+        self.assertIs(second.state, boot.ServingSessionState.ENTITLEMENT_TLS_CONNECT)
+        self.assertIs(
+            second.accept(boot.EntitlementTlsConnectedV2(second_tls_effect.contract_sha256, second_tls_effect.token, second_tls_effect.ipv4_address, 0)),
+            boot.ServingSessionState.ENTITLEMENT_TLS_VERIFIED,
+        )
+
+        session, first_dns_effect = _dns_result_pending(_serving_engine())
+        session.accept(boot.EntitlementDnsResultV2(first_dns_effect.contract_sha256, first_dns_effect.token, "203.0.113.8", 60))
+        first_tls_effect = session.next_effect()
+        self.assertIsNotNone(first_tls_effect)
+        assert first_tls_effect is not None
+        first_tls_observation = boot.EntitlementTlsConnectedV2(first_tls_effect.contract_sha256, first_tls_effect.token, first_tls_effect.ipv4_address, 0)
+        session.accept(first_tls_observation)
+        _finish_request(session)
+        second_handle = object()
+        session.begin_request(path="/v1/chat/completions", body_length=1, opaque_handle=second_handle)
+        second_dns_effect = _advance_to_dns_result(session, second_handle)
+        session.accept(boot.EntitlementDnsResultV2(second_dns_effect.contract_sha256, second_dns_effect.token, "198.51.100.44", 120))
+        second_tls_effect = session.next_effect()
+        self.assertIsNotNone(second_tls_effect)
+        assert second_tls_effect is not None
+        self.assertIsNot(first_tls_effect.token, second_tls_effect.token)
+        with self.assertRaises(ApplianceError):
+            session.accept(first_tls_observation)
         self.assertIs(session.state, boot.ServingSessionState.SESSION_CLOSED)
 
     def test_z_shared_pcr_latch_rejects_v2_after_v1_claim(self) -> None:

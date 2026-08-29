@@ -67,7 +67,7 @@ BOOT_PAYLOAD_SOURCE_AUTHORITY: Final = (
     _SourceAuthority("/usr/lib/spp/conf_proc_provenance_v2.py", "support", 0o444, 21957, "e94a0818b2d14168190ef7ed490cc147eb18dafd837087eab883630958b59ccd"),
     _SourceAuthority("/usr/lib/spp/conf_proc_provenance_v2_manifest.py", "support", 0o444, 16846, "bd3c3ba87c7f6db52759e9f5dd16a5d447b5521c24f714043492ad713549e399"),
     _SourceAuthority("/usr/lib/spp/conf_proc_reasons.py", "support", 0o444, 12571, "c56b629a0fc156860c7400d6bc6884c1f41c8a9e4b0626ef4f2821f71102067a"),
-    _SourceAuthority("/usr/lib/spp/conf_proc_spp_boot.py", "engine", 0o444, 145028, "45c3884520fd2a22f7920517bb7cd9078172f1dc7111e02c07f8f667c0b28336"),
+    _SourceAuthority("/usr/lib/spp/conf_proc_spp_boot.py", "engine", 0o444, 147664, "c1dfba4c4ca71cf64ab8ecef12440950edab88f6ef3e2fb73791fc1f900076a6"),
 )
 _EXPECTED_LITERAL_SOURCE_ROWS: Final = (
     ("/usr/lib/spp/conf_proc_geometry.py", "support", 0o444, 2725, "f8273165758c6460bb10d840cb67097a423df819c449119ad15d57b21e05205a"),
@@ -78,7 +78,7 @@ _EXPECTED_LITERAL_SOURCE_ROWS: Final = (
     ("/usr/lib/spp/conf_proc_provenance_v2.py", "support", 0o444, 21957, "e94a0818b2d14168190ef7ed490cc147eb18dafd837087eab883630958b59ccd"),
     ("/usr/lib/spp/conf_proc_provenance_v2_manifest.py", "support", 0o444, 16846, "bd3c3ba87c7f6db52759e9f5dd16a5d447b5521c24f714043492ad713549e399"),
     ("/usr/lib/spp/conf_proc_reasons.py", "support", 0o444, 12571, "c56b629a0fc156860c7400d6bc6884c1f41c8a9e4b0626ef4f2821f71102067a"),
-    ("/usr/lib/spp/conf_proc_spp_boot.py", "engine", 0o444, 145028, "45c3884520fd2a22f7920517bb7cd9078172f1dc7111e02c07f8f667c0b28336"),
+    ("/usr/lib/spp/conf_proc_spp_boot.py", "engine", 0o444, 147664, "c1dfba4c4ca71cf64ab8ecef12440950edab88f6ef3e2fb73791fc1f900076a6"),
 )
 _EXPECTED_LOCAL_IMPORTS: Final = {
     "conf_proc_spp_boot": frozenset({"conf_proc_geometry", "conf_proc_json", "conf_proc_lock", "conf_proc_module_authority", "conf_proc_policy", "conf_proc_provenance_v2", "conf_proc_provenance_v2_manifest", "conf_proc_reasons"}),
@@ -269,7 +269,7 @@ def _validate_literal_authority() -> None:
             engine_count += 1
         elif item.role != "support":
             _error(CP_SPP_PAYLOAD_AUTHORITY)
-    if engine_count != 1 or sum(item.size_bytes for item in rows) != 244654 or sum(item.size_bytes for item in rows) > _MAX_TOTAL_BYTES:
+    if engine_count != 1 or sum(item.size_bytes for item in rows) != 247290 or sum(item.size_bytes for item in rows) > _MAX_TOTAL_BYTES:
         _error(CP_SPP_PAYLOAD_AUTHORITY)
     paths = sorted(seen, key=lambda value: value.encode("utf-8"))
     if any(right.startswith(left + "/") for left, right in zip(paths, paths[1:], strict=False)):

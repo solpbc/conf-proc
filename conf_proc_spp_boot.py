@@ -73,6 +73,7 @@ GPT_LAYOUT_RULES_SCHEMA: Final = "conf-proc-spp-gpt-layout-rules/v1"
 KERNEL_FEATURE_CONTRACT_SCHEMA: Final = "conf-proc-kernel-features/v1"
 
 _SHA_CHARS: Final = frozenset("0123456789abcdef")
+_DECIMAL_DIGIT_CHARS: Final = frozenset("0123456789")
 _IMAGE_ORDER: Final = ("models", "runtime-policy")
 _CONTROL_ORDER: Final = (
     "module_loading",
@@ -129,6 +130,22 @@ def _absolute_path(value: object) -> bool:
         and "\x00" not in value
         and posixpath.normpath(value) == value
     )
+
+
+def _ipv4(value: object) -> bool:
+    if type(value) is not str:
+        return False
+    parts = value.split(".")
+    if len(parts) != 4:
+        return False
+    for part in parts:
+        if not (1 <= len(part) <= 3) or not (set(part) <= _DECIMAL_DIGIT_CHARS):
+            return False
+        if len(part) > 1 and part[0] == "0":
+            return False
+        if int(part) > 255:
+            return False
+    return True
 
 
 def _paths_overlap(first: str, second: str) -> bool:
@@ -2542,18 +2559,24 @@ class ServingSessionEffect(BootEffect):
     upstream_role: str | None
     body_length: int | None
     bearer_sha256: str | None
+    token: object | None
+    ipv4_address: str | None
+    ttl_seconds: int | None
 
     def __init__(self, *_args: object, **_kwargs: object) -> None:
         raise TypeError("ServingSessionEffect is reducer-issued")
 
 
-def _new_session_effect(action: str, *, upstream_role: str | None = None, body_length: int | None = None, bearer_sha256: str | None = None) -> ServingSessionEffect:
+def _new_session_effect(action: str, *, upstream_role: str | None = None, body_length: int | None = None, bearer_sha256: str | None = None, token: object | None = None, ipv4_address: str | None = None, ttl_seconds: int | None = None) -> ServingSessionEffect:
     effect = object.__new__(ServingSessionEffect)
     object.__setattr__(effect, "contract_sha256", "serving-session/v2")
     object.__setattr__(effect, "action", action)
     object.__setattr__(effect, "upstream_role", upstream_role)
     object.__setattr__(effect, "body_length", body_length)
     object.__setattr__(effect, "bearer_sha256", bearer_sha256)
+    object.__setattr__(effect, "token", token)
+    object.__setattr__(effect, "ipv4_address", ipv4_address)
+    object.__setattr__(effect, "ttl_seconds", ttl_seconds)
     return effect
 
 
@@ -2572,8 +2595,16 @@ class CredentialObservedV2(BootObservation):
 
 @dataclass(frozen=True)
 class EntitlementDnsResultV2(BootObservation):
+    token: object
     ipv4_address: str
     ttl_seconds: int
+
+
+@dataclass(frozen=True)
+class EntitlementTlsConnectedV2(BootObservation):
+    token: object
+    ipv4_address: str
+    dns_age_seconds: int
 
 
 @dataclass(frozen=True)
@@ -2598,6 +2629,10 @@ class ServingSessionReducer:
         self._body_length: int | None = None
         self._opaque_handle: object | None = None
         self._bearer_sha256: str | None = None
+        self._dns_token: object | None = None
+        self._tls_token: object | None = None
+        self._dns_ipv4_address: str | None = None
+        self._dns_ttl_seconds: int | None = None
         self._first_bearer_sha256: str | None = None
         self._closed = False
 
@@ -2608,6 +2643,10 @@ class ServingSessionReducer:
         self._body_length = body_length
         self._opaque_handle = opaque_handle
         self._bearer_sha256 = None
+        self._dns_token = None
+        self._tls_token = None
+        self._dns_ipv4_address = None
+        self._dns_ttl_seconds = None
         self._pending = None
         self.state = ServingSessionState.REQUEST_STARTED
 
@@ -2629,11 +2668,25 @@ class ServingSessionReducer:
             action = "upstream_open"
         if self.state is ServingSessionState.DRAIN_EXACT:
             action = "drain_exact"
+        token: object | None = None
+        ipv4_address: str | None = None
+        ttl_seconds: int | None = None
+        if self.state is ServingSessionState.ENTITLEMENT_DNS_RESULT:
+            self._dns_token = object()
+            token = self._dns_token
+        elif self.state is ServingSessionState.ENTITLEMENT_TLS_CONNECT:
+            self._tls_token = object()
+            token = self._tls_token
+            ipv4_address = self._dns_ipv4_address
+            ttl_seconds = self._dns_ttl_seconds
         self._pending = _new_session_effect(
             action,
             upstream_role=self._upstream_role() if self.state is ServingSessionState.UPSTREAM_OPEN else None,
             body_length=self._body_length if self.state in (ServingSessionState.REJECT_413, ServingSessionState.DRAIN_EXACT) else None,
             bearer_sha256=self._bearer_sha256 if self.state is ServingSessionState.ENTITLEMENT_AUTHORIZE_REQUEST else None,
+            token=token,
+            ipv4_address=ipv4_address,
+            ttl_seconds=ttl_seconds,
         )
         return self._pending
 
@@ -2673,7 +2726,17 @@ class ServingSessionReducer:
             self.state = ServingSessionState.ENTITLEMENT_DNS_QUERY
             return
         if state is ServingSessionState.ENTITLEMENT_DNS_RESULT:
-            _require(type(observation) is EntitlementDnsResultV2 and type(observation.ipv4_address) is str and observation.ipv4_address.count(".") == 3 and type(observation.ttl_seconds) is int and 1 <= observation.ttl_seconds <= 86400, CP_BOOT_SERVING_SESSION, "DNS observation is invalid")
+            _require(
+                type(observation) is EntitlementDnsResultV2
+                and observation.token is self._dns_token
+                and _ipv4(observation.ipv4_address)
+                and type(observation.ttl_seconds) is int
+                and 1 <= observation.ttl_seconds <= 86400,
+                CP_BOOT_SERVING_SESSION,
+                "DNS observation is invalid",
+            )
+            self._dns_ipv4_address = observation.ipv4_address
+            self._dns_ttl_seconds = observation.ttl_seconds
             self.state = ServingSessionState.ENTITLEMENT_TLS_CONNECT
             return
         if state is ServingSessionState.DRAIN_EXACT:
@@ -2683,13 +2746,23 @@ class ServingSessionReducer:
             else:
                 self.state = ServingSessionState.REQUEST_CLOSED
             return
+        if state is ServingSessionState.ENTITLEMENT_TLS_CONNECT:
+            _require(
+                type(observation) is EntitlementTlsConnectedV2
+                and observation.token is self._tls_token
+                and observation.ipv4_address == self._dns_ipv4_address
+                and type(observation.dns_age_seconds) is int
+                and 0 <= observation.dns_age_seconds < self._dns_ttl_seconds,
+                CP_BOOT_SERVING_SESSION,
+                "TLS connect observation is invalid",
+            )
+            self.state = ServingSessionState.ENTITLEMENT_TLS_VERIFIED
+            return
         _require(type(observation) is ServingSessionReadback and observation.action == state.value, CP_BOOT_SERVING_SESSION, "session readback is invalid")
         if state is ServingSessionState.REQUEST_STARTED:
             self.state = ServingSessionState.CREDENTIAL_OBSERVED
         elif state is ServingSessionState.ENTITLEMENT_DNS_QUERY:
             self.state = ServingSessionState.ENTITLEMENT_DNS_RESULT
-        elif state is ServingSessionState.ENTITLEMENT_TLS_CONNECT:
-            self.state = ServingSessionState.ENTITLEMENT_TLS_VERIFIED
         elif state is ServingSessionState.ENTITLEMENT_TLS_VERIFIED:
             _require(observation.accepted, CP_BOOT_SERVING_SESSION, "entitlement TLS verification failed")
             self.state = ServingSessionState.ENTITLEMENT_AUTHORIZE_REQUEST

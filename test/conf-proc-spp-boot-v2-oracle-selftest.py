@@ -45,6 +45,32 @@ SERVING_NETWORK = (
 )
 
 
+_DECIMAL_DIGITS = frozenset("0123456789")
+
+
+def _valid_ipv4_octet(part: str) -> bool:
+    if not (1 <= len(part) <= 3) or not (set(part) <= _DECIMAL_DIGITS):
+        return False
+    if len(part) > 1 and part[0] == "0":
+        return False
+    return int(part) <= 255
+
+
+def _valid_ipv4(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    parts = value.split(".")
+    return len(parts) == 4 and all(_valid_ipv4_octet(part) for part in parts)
+
+
+def _valid_ttl(value: object) -> bool:
+    return type(value) is int and 1 <= value <= 86400
+
+
+def _tls_connect_accepted(address: str, retained_address: str, age: object, ttl_seconds: int) -> bool:
+    return address == retained_address and type(age) is int and 0 <= age < ttl_seconds
+
+
 def _document() -> dict:
     return {
         "schema": "conf-proc-spp-boot-contract/v2", "contract_version": 2,
@@ -153,6 +179,28 @@ class BootV2RawOracleTests(unittest.TestCase):
         tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
         imported = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module}
         self.assertNotIn("conf_proc_spp_boot", imported)
+
+    def test_f_ipv4_octet_and_ttl_boundaries(self) -> None:
+        for address in ("0.0.0.0", "255.255.255.255", "0.255.0.255", "10.0.255.1"):
+            with self.subTest(valid_address=address):
+                self.assertTrue(_valid_ipv4(address))
+        for address in ("a.b.c.d", "256.1.1.1", "1.2.3", "1.2.3.4.5", " 1.2.3.4", "-1.2.3.4", "۱.2.3.4", "01.2.3.4", "::1", ""):
+            with self.subTest(invalid_address=address):
+                self.assertFalse(_valid_ipv4(address))
+        self.assertTrue(_valid_ttl(1))
+        self.assertTrue(_valid_ttl(86400))
+        for value in (0, 86401, True, "60"):
+            with self.subTest(invalid_ttl=value):
+                self.assertFalse(_valid_ttl(value))
+
+    def test_g_tls_connect_binding_invariant(self) -> None:
+        self.assertTrue(_tls_connect_accepted("203.0.113.8", "203.0.113.8", 0, 60))
+        self.assertTrue(_tls_connect_accepted("203.0.113.8", "203.0.113.8", 59, 60))
+        self.assertFalse(_tls_connect_accepted("203.0.113.8", "203.0.113.8", 60, 60))
+        self.assertFalse(_tls_connect_accepted("203.0.113.8", "203.0.113.8", 120, 60))
+        self.assertFalse(_tls_connect_accepted("203.0.113.8", "203.0.113.8", -1, 60))
+        self.assertFalse(_tls_connect_accepted("203.0.113.8", "203.0.113.8", True, 60))
+        self.assertFalse(_tls_connect_accepted("198.51.100.44", "203.0.113.8", 0, 60))
 
 
 if __name__ == "__main__":
