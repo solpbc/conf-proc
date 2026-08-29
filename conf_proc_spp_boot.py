@@ -2248,9 +2248,6 @@ class BootTransitionEngineV2:
             return self._advance_failure(transport)
         effect = self.next_effect()
         _require(effect is not None, CP_BOOT_GOLDEN_ORDER, "v2 boot transition has no further normal effect")
-        expected = self._boot_transport if self.state.value <= BootTransitionStateV2.BOOT_TRANSPORT_CLOSED.value else self._activation_transport
-        # Enum string comparison is intentionally not used for authority: PCR
-        # closure is the hard epoch boundary.
         if self.state in (
             BootTransitionStateV2.BOOTSTRAP_PROC, BootTransitionStateV2.BOOTSTRAP_SYSFS, BootTransitionStateV2.BOOTSTRAP_DEVTMPFS, BootTransitionStateV2.BOOTSTRAP_RUN,
             BootTransitionStateV2.INITIAL_NETWORK_APPLY, BootTransitionStateV2.INITIAL_NETWORK_READBACK, BootTransitionStateV2.CMDLINE, BootTransitionStateV2.PCR15_ZERO,
@@ -2283,7 +2280,7 @@ class BootTransitionEngineV2:
 
     def _accept_normal(self, observation: BootObservation) -> BootTransitionStateV2:
         effect = self._pending
-        if effect is None or observation.contract_sha256 != self.contract_sha256:
+        if effect is None or not isinstance(observation, BootObservation) or observation.contract_sha256 != self.contract_sha256:
             self._fatal(CP_BOOT_GOLDEN_ORDER)
             raise ApplianceError(CP_BOOT_GOLDEN_ORDER, "v2 observation is stale, unordered, or from another contract")
         self._pending = None
@@ -2653,7 +2650,7 @@ class ServingSessionReducer:
 
     def accept(self, observation: BootObservation) -> ServingSessionState:
         effect = self._pending
-        if effect is None or observation.contract_sha256 != "serving-session/v2":
+        if effect is None or not isinstance(observation, BootObservation) or observation.contract_sha256 != "serving-session/v2":
             self.close()
             raise ApplianceError(CP_BOOT_SERVING_SESSION, "session observation is stale or malformed")
         self._pending = None

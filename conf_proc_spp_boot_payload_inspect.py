@@ -38,7 +38,7 @@ _SOURCE_ROWS: Final = (
     ("/usr/lib/spp/conf_proc_provenance_v2.py", "support", 0o444, 21957, "e94a0818b2d14168190ef7ed490cc147eb18dafd837087eab883630958b59ccd"),
     ("/usr/lib/spp/conf_proc_provenance_v2_manifest.py", "support", 0o444, 16846, "bd3c3ba87c7f6db52759e9f5dd16a5d447b5521c24f714043492ad713549e399"),
     ("/usr/lib/spp/conf_proc_reasons.py", "support", 0o444, 12571, "c56b629a0fc156860c7400d6bc6884c1f41c8a9e4b0626ef4f2821f71102067a"),
-    ("/usr/lib/spp/conf_proc_spp_boot.py", "engine", 0o444, 145201, "f333dac88c6002ce98b8280b92c3e81843237afe2d415b3220ffc67edb6f3a1f"),
+    ("/usr/lib/spp/conf_proc_spp_boot.py", "engine", 0o444, 145028, "45c3884520fd2a22f7920517bb7cd9078172f1dc7111e02c07f8f667c0b28336"),
 )
 _AUTHORITY_ROWS: Final = (
     ("root_lock_bytes", "/etc/spp/authority/root-lock.json", "root_lock"),

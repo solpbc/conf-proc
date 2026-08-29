@@ -118,12 +118,16 @@ class _Transport:
     def __init__(self) -> None:
         self.effects: list[boot.BootEffect] = []
         self.raise_once = False
+        self.return_malformed_once = False
 
     def execute(self, effect: boot.BootEffect) -> boot.BootObservation:
         self.effects.append(effect)
         if self.raise_once:
             self.raise_once = False
             raise RuntimeError("transport failure")
+        if self.return_malformed_once:
+            self.return_malformed_once = False
+            return object()  # type: ignore[return-value]
         return _observation(effect)
 
 
@@ -385,6 +389,27 @@ class BootV2Tests(unittest.TestCase):
         replacement.close()
         with self.assertRaises(ApplianceError):
             one.advance(second)
+
+    def test_k_untyped_normal_observation_is_appliance_fatal(self) -> None:
+        engine = boot.BootTransitionEngineV2(_binding())
+        normal, failure = _Transport(), _Transport()
+        normal.return_malformed_once = True
+        engine.claim_boot_transports(normal, failure)
+        with self.assertRaises(ApplianceError):
+            engine.advance(normal)
+        self.assertIs(engine.state, boot.BootTransitionStateV2.FAILED_NON_SERVING)
+
+    def test_l_untyped_session_observation_closes_session(self) -> None:
+        engine = boot.BootTransitionEngineV2(_binding())
+        normal, failure, session_transport = _Transport(), _Transport(), _Transport()
+        engine.claim_boot_transports(normal, failure)
+        engine.state = boot.BootTransitionStateV2.SERVING_AVAILABLE
+        session_transport.return_malformed_once = True
+        session = engine.admit_serving_session(session_transport)
+        session.begin_request(path="/v1/chat/completions", body_length=1, opaque_handle=object())
+        with self.assertRaises(ApplianceError):
+            session.advance(session_transport)
+        self.assertIs(session.state, boot.ServingSessionState.SESSION_CLOSED)
 
     def test_z_shared_pcr_latch_rejects_v2_after_v1_claim(self) -> None:
         v1 = boot.BootTransitionEngine(_V1.build_compact_fixture() and boot.bind_boot_inputs(**_V1.build_compact_fixture()))
