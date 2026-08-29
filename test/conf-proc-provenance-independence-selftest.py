@@ -23,8 +23,8 @@ H4_SEALED_REFERENCE_FILES = frozenset(
         "test/conf-proc-provenance-v2-inspect-documents-sealed-selftest.py",
     }
 )
-H4_ISSUANCE_CONSUMER_FILES = frozenset({"conf_proc_spp_boot_payload.py"})
-H4_PAYLOAD_INSPECTION_CONSUMER_FILES = frozenset({"conf_proc_spp_boot_payload_inspect.py"})
+H4_ISSUANCE_CONSUMER_FILES = frozenset({"conf_proc_spp_boot_payload.py", "conf_proc_spp_boot_payload_v3.py"})
+H4_PAYLOAD_INSPECTION_CONSUMER_FILES = frozenset({"conf_proc_spp_boot_payload_inspect.py", "conf_proc_spp_boot_payload_v3_inspect.py"})
 REFERENCE_EXEMPT_FILES = {
     THIS_FILE_ID,
     "conf_proc_inspect_provenance_cli.py",
@@ -75,6 +75,13 @@ DORMANT_MODULES = frozenset(
         "conf_proc_spp_boot",
         "conf_proc_spp_boot_payload",
         "conf_proc_spp_boot_payload_inspect",
+        "conf_proc_spp_boot_v3",
+        "conf_proc_spp_boot_dispatch_v3",
+        "conf_proc_spp_boot_payload_v3",
+        "conf_proc_spp_boot_payload_v3_inspect",
+        "conf_proc_spp_boot_v3_tables",
+        "conf_proc_spp_boot_v3_wire",
+        "conf_proc_spp_boot_v3_resource",
     }
 )
 DORMANT_INSPECTOR_MODULES = frozenset(
@@ -804,6 +811,13 @@ class ProvenanceIndependenceTests(unittest.TestCase):
                     "conf_proc_spp_boot",
                     "conf_proc_spp_boot_payload",
                     "conf_proc_spp_boot_payload_inspect",
+                    "conf_proc_spp_boot_v3",
+                    "conf_proc_spp_boot_dispatch_v3",
+                    "conf_proc_spp_boot_payload_v3",
+                    "conf_proc_spp_boot_payload_v3_inspect",
+                    "conf_proc_spp_boot_v3_tables",
+                    "conf_proc_spp_boot_v3_wire",
+                    "conf_proc_spp_boot_v3_resource",
                 }
             ),
         )
@@ -855,13 +869,25 @@ class ProvenanceIndependenceTests(unittest.TestCase):
             self.assertTrue(_violations("conf_proc_provenance_v2.py", source), source)
 
     def test_exemption_allowlists_are_exact_and_present(self) -> None:
-        self.assertEqual(H4_ISSUANCE_CONSUMER_FILES, frozenset({"conf_proc_spp_boot_payload.py"}))
+        self.assertEqual(
+            H4_ISSUANCE_CONSUMER_FILES,
+            frozenset({"conf_proc_spp_boot_payload.py", "conf_proc_spp_boot_payload_v3.py"}),
+        )
         self.assertTrue((ROOT / "conf_proc_spp_boot_payload.py").is_file())
-        self.assertEqual(H4_PAYLOAD_INSPECTION_CONSUMER_FILES, frozenset({"conf_proc_spp_boot_payload_inspect.py"}))
+        self.assertTrue((ROOT / "conf_proc_spp_boot_payload_v3.py").is_file())
+        self.assertEqual(
+            H4_PAYLOAD_INSPECTION_CONSUMER_FILES,
+            frozenset({"conf_proc_spp_boot_payload_inspect.py", "conf_proc_spp_boot_payload_v3_inspect.py"}),
+        )
         self.assertTrue((ROOT / "conf_proc_spp_boot_payload_inspect.py").is_file())
+        self.assertTrue((ROOT / "conf_proc_spp_boot_payload_v3_inspect.py").is_file())
         self.assertNotIn(
             "conf_proc_spp_boot_payload_inspect",
             (ROOT / "conf_proc_spp_boot_payload.py").read_text(),
+        )
+        self.assertNotIn(
+            "conf_proc_spp_boot_payload_v3_inspect",
+            (ROOT / "conf_proc_spp_boot_payload_v3.py").read_text(),
         )
         self.assertEqual(
             REFERENCE_EXEMPT_FILES,
