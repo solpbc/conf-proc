@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 
@@ -16,10 +17,12 @@ if str(ROOT) not in sys.path:
 if str(ROOT / "test") not in sys.path:
     sys.path.insert(0, str(ROOT / "test"))
 
-from conf_proc_json import canonical_dumps
+from conf_proc_json import canonical_dumps, canonical_loads
 from conf_proc_spp_boot_payload_v3 import _PLAN_SCHEMA_V3
 from conf_proc_spp_boot_v3 import BootBindingV3, bind_boot_inputs_v3, parse_boot_contract_v3
 from conf_proc_spp_boot_payload_fixture import matching_h4_h5
+from conf_proc_spp_boot_v3_fixture import build_v3_fixture
+import conf_proc_provenance_v2_inspect as h4
 
 
 SOURCE_ARCHIVE_PATHS_V3 = (
@@ -35,6 +38,7 @@ SOURCE_ARCHIVE_PATHS_V3 = (
     "/usr/lib/spp/conf_proc_spp_boot_dispatch_v3.py",
     "/usr/lib/spp/conf_proc_spp_boot_v3.py",
     "/usr/lib/spp/conf_proc_spp_boot_v3_resource.py",
+    "/usr/lib/spp/conf_proc_spp_boot_v3_semantics.py",
     "/usr/lib/spp/conf_proc_spp_boot_v3_tables.py",
     "/usr/lib/spp/conf_proc_spp_boot_v3_wire.py",
     "/usr/lib/spp/conf_proc_spp_reasons_v3.py",
@@ -61,26 +65,13 @@ def _sha256(data: bytes) -> str:
 def matching_h4_h5_v3() -> tuple[object, object, BootBindingV3]:
     """Build a real inspection paired with a freshly issued v3 binding."""
 
-    h4_fixture, inspection, predecessor = matching_h4_h5()
-    inputs = {
-        name: f"spp-boot-v3-payload-fixture:{name}".encode("ascii")
-        for name in _INPUT_NAMES
-    }
-    inputs["accepted_manifest_bytes"] = predecessor.accepted_manifest_bytes
-    document = {"schema": "conf-proc-spp-boot-contract/v3", "contract_version": 3}
-    document.update(
-        {
-            name.removesuffix("_bytes") + "_sha256": _sha256(inputs[name])
-            for name in _INPUT_NAMES
-        }
+    h4_fixture, inspection, _predecessor = matching_h4_h5()
+    inputs, contract = build_v3_fixture()
+    binding = bind_boot_inputs_v3(contract=contract, **inputs)
+    issued_inspection = h4._register_inspection_result(
+        replace(inspection, manifest_sha256=_sha256(binding.accepted_manifest_bytes))
     )
-    boot_contract_bytes = canonical_dumps(document)
-    binding = bind_boot_inputs_v3(
-        contract=parse_boot_contract_v3(boot_contract_bytes),
-        **inputs,
-        boot_contract_bytes=boot_contract_bytes,
-    )
-    return h4_fixture, inspection, binding
+    return h4_fixture, issued_inspection, binding
 
 
 def plan_bytes_v3(binding: BootBindingV3, source_paths: list[str]) -> bytes:

@@ -111,7 +111,7 @@ CONTROL_INVENTORY_ROWS_V3: Final = (
     ControlInventoryRowV3(
         "kexec",
         (ControlValueRuleV3(
-            "/proc/sys/kernel/kexec_load_disabled", None, None, (1,), None,
+            "/proc/sys/kernel/kexec_load_disabled", (0, 1), None, (1,), None,
         ),),
         (
             "/sys/kernel/security/lockdown=integrity_or_confidentiality",
@@ -299,37 +299,243 @@ FAILURE_STAGES_V3: Final = (
 
 
 @dataclass(frozen=True)
+class LaunchFdRowV3:
+    fd: int
+    purpose: str
+    owner: str
+    inheritance: str
+    limit: str
+
+
+@dataclass(frozen=True)
+class PipeCensusRowV3:
+    fd: int
+    stream: str
+    requested_capacity_bytes: int
+    minimum_readback_capacity_bytes: int
+    census_budget_bytes: int
+    detection_bytes: int
+    disposition: str
+
+
+@dataclass(frozen=True)
+class ReadinessProtocolRowV3:
+    transport: str
+    request_magic: bytes
+    result_magic: bytes
+    request_bytes: int
+    result_bytes: int
+    role_id: int | None
+    clock: str
+    deadline_unit: str
+    credentials: str
+    ancillary_fd_rule: str
+    aggregate_deadline_seconds: int | None
+
+
+@dataclass(frozen=True)
 class LaunchRoleRowV3:
     role: str
-    lifecycle: str
-    network_policy: str
-    endpoint: str | None
-    listener_policy: str
-    admission_policy: str
+    source_path: str
+    process_kind: str
+    interpreter_path: str
+    argv: tuple[str, ...]
+    expected_network_scope: str
+    expected_process_capabilities: tuple[str, ...]
+    expected_capability_bounding_set: tuple[str, ...]
+    expected_ambient_capabilities: tuple[str, ...]
+    expected_no_new_privileges: bool
+    uid: int
+    gid: int
+    supplementary_groups: tuple[int, ...]
+    environment: tuple[tuple[str, str], ...]
+    cwd: str
+    root: str
+    namespace_requirements: tuple[str, ...]
+    cardinality: str
+    child_fork_policy: str
     restart_policy: str
+    fd_surface: tuple[LaunchFdRowV3, ...]
+    pipe_census: tuple[PipeCensusRowV3, ...]
+    listener_policy: str
+    upstream_policy: str
+    admission_policy: str
+    readiness: ReadinessProtocolRowV3 | None
+
+
+@dataclass(frozen=True)
+class Stage2FdRowV3:
+    fd: int
+    purpose: str
+    pre_exec_cloexec: str
+    stage2_action: str
+    terminal_owner: str
+
+
+@dataclass(frozen=True)
+class Stage2ControllerRowV3:
+    source_path: str
+    interpreter_path: str
+    argv: tuple[str, ...]
+    environment: tuple[tuple[str, str], ...]
+    uid: int
+    gid: int
+    supplementary_groups: tuple[int, ...]
+    cwd: str
+    root: str
+    namespace_requirements: tuple[str, ...]
+    exec_fd_census: tuple[Stage2FdRowV3, ...]
+    fd_transition_requirements: tuple[str, ...]
+    entitlement_dns: tuple[tuple[str, str], ...]
+    entitlement_nftables: tuple[tuple[str, str], ...]
+    entitlement_ledger_states: tuple[str, ...]
+    initial_capabilities: tuple[str, ...]
+    steady_capabilities: tuple[str, ...]
+
+
+_FIXED_ROLE_ENVIRONMENT_V3: Final = (
+    ("LANG", "C"),
+    ("LC_ALL", "C"),
+    ("PATH", "/nonexistent"),
+    ("PYTHONNOUSERSITE", "1"),
+    ("PYTHONDONTWRITEBYTECODE", "1"),
+)
+_ROLE_NAMESPACES_V3: Final = (
+    "same_initial_user_namespace_as_stage2_pid1",
+    "same_initial_pid_namespace_as_stage2_pid1",
+    "same_initial_mount_namespace_as_stage2_pid1",
+    "same_initial_network_namespace_as_stage2_pid1",
+)
+_ROLE_PIPE_CENSUS_V3: Final = (
+    PipeCensusRowV3(1, "stdout", 65536, 65536, 65536, 1, "pid1_epoll_immediate_discard"),
+    PipeCensusRowV3(2, "stderr", 65536, 65536, 65536, 1, "pid1_epoll_immediate_discard"),
+)
+
+
+def _python_role_argv_v3(role: str) -> tuple[str, ...]:
+    return (
+        "/usr/bin/python3.10", "-I", "-B", "-S",
+        "/usr/lib/spp/conf_proc_spp_role_bootstrap.py", "--role=" + role,
+    )
+
+
+def _long_lived_readiness_v3(role_id: int) -> ReadinessProtocolRowV3:
+    return ReadinessProtocolRowV3(
+        "AF_UNIX SOCK_SEQPACKET root_owned", b"SPPRDQ3\0", b"SPPRDR3\0", 32, 80,
+        role_id, "CLOCK_MONOTONIC", "nanoseconds", "one_matching_SCM_CREDENTIALS",
+        "no_ancillary_fd", 4,
+    )
 
 
 LAUNCH_ROLE_ROWS_V3: Final = (
     LaunchRoleRowV3(
-        "attestation-broker", "one_long_lived", "no_network", "root_owned_local_socket",
-        "no_listener", "none", "never",
+        "attestation-broker", "/usr/lib/spp/conf_proc_spp_attestation_broker.py", "interpreter",
+        "/usr/bin/python3.10", _python_role_argv_v3("attestation-broker"), "none", (), (), (), True,
+        61100, 61100, (), _FIXED_ROLE_ENVIRONMENT_V3, "/", "/", _ROLE_NAMESPACES_V3,
+        "one_long_lived", "none", "never",
+        (
+            LaunchFdRowV3(0, "/dev/null", "pid1", "inherited", "exact"),
+            LaunchFdRowV3(1, "bounded_content_discard_pipe", "pid1", "inherited", "65536_plus_detection"),
+            LaunchFdRowV3(2, "bounded_content_discard_pipe", "pid1", "inherited", "65536_plus_detection"),
+            LaunchFdRowV3(3, "root_owned_broker_SOCK_SEQPACKET", "pid1", "inherited", "sole_control_endpoint"),
+            LaunchFdRowV3(4, "/dev/tpmrm0_resource_manager", "stage1", "fd5_transfer", "sole_pinned_tpm_handle"),
+        ), _ROLE_PIPE_CENSUS_V3, "no_listener", "no_network", "none", _long_lived_readiness_v3(1),
     ),
     LaunchRoleRowV3(
-        "inference", "one_long_lived", "loopback_only", "127.0.0.1:8000",
-        "one_loopback_listener", "none", "never",
+        "inference", "/usr/lib/spp/conf_proc_spp_inference.py", "interpreter",
+        "/usr/bin/python3.10", _python_role_argv_v3("inference"), "loopback", (), (), (), True,
+        61101, 61101, (), _FIXED_ROLE_ENVIRONMENT_V3, "/", "/", _ROLE_NAMESPACES_V3,
+        "one_long_lived", "none", "never",
+        (
+            LaunchFdRowV3(0, "/dev/null", "pid1", "inherited", "exact"),
+            LaunchFdRowV3(1, "bounded_content_discard_pipe", "pid1", "inherited", "65536_plus_detection"),
+            LaunchFdRowV3(2, "bounded_content_discard_pipe", "pid1", "inherited", "65536_plus_detection"),
+            LaunchFdRowV3(3, "loopback_listener_127.0.0.1:8000", "pid1", "inherited", "sole_listener"),
+            LaunchFdRowV3(4, "root_owned_readiness_SOCK_SEQPACKET", "pid1", "inherited", "sole_readiness_endpoint"),
+        ), _ROLE_PIPE_CENSUS_V3, "one_pid1_created_loopback_listener_127.0.0.1:8000", "none", "none", _long_lived_readiness_v3(2),
     ),
     LaunchRoleRowV3(
-        "asr", "one_long_lived", "loopback_only", "127.0.0.1:8100",
-        "one_loopback_listener", "none", "never",
+        "asr", "/usr/lib/spp/asr_shim.py", "interpreter",
+        "/usr/bin/python3.10", _python_role_argv_v3("asr"), "loopback", (), (), (), True,
+        61102, 61102, (), _FIXED_ROLE_ENVIRONMENT_V3, "/", "/", _ROLE_NAMESPACES_V3,
+        "one_long_lived", "none", "never",
+        (
+            LaunchFdRowV3(0, "/dev/null", "pid1", "inherited", "exact"),
+            LaunchFdRowV3(1, "bounded_content_discard_pipe", "pid1", "inherited", "65536_plus_detection"),
+            LaunchFdRowV3(2, "bounded_content_discard_pipe", "pid1", "inherited", "65536_plus_detection"),
+            LaunchFdRowV3(3, "loopback_listener_127.0.0.1:8100", "pid1", "inherited", "sole_listener"),
+            LaunchFdRowV3(4, "root_owned_readiness_SOCK_SEQPACKET", "pid1", "inherited", "sole_readiness_endpoint"),
+        ), _ROLE_PIPE_CENSUS_V3, "one_pid1_created_loopback_listener_127.0.0.1:8100", "none", "none", _long_lived_readiness_v3(3),
     ),
     LaunchRoleRowV3(
-        "gateway", "one_long_lived", "ra_tls_only", None,
-        "no_listening_socket", "pid1_admitted_connected_fds_only", "never",
+        "gateway", "/usr/lib/spp/ratls_gateway.py", "interpreter",
+        "/usr/bin/python3.10", _python_role_argv_v3("gateway"), "loopback", (), (), (), True,
+        61103, 61103, (), _FIXED_ROLE_ENVIRONMENT_V3, "/", "/", _ROLE_NAMESPACES_V3,
+        "one_long_lived", "none", "never",
+        (
+            LaunchFdRowV3(0, "/dev/null", "pid1", "inherited", "exact"),
+            LaunchFdRowV3(1, "bounded_content_discard_pipe", "pid1", "inherited", "65536_plus_detection"),
+            LaunchFdRowV3(2, "bounded_content_discard_pipe", "pid1", "inherited", "65536_plus_detection"),
+            LaunchFdRowV3(3, "pid1_created_gateway_control_endpoint", "pid1", "inherited", "sole_control_endpoint"),
+        ), _ROLE_PIPE_CENSUS_V3, "no_listener", "connect_only_loopback_127.0.0.1:8000_and_127.0.0.1:8100_after_work_permit", "pid1_admitted_connected_fds_and_pid1_entitlement_fd_only", None,
     ),
     LaunchRoleRowV3(
-        "collector", "zero_or_one_transient", "no_listener", None,
-        "no_listener", "pid1_spawned_reaped_one_bounded_request_response", "never",
+        "collector", "/usr/lib/spp/ratls_collector.py", "interpreter",
+        "/usr/bin/python3.10", _python_role_argv_v3("collector"), "none", (), (), (), True,
+        61104, 61104, (), _FIXED_ROLE_ENVIRONMENT_V3, "/", "/", _ROLE_NAMESPACES_V3,
+        "zero_or_one_transient", "none", "never",
+        (
+            LaunchFdRowV3(0, "one_request_stdin_pipe", "pid1", "inherited", "exact_one_request"),
+            LaunchFdRowV3(1, "bounded_stdout_pipe", "pid1", "inherited", "8388608_plus_detection"),
+            LaunchFdRowV3(2, "bounded_stderr_pipe", "pid1", "inherited", "65536_plus_detection"),
+        ),
+        (
+            PipeCensusRowV3(1, "stdout", 8388608, 8388608, 8388608, 1, "collector_result_only"),
+            PipeCensusRowV3(2, "stderr", 65536, 65536, 65536, 1, "immediate_discard"),
+        ), "no_listener", "no_network", "pid1_spawned_reaped_one_bounded_request_response", None,
     ),
+)
+
+
+STAGE2_CONTROLLER_ROW_V3: Final = Stage2ControllerRowV3(
+    "/usr/lib/spp/conf_proc_spp_init.py", "/usr/bin/python3.10",
+    ("/usr/bin/python3.10", "-I", "-B", "-S", "/usr/lib/spp/conf_proc_spp_init.py"),
+    _FIXED_ROLE_ENVIRONMENT_V3, 0, 0, (), "/", "/", _ROLE_NAMESPACES_V3,
+    (
+        Stage2FdRowV3(0, "stdin", "CLOEXEC", "retain_standard", "stage2_pid1"),
+        Stage2FdRowV3(1, "stdout", "CLOEXEC", "retain_standard", "stage2_pid1"),
+        Stage2FdRowV3(2, "stderr", "CLOEXEC", "retain_standard", "stage2_pid1"),
+        Stage2FdRowV3(3, "sealed_handoff_memfd", "clear_and_readback_immediately_before_same_exec", "consume_once_close_and_prove_absence_before_post_exec_effect", "closed"),
+        Stage2FdRowV3(4, "sealed_device_monitor", "clear_and_readback_immediately_before_same_exec", "set_and_readback_CLOEXEC_before_other_post_exec_effect", "stage2_pid1"),
+        Stage2FdRowV3(5, "bounded_broker_TPM_transfer", "clear_and_readback_immediately_before_same_exec", "prove_identity_set_and_readback_CLOEXEC_then_transfer_once_to_broker_fd4_close_pid1_copy_prove_absence", "attestation_broker"),
+    ),
+    (
+        "only_fds_3_4_5_clear_FD_CLOEXEC_for_stage2_exec",
+        "fd3_and_fd4_created_sealed_CLOEXEC_before_stage2_exec",
+        "fd3_consumed_once_then_closed_and_inode_fd_absence_proven",
+        "fd4_FD_CLOEXEC_restored_and_read_back_before_other_post_exec_effect",
+        "fd5_opened_only_after_PCR15_readback_and_boot_transport_close_with_O_RDWR_O_CLOEXEC",
+        "fd5_matches_sealed_TPM_resource_manager_registration_boot_epoch_device_identity",
+        "stage2_issues_no_TPM_command_and_transfers_fd5_once_to_broker_fd4",
+        "broker_sets_and_reads_back_FD_CLOEXEC_on_fd4_after_exec",
+    ),
+    (
+        ("hostname", "services.solstone.app"), ("resolver", "168.63.129.16:53"), ("tcp_peer_port", "443"),
+        ("query", "one_fresh_nonzero_u16_RD_only_QDCOUNT_1_lowercase_A_IN"),
+        ("response", "exact_resolver_question_flags_counts_A_IN_4_byte_RDATA_no_trailing"),
+        ("ttl_seconds", "1..3600"), ("selection", "lowest_unsigned_public_unicast_ipv4"),
+        ("tcp_retry", "at_most_one_after_TC_only_same_resolver_fresh_transaction_id"),
+    ),
+    (
+        ("family", "inet"), ("table", "spp_filter"), ("chain", "output"),
+        ("chain_shape", "type_filter_output_hook_priority_0_policy_drop"),
+        ("rule", "selected_ipv4_TCP_443_sealed_NIC_ifindex_root_UID_conntrack_new_unique_handle"),
+        ("lifecycle", "atomic_apply_readback_remove_absence"),
+        ("clean_reject", "policy_apply_rejected_closed_only_before_mutation_exact_base_dump_rule_absence"),
+    ),
+    ("none", "connecting", "fd_sent", "acked", "rejected"),
+    ("CAP_NET_ADMIN", "CAP_NET_BIND_SERVICE", "CAP_SETUID", "CAP_SETGID", "CAP_KILL", "CAP_SYS_BOOT"),
+    ("CAP_NET_ADMIN", "CAP_SETUID", "CAP_SETGID", "CAP_KILL", "CAP_SYS_BOOT"),
 )
 
 
@@ -393,4 +599,143 @@ class ServingWireMessageTypeV3(IntEnum):
 WIRE_MESSAGE_TYPE_ROWS_V3: Final = tuple(
     (message_type.value, message_type.name)
     for message_type in ServingWireMessageTypeV3
+)
+
+
+@dataclass(frozen=True)
+class WirePayloadFieldV3:
+    name: str
+    kind: str
+    byte_width: int | None
+    constraint: str
+
+
+@dataclass(frozen=True)
+class WirePayloadVariantV3:
+    condition: str
+    fields: tuple[WirePayloadFieldV3, ...]
+
+
+@dataclass(frozen=True)
+class WireMessageAuthorityRowV3:
+    type_id: int
+    name: str
+    direction: str
+    prerequisite: str
+    payload_shape: tuple[WirePayloadFieldV3, ...]
+    payload_variants: tuple[WirePayloadVariantV3, ...]
+    fd_rule: str
+    session_coordinate_rule: str
+    sequence_rule: str
+    header_rule: str
+
+
+@dataclass(frozen=True)
+class WireEnumRowV3:
+    domain: str
+    value: int
+    name: str
+
+
+@dataclass(frozen=True)
+class WireConditionalShapeRowV3:
+    name: str
+    rule: str
+
+
+WIRE_HEADER_FIELDS_V3: Final = (
+    WirePayloadFieldV3("magic", "bytes", 8, "SPPIPC3\\0"),
+    WirePayloadFieldV3("version", "u16_be", 2, "3"),
+    WirePayloadFieldV3("type", "u16_be", 2, "declared_type_id"),
+    WirePayloadFieldV3("flags", "u16_be", 2, "START=1_END=2_HAS_FD=4_only"),
+    WirePayloadFieldV3("reserved", "zero", 2, "all_zero"),
+    WirePayloadFieldV3("global_sequence", "u32_be", 4, "per_direction_exact_previous_plus_1_from_1"),
+    WirePayloadFieldV3("chunk_index", "u32_be", 4, "row_chunk_rule"),
+    WirePayloadFieldV3("chunk_count", "u32_be", 4, "row_chunk_rule"),
+    WirePayloadFieldV3("chunk_length", "u32_be", 4, "exact_payload_chunk_length"),
+    WirePayloadFieldV3("total_length", "u64_be", 8, "exact_total_payload_length"),
+    WirePayloadFieldV3("session_coordinate", "bytes", 32, "row_session_coordinate_rule"),
+)
+WIRE_HEADER_BYTES_V3: Final = 72
+WIRE_SEQUENCE_RULE_V3: Final = "each_direction_starts_1_exact_previous_plus_1_no_gap_duplicate_or_wrap_0xffffffff_exhaustion_fails"
+WIRE_HAS_FD_TYPE_IDS_V3: Final = (1, 25)
+WIRE_SESSION_COORDINATE_RULES_V3: Final = (
+    WireConditionalShapeRowV3("types_1_18_21_24_27", "exact_nonzero_session_token"),
+    WireConditionalShapeRowV3("type_20", "copies_acknowledged_message_session_token"),
+    WireConditionalShapeRowV3("types_22_23", "32_zero_bytes"),
+    WireConditionalShapeRowV3("type_19", "matching_nonzero_token_and_cycle_for_session_fault_otherwise_both_zero"),
+)
+
+
+def _field(name: str, kind: str, width: int | None, constraint: str = "exact") -> WirePayloadFieldV3:
+    return WirePayloadFieldV3(name, kind, width, constraint)
+
+
+def _row(
+    type_id: int, name: str, direction: str, prerequisite: str,
+    fields: tuple[WirePayloadFieldV3, ...], *, fd_rule: str = "no_fd",
+    variants: tuple[WirePayloadVariantV3, ...] = (), session: str = "exact_nonzero_session_token",
+) -> WireMessageAuthorityRowV3:
+    return WireMessageAuthorityRowV3(type_id, name, direction, prerequisite, fields, variants, fd_rule, session, WIRE_SEQUENCE_RULE_V3, "exact_72_byte_SPPIPC3_header")
+
+
+WIRE_ROUTE_ENUM_ROWS_V3: Final = (WireEnumRowV3("route", 1, "inference"), WireEnumRowV3("route", 2, "asr"))
+WIRE_COLLECTOR_GENERATION_ENUM_ROWS_V3: Final = (WireEnumRowV3("collector_generation", 1, "certificate"), WireEnumRowV3("collector_generation", 2, "exporter"))
+WIRE_COLLECTOR_RESULT_ENUM_ROWS_V3: Final = (
+    WireEnumRowV3("collector_result", 1, "success"), WireEnumRowV3("collector_result", 2, "acquire_rejected"), WireEnumRowV3("collector_result", 3, "aborted"),
+)
+WIRE_COLLECTOR_ABORT_REASON_ENUM_ROWS_V3: Final = tuple(WireEnumRowV3("collector_abort_reason", value, name) for value, name in (
+    (1, "nonzero_exit"), (2, "timeout"), (3, "stdout_overflow"), (4, "stderr_overflow"), (5, "malformed"), (6, "identity"), (7, "client_close"), (8, "cancelled"),
+))
+WIRE_INVALID_COLLECTOR_ACK_REASON_ENUM_ROWS_V3: Final = tuple(WireEnumRowV3("invalid_collector_ack_reason", value, name) for value, name in ((1, "shape"), (2, "binding"), (3, "encoding"), (4, "identity")))
+WIRE_INVALID_COLLECTOR_ACK_ABORT_MAPPING_V3: Final = ((1, 5), (2, 6), (3, 5), (4, 6))
+WIRE_COLLECTOR_CANCEL_REASON_ENUM_ROWS_V3: Final = tuple(WireEnumRowV3("collector_cancel_reason", value, name) for value, name in ((1, "timeout"), (2, "client_close"), (3, "shutdown")))
+WIRE_REQUEST_REJECT_REASON_ENUM_ROWS_V3: Final = tuple(WireEnumRowV3("request_reject_reason", value, name) for value, name in ((1, "route_slot_saturated"), (2, "duplicate_request")))
+WIRE_WORK_FINISH_OUTCOME_ENUM_ROWS_V3: Final = tuple(WireEnumRowV3("work_finish_outcome", value, name) for value, name in ((1, "ordinary"), (2, "upstream_return"), (3, "upstream_throw"), (4, "upstream_timeout"), (5, "client_close")))
+WIRE_REQUEST_RELEASE_STATE_ENUM_ROWS_V3: Final = (WireEnumRowV3("request_release_state", 1, "work_finished"), WireEnumRowV3("request_release_state", 2, "audio_413"))
+WIRE_SESSION_RELEASE_HELD_BITS_V3: Final = ((1, "request"), (2, "route_work"), (4, "buffer"))
+WIRE_SESSION_RELEASE_REASON_ENUM_ROWS_V3: Final = tuple(WireEnumRowV3("session_release_reason", value, name) for value, name in (
+    (1, "normal_client_close"), (2, "preface_failed"), (3, "certificate_failed"), (4, "tls_failed"), (5, "exporter_request_failed"), (6, "exporter_collector_failed"), (7, "proof_write_failed"), (8, "parser_rejected"), (9, "saturation"), (10, "credential_failed"), (11, "dns_failed"), (12, "entitlement_tls_failed"), (13, "authorization_denied"), (14, "upstream_failed"), (15, "hard_audio"),
+))
+WIRE_PRE_REQUEST_REJECT_REASON_ENUM_ROWS_V3: Final = tuple(WireEnumRowV3("pre_request_reject_reason", value, name) for value, name in ((1, "malformed"), (2, "head_oversize"), (3, "chunked"), (4, "first_byte_idle"), (5, "head_deadline"), (6, "client_close"), (7, "return"), (8, "throw")))
+WIRE_GLOBAL_FAULT_REASON_ENUM_ROWS_V3: Final = tuple(WireEnumRowV3("global_fault_reason", value, name) for value, name in ((1, "reducer_identity"), (2, "process_identity"), (3, "socket_identity"), (4, "readiness"), (5, "policy_readback"), (6, "control_protocol")))
+WIRE_ENTITLEMENT_CONNECT_REJECT_REASON_ENUM_ROWS_V3: Final = tuple(WireEnumRowV3("entitlement_connect_reject_reason", value, name) for value, name in ((1, "saturated"), (2, "dns_timeout"), (3, "dns_malformed"), (4, "no_admissible_public_a"), (5, "connect_timeout"), (6, "connect_failed"), (7, "policy_apply_rejected_closed")))
+WIRE_CONDITIONAL_SHAPE_ROWS_V3: Final = (
+    WireConditionalShapeRowV3("collector_success", "reason_zero_nonzero_child_pid_wait_status_zero_exact_stdout_sha256_canonical_nonempty_json"),
+    WireConditionalShapeRowV3("collector_acquire_rejected", "reason_saturated_zero_child_pid_wait_status_stdout_sha256_no_tail"),
+    WireConditionalShapeRowV3("collector_aborted", "reason_1_to_8_reaped_child_fields_zero_only_if_no_child_no_tail"),
+    WireConditionalShapeRowV3("session_release_slots", "absent_32_zero_bytes_present_exact_live_ledger"),
+    WireConditionalShapeRowV3("entitlement_connect_reject", "reasons_1_2_3_4_7_zero_dns_fields_reasons_5_6_exact_nonzero_dns_fields"),
+    WireConditionalShapeRowV3("gateway_readiness_result", "control_ready_1_worker_count_0_to_4_equals_pid1_live_session_ledger"),
+)
+
+
+WIRE_MESSAGE_AUTHORITY_ROWS_V3: Final = (
+    _row(1, "SESSION_FD", "PID1->gateway", "after_accept_readback", (_field("epoch", "u64_be", 8), _field("family", "u16_be", 2, "AF_INET"), _field("local_ipv4", "bytes", 4), _field("local_port", "u16_be", 2), _field("peer_ipv4", "bytes", 4), _field("peer_port", "u16_be", 2), _field("SO_COOKIE", "u64_be", 8)), fd_rule="one_fd"),
+    _row(2, "COLLECTOR_REQUEST", "gateway->PID1", "for_exact_next_generation", (_field("generation", "u8", 1, "collector_generation"), _field("reserved", "zero", 3), _field("canonical_request_json", "canonical_json", None))),
+    _row(3, "COLLECTOR_RESPONSE", "PID1->gateway", "after_typed_child_boundary", (_field("generation", "u8", 1), _field("result", "u8", 1, "collector_result"), _field("reason", "u16_be", 2, "conditional"), _field("child_pid", "u32_be", 4, "conditional"), _field("wait_status", "u32_be", 4, "conditional"), _field("stdout_sha256", "bytes", 32, "conditional"), _field("conditional_json", "canonical_json", None, "success_only")), variants=(WirePayloadVariantV3("success_acquire_rejected_aborted_exact_shapes", ()),)),
+    _row(4, "COLLECTOR_ACK_VALID", "gateway->PID1", "after_semantic_success_validation", (_field("generation", "u8", 1), _field("reserved", "zero", 3), _field("child_pid", "u32_be", 4), _field("wait_status", "u32_be", 4), _field("stdout_sha256", "bytes", 32))),
+    _row(5, "COLLECTOR_ACK_INVALID", "gateway->PID1", "after_semantic_rejection", (_field("generation", "u8", 1), _field("reserved", "zero", 3), _field("child_pid", "u32_be", 4), _field("wait_status", "u32_be", 4), _field("stdout_sha256", "bytes", 32), _field("reason", "u16_be", 2, "1..4"))),
+    _row(6, "COLLECTOR_CANCEL", "gateway->PID1", "while_child_may_run", (_field("generation", "u8", 1), _field("reason", "u8", 1, "collector_cancel_reason"), _field("reserved", "zero", 2))),
+    _row(7, "REQUEST_ACQUIRE", "gateway->PID1", "after_parse_before_local_request_start", (_field("cycle", "u64_be", 8), _field("route", "u8", 1, "route"), _field("reserved", "zero", 7), _field("gateway_reducer_token", "bytes", 32))),
+    _row(8, "REQUEST_ADMIT", "PID1->gateway", "after_atomic_acquire", (_field("cycle", "u64_be", 8), _field("route", "u8", 1, "route"), _field("reserved", "zero", 3), _field("stream_buffer_bytes", "u32_be", 4, "2097152"), _field("request_token", "bytes", 32), _field("route_token", "bytes", 32), _field("buffer_token", "bytes", 32))),
+    _row(9, "REQUEST_REJECT", "PID1->gateway", "with_no_permit", (_field("cycle", "u64_be", 8), _field("route", "u8", 1, "route"), _field("reason", "u8", 1, "request_reject_reason"), _field("reserved", "zero", 6))),
+    _row(10, "WORK_BEGIN", "gateway->PID1", "immediately_before_local_upstream_open", (_field("cycle", "u64_be", 8), _field("route", "u8", 1, "route"), _field("reserved", "zero", 7), _field("request_token", "bytes", 32), _field("route_token", "bytes", 32))),
+    _row(11, "WORK_BEGUN", "PID1->gateway", "after_queued_to_executing", (_field("payload", "echo", None, "byte_identical_type_10_payload"),)),
+    _row(12, "WORK_FINISH", "gateway->PID1", "after_begun_work_ends", (_field("cycle", "u64_be", 8), _field("route", "u8", 1, "route"), _field("outcome", "u8", 1, "work_finish_outcome"), _field("reserved", "zero", 6), _field("request_token", "bytes", 32), _field("route_token", "bytes", 32))),
+    _row(13, "WORK_FINISHED", "PID1->gateway", "after_executing_to_finished", (_field("payload", "echo", None, "byte_identical_type_12_payload"),)),
+    _row(14, "REQUEST_RELEASE", "gateway->PID1", "after_work_acked_egress_fd_close_or_413_no_egress", (_field("cycle", "u64_be", 8), _field("route", "u8", 1, "route"), _field("state", "u8", 1, "request_release_state"), _field("reserved", "zero", 6), _field("request_token", "bytes", 32), _field("route_token", "bytes", 32), _field("buffer_token", "bytes", 32))),
+    _row(15, "REQUEST_RELEASED", "PID1->gateway", "before_local_request_close", (_field("cycle", "u64_be", 8), _field("route", "u8", 1, "route"), _field("reserved", "zero", 7), _field("request_token", "bytes", 32))),
+    _row(16, "SESSION_RELEASE", "gateway->PID1", "after_collector_terminal_and_egress_terminal", (_field("cycle", "u64_be", 8), _field("held_bitmap", "u16_be", 2, "request=1_route_work=2_buffer=4"), _field("reason", "u16_be", 2, "session_release_reason"), _field("reserved", "zero", 4), _field("request_slot", "bytes", 32, "conditional_live_ledger"), _field("route_slot", "bytes", 32, "conditional_live_ledger"), _field("buffer_slot", "bytes", 32, "conditional_live_ledger"))),
+    _row(17, "SESSION_RELEASED", "PID1->gateway", "after_exact_unwind", (_field("cycle", "u64_be", 8), _field("prior_bitmap", "u16_be", 2), _field("prior_reason", "u16_be", 2), _field("reserved", "zero", 4))),
+    _row(18, "PRE_REQUEST_REJECTED", "gateway->PID1", "before_request_acquire", (_field("next_cycle", "u64_be", 8), _field("reason", "u16_be", 2, "pre_request_reject_reason"), _field("reserved", "zero", 6))),
+    _row(19, "GLOBAL_FAULT", "gateway->PID1", "for_listed_global_local_fault", (_field("cycle", "u64_be", 8, "conditional"), _field("reason", "u16_be", 2, "global_fault_reason"), _field("reserved", "zero", 6), _field("gateway_reducer_token", "bytes", 32)), session="conditional_matching_token_and_cycle_or_zero"),
+    _row(20, "CHUNK_ACK", "current_receiver->sender", "for_prior_chunk", (_field("sequence", "u32_be", 4), _field("chunk_index", "u32_be", 4), _field("cumulative_bytes", "u64_be", 8), _field("rolling_sha256", "bytes", 32)), session="copies_acknowledged_message_session_token"),
+    _row(21, "SESSION_FD_ACK", "gateway->PID1", "after_exact_client_fd_readback", (_field("epoch", "u64_be", 8), _field("SO_COOKIE", "u64_be", 8), _field("gateway_reducer_token", "bytes", 32))),
+    _row(22, "GATEWAY_READINESS_PROBE", "PID1->gateway", "at_mandatory_census", (_field("census_generation", "u64_be", 8), _field("absolute_monotonic_deadline_ns", "u64_be", 8)), session="32_zero_bytes"),
+    _row(23, "GATEWAY_READINESS_RESULT", "gateway->PID1", "before_deadline", (_field("generation", "u64_be", 8), _field("pid", "u32_be", 4, "nonzero"), _field("worker_count", "u16_be", 2, "0..4_equals_live_session_ledger"), _field("control_ready_flag", "u16_be", 2, "1"), _field("executable_sha256", "bytes", 32), _field("control_cookie", "u64_be", 8)), session="32_zero_bytes"),
+    _row(24, "ENTITLEMENT_CONNECT_REQUEST", "gateway->PID1", "after_admit_local_request_credential_readbacks_pending_DNS_effect", (_field("epoch", "u64_be", 8), _field("cycle", "u64_be", 8), _field("route", "u8", 1, "route"), _field("reserved", "zero", 7), _field("request_token", "bytes", 32), _field("gateway_reducer_token", "bytes", 32))),
+    _row(25, "ENTITLEMENT_CONNECT_FD", "PID1->gateway", "after_exact_DNS_rule_connect_readback_rule_absence", (_field("type_24_prefix", "echo", None, "byte_identical_type_24_prefix"), _field("ttl", "u32_be", 4), _field("reserved0", "zero", 4), _field("dns_time_ns", "u64_be", 8), _field("family", "u16_be", 2, "AF_INET"), _field("socket_type", "u16_be", 2, "SOCK_STREAM"), _field("peer_ipv4", "bytes", 4), _field("peer_port", "u16_be", 2, "443"), _field("local_ipv4", "bytes", 4), _field("local_port", "u16_be", 2), _field("SO_ERROR", "u32_be", 4, "0"), _field("reserved1", "zero", 4), _field("SO_COOKIE", "u64_be", 8), _field("egress_token", "bytes", 32)), fd_rule="one_fd_then_PID1_close_and_absence"),
+    _row(26, "ENTITLEMENT_CONNECT_REJECT", "PID1->gateway", "only_with_proven_rule_and_fd_absence", (_field("type_24_prefix", "echo", None, "byte_identical_type_24_prefix"), _field("reason", "u16_be", 2, "entitlement_connect_reject_reason"), _field("reserved", "zero", 2), _field("ttl", "u32_be", 4, "conditional"), _field("dns_time_ns", "u64_be", 8, "conditional"), _field("selected_ipv4", "bytes", 4, "conditional"), _field("reserved2", "zero", 4))),
+    _row(27, "ENTITLEMENT_CONNECT_ACK", "gateway->PID1", "after_MSG_CMSG_CLOEXEC_and_full_fd_readback", (_field("payload", "echo", None, "byte_identical_type_25_payload"),)),
 )

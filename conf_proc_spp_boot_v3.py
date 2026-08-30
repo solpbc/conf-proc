@@ -25,6 +25,20 @@ from conf_proc_spp_boot import (
     _record_extend_transport_closed,
 )
 from conf_proc_spp_boot_v3_resource import ServingAuthorityWrapperV3
+from conf_proc_spp_boot_v3_semantics import (
+    ControlInventorySnapshotV3,
+    ExecutionClosureV3,
+    KernelIdentitySnapshotV3,
+    LaunchProjectionV3,
+    ModuleAuthoritySnapshotV3,
+    Predicate5SnapshotV3,
+    SourceDigestsV3,
+    Stage2ControllerSnapshotV3,
+    StorageSnapshotV3,
+    parse_execution_closure_v3,
+    validate_execution_mode_v3,
+    validate_semantic_conjunction_v3,
+)
 import conf_proc_spp_boot_v3_tables as tables
 from conf_proc_spp_reasons_v3 import (
     ApplianceErrorV3,
@@ -57,7 +71,6 @@ _HASH_REFERENCE_FIELDS_V3: Final = (
     "accepted_manifest_sha256",
     "kernel_feature_contract_sha256",
     "trusted_certificate_bundle_sha256",
-    "module_plan_sha256",
     "gpt_layout_rules_sha256",
 )
 _InputReferenceV3 = namedtuple("_InputReferenceV3", "input_name reference_name")
@@ -71,7 +84,6 @@ _INPUT_TO_REFERENCE_V3: Final = (
     _InputReferenceV3("accepted_manifest_bytes", "accepted_manifest_sha256"),
     _InputReferenceV3("kernel_feature_contract_bytes", "kernel_feature_contract_sha256"),
     _InputReferenceV3("trusted_certificate_bundle_bytes", "trusted_certificate_bundle_sha256"),
-    _InputReferenceV3("module_plan_bytes", "module_plan_sha256"),
     _InputReferenceV3("gpt_layout_rules_bytes", "gpt_layout_rules_sha256"),
 )
 
@@ -109,15 +121,20 @@ class BootContractV3:
     accepted_manifest_sha256: str
     kernel_feature_contract_sha256: str
     trusted_certificate_bundle_sha256: str
-    module_plan_sha256: str
     gpt_layout_rules_sha256: str
+    execution_closure: ExecutionClosureV3
+    execution_mode: str
+    cache_policy: str
 
 
 def parse_boot_contract_v3(data: bytes) -> BootContractV3:
     """Parse the v3 document itself; other authority bytes bind separately."""
 
     raw = _load_contract_document(data)
-    expected = {"schema", "contract_version", *_HASH_REFERENCE_FIELDS_V3}
+    expected = {
+        "schema", "contract_version", *_HASH_REFERENCE_FIELDS_V3,
+        "execution_closure", "execution_mode", "cache_policy",
+    }
     _require(type(raw) is dict and set(raw) == expected, CP_BOOT_V3_SCHEMA, "v3 boot contract fields are invalid")
     _require(
         raw["schema"] == BOOT_CONTRACT_V3_SCHEMA and raw["contract_version"] == 3,
@@ -129,10 +146,12 @@ def parse_boot_contract_v3(data: bytes) -> BootContractV3:
         CP_BOOT_V3_SCHEMA,
         "v3 boot contract hash references are invalid",
     )
+    closure = parse_execution_closure_v3(raw["execution_closure"])
+    validate_execution_mode_v3(raw["execution_mode"], raw["cache_policy"], closure)
     return BootContractV3(
-        raw["schema"],
-        raw["contract_version"],
+        raw["schema"], raw["contract_version"],
         *[raw[field] for field in _HASH_REFERENCE_FIELDS_V3],
+        closure, raw["execution_mode"], raw["cache_policy"],
     )
 
 
@@ -152,6 +171,14 @@ class BootBindingV3:
     gpt_layout_rules_bytes: bytes
     literal_v3_observation_shape_bytes: bytes
     boot_contract: BootContractV3
+    source_digests: SourceDigestsV3
+    storage: StorageSnapshotV3
+    kernel_identity: KernelIdentitySnapshotV3
+    module_authority: ModuleAuthoritySnapshotV3
+    control_inventory: ControlInventorySnapshotV3
+    launch_projection: LaunchProjectionV3
+    stage2_controller: Stage2ControllerSnapshotV3
+    predicate5: Predicate5SnapshotV3
 
     @property
     def boot_contract_sha256(self) -> str:
@@ -204,6 +231,32 @@ def _literal_v3_observation_shape_bytes() -> bytes:
             tables.FAILURE_STAGES_V3,
         ),
         ("launch_roles", tables.LAUNCH_ROLE_ROWS_V3),
+        ("stage2_controller", tables.STAGE2_CONTROLLER_ROW_V3),
+        (
+            "wire_message_authority",
+            tables.WIRE_HEADER_FIELDS_V3,
+            tables.WIRE_HEADER_BYTES_V3,
+            tables.WIRE_SEQUENCE_RULE_V3,
+            tables.WIRE_HAS_FD_TYPE_IDS_V3,
+            tables.WIRE_SESSION_COORDINATE_RULES_V3,
+            tables.WIRE_ROUTE_ENUM_ROWS_V3,
+            tables.WIRE_COLLECTOR_GENERATION_ENUM_ROWS_V3,
+            tables.WIRE_COLLECTOR_RESULT_ENUM_ROWS_V3,
+            tables.WIRE_COLLECTOR_ABORT_REASON_ENUM_ROWS_V3,
+            tables.WIRE_INVALID_COLLECTOR_ACK_REASON_ENUM_ROWS_V3,
+            tables.WIRE_INVALID_COLLECTOR_ACK_ABORT_MAPPING_V3,
+            tables.WIRE_COLLECTOR_CANCEL_REASON_ENUM_ROWS_V3,
+            tables.WIRE_REQUEST_REJECT_REASON_ENUM_ROWS_V3,
+            tables.WIRE_WORK_FINISH_OUTCOME_ENUM_ROWS_V3,
+            tables.WIRE_REQUEST_RELEASE_STATE_ENUM_ROWS_V3,
+            tables.WIRE_SESSION_RELEASE_HELD_BITS_V3,
+            tables.WIRE_SESSION_RELEASE_REASON_ENUM_ROWS_V3,
+            tables.WIRE_PRE_REQUEST_REJECT_REASON_ENUM_ROWS_V3,
+            tables.WIRE_GLOBAL_FAULT_REASON_ENUM_ROWS_V3,
+            tables.WIRE_ENTITLEMENT_CONNECT_REJECT_REASON_ENUM_ROWS_V3,
+            tables.WIRE_CONDITIONAL_SHAPE_ROWS_V3,
+            tables.WIRE_MESSAGE_AUTHORITY_ROWS_V3,
+        ),
         ("resource_actions", tables.RESOURCE_ACTION_ROWS_V3),
         (
             "resource_capacities",
@@ -263,12 +316,21 @@ def bind_boot_inputs_v3(
         CP_BOOT_V3_BINDING,
         "v3 contract bytes disagree with parsed contract",
     )
-    for input_name, reference_name in _INPUT_TO_REFERENCE_V3:
-        _require(
-            _sha256(supplied[input_name]) == getattr(contract, reference_name),
-            CP_BOOT_V3_BINDING,
-            f"v3 contract {reference_name} disagrees",
-        )
+    snapshots = validate_semantic_conjunction_v3(
+        contract=contract,
+        boot_contract_bytes=boot_contract_bytes,
+        root_lock_bytes=root_lock_bytes,
+        runtime_closure_bytes=runtime_closure_bytes,
+        verity_rules_bytes=verity_rules_bytes,
+        tcb_identity_bytes=tcb_identity_bytes,
+        builder_source_bytes=builder_source_bytes,
+        policy_bytes=policy_bytes,
+        accepted_manifest_bytes=accepted_manifest_bytes,
+        kernel_feature_contract_bytes=kernel_feature_contract_bytes,
+        trusted_certificate_bundle_bytes=trusted_certificate_bundle_bytes,
+        module_plan_bytes=module_plan_bytes,
+        gpt_layout_rules_bytes=gpt_layout_rules_bytes,
+    )
     return _register_boot_binding_v3(
         BootBindingV3(
             root_lock_bytes,
@@ -285,6 +347,14 @@ def bind_boot_inputs_v3(
             gpt_layout_rules_bytes,
             _literal_v3_observation_shape_bytes(),
             contract,
+            snapshots.source_digests,
+            snapshots.storage,
+            snapshots.kernel_identity,
+            snapshots.module_authority,
+            snapshots.control_inventory,
+            snapshots.launch_projection,
+            snapshots.stage2_controller,
+            snapshots.predicate5,
         )
     )
 

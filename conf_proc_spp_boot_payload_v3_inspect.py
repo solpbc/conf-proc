@@ -37,9 +37,10 @@ _SOURCE_ROWS_V3: Final = (
     _SourceRowV3("/usr/lib/spp/conf_proc_reasons.py", "support", 0o444, 12571, "c56b629a0fc156860c7400d6bc6884c1f41c8a9e4b0626ef4f2821f71102067a"),
     _SourceRowV3("/usr/lib/spp/conf_proc_spp_boot.py", "engine", 0o444, 147664, "c1dfba4c4ca71cf64ab8ecef12440950edab88f6ef3e2fb73791fc1f900076a6"),
     _SourceRowV3("/usr/lib/spp/conf_proc_spp_boot_dispatch_v3.py", "dispatcher", 0o444, 1141, "83a0652bff152a7e9e96e4f5daa0bde0278092d012d0b8fbf8832a39f23fa139"),
-    _SourceRowV3("/usr/lib/spp/conf_proc_spp_boot_v3.py", "engine", 0o444, 31995, "e8b45e60e71b8e3e05f85bc96a3d47d30d9579b0220314a6e50b6c30cb05ce43"),
+    _SourceRowV3("/usr/lib/spp/conf_proc_spp_boot_v3.py", "engine", 0o444, 35079, "0aff7ca7069da057e67dcfecc34b347945b3e7e36224510378989b52cbc35e73"),
     _SourceRowV3("/usr/lib/spp/conf_proc_spp_boot_v3_resource.py", "support", 0o444, 15109, "c639a585a15f81c9164878af22a59b484a553154dd9b61f3021818b1bf99f84e"),
-    _SourceRowV3("/usr/lib/spp/conf_proc_spp_boot_v3_tables.py", "support", 0o444, 12050, "0407cb6fa2bc0955decf65dd06034f1774f3d5d51635512041127a53c90775c4"),
+    _SourceRowV3("/usr/lib/spp/conf_proc_spp_boot_v3_semantics.py", "engine", 0o444, 51686, "6b6eede213d1c8a94ce936293c97492c1e117bdd34bd1d4fd72dfe21ca8abf85"),
+    _SourceRowV3("/usr/lib/spp/conf_proc_spp_boot_v3_tables.py", "support", 0o444, 37125, "0c50b6a46acd5152d63757956cba65f699c58e1a1566807448f5779e28787824"),
     _SourceRowV3("/usr/lib/spp/conf_proc_spp_boot_v3_wire.py", "support", 0o444, 41779, "00c03278031280dd572bf221be2075ab741e36b378af8a7fd2c874560b840e90"),
     _SourceRowV3("/usr/lib/spp/conf_proc_spp_reasons_v3.py", "support", 0o444, 3215, "4ca5821dd0edca148bffa312fd6d9208083fa5f6e22345e61c5284d3cbbcdf75"),
 )
@@ -70,7 +71,8 @@ _LOCAL_IMPORTS_V3: Final = {
     "conf_proc_reasons": frozenset(),
     "conf_proc_spp_boot": frozenset({"conf_proc_geometry", "conf_proc_json", "conf_proc_lock", "conf_proc_module_authority", "conf_proc_policy", "conf_proc_provenance_v2", "conf_proc_provenance_v2_manifest", "conf_proc_reasons"}),
     "conf_proc_spp_boot_dispatch_v3": frozenset({"conf_proc_json", "conf_proc_spp_boot_v3", "conf_proc_spp_reasons_v3"}),
-    "conf_proc_spp_boot_v3": frozenset({"conf_proc_json", "conf_proc_spp_boot", "conf_proc_spp_boot_v3_resource", "conf_proc_spp_boot_v3_tables", "conf_proc_spp_reasons_v3"}),
+    "conf_proc_spp_boot_v3": frozenset({"conf_proc_json", "conf_proc_spp_boot", "conf_proc_spp_boot_v3_resource", "conf_proc_spp_boot_v3_semantics", "conf_proc_spp_boot_v3_tables", "conf_proc_spp_reasons_v3"}),
+    "conf_proc_spp_boot_v3_semantics": frozenset({"conf_proc_spp_boot", "conf_proc_spp_boot_v3_tables", "conf_proc_spp_reasons_v3"}),
     "conf_proc_spp_boot_v3_resource": frozenset({"conf_proc_spp_boot", "conf_proc_spp_boot_v3_tables", "conf_proc_spp_boot_v3_wire", "conf_proc_spp_reasons_v3"}),
     "conf_proc_spp_boot_v3_tables": frozenset({"conf_proc_spp_boot"}),
     "conf_proc_spp_boot_v3_wire": frozenset({"conf_proc_json", "conf_proc_spp_boot_v3_tables", "conf_proc_spp_reasons_v3"}),
@@ -153,12 +155,12 @@ def _parse_newc(value: object) -> tuple[_RawMemberV3, ...]:
         except UnicodeDecodeError:
             _reject()
         if name == "TRAILER!!!":
-            if len(records) != 28 or fields != (0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 11, 0) or offset != len(value):
+            if len(records) != 29 or fields != (0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 11, 0) or offset != len(value):
                 _reject()
             return tuple(records)
         encoded = name.encode("utf-8")
         expected = (len(records) + 1, stat.S_IFREG | 0o444, 0, 0, 1, 0, len(payload), 0, 0, 0, 0, len(encoded) + 1, 0)
-        if len(records) >= 28 or not name or name.startswith("/") or len(encoded) > 255 or encoded <= previous_name or fields != expected:
+        if len(records) >= 29 or not name or name.startswith("/") or len(encoded) > 255 or encoded <= previous_name or fields != expected:
             _reject()
         previous_name = encoded
         records.append(_RawMemberV3("/" + name, 0o444, payload))

@@ -21,12 +21,15 @@ from queue import Empty
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+if str(ROOT / "test") not in sys.path:
+    sys.path.insert(0, str(ROOT / "test"))
 
 from conf_proc_json import canonical_dumps, canonical_loads
 import conf_proc_provenance_v2_inspect as h4
 import conf_proc_spp_boot_payload_v3_inspect as independent
 from conf_proc_spp_boot_v3 import bind_boot_inputs_v3, parse_boot_contract_v3
 from conf_proc_spp_reasons_v3 import ApplianceErrorV3, CP_SPP_PAYLOAD_V3_ADDRESS
+from conf_proc_spp_boot_v3_fixture import build_v3_fixture
 
 
 _CONTEXT = multiprocessing.get_context("fork")
@@ -43,10 +46,11 @@ _PINS = (
     ("conf_proc_spp_boot_payload.py", 44129, "23497c0df52044bce6552b0b6ddecbe5a1a1616f5d0f00f7997be368b2bec785"),
     ("conf_proc_spp_boot_payload_inspect.py", 16753, "89cb18339d9b3ef9b268383c5dbce75b0b02ac76ad6b92a86ea8cb0f7bac9f4b"),
     ("conf_proc_spp_reasons_v3.py", 3215, "4ca5821dd0edca148bffa312fd6d9208083fa5f6e22345e61c5284d3cbbcdf75"),
-    ("conf_proc_spp_boot_v3_tables.py", 12050, "0407cb6fa2bc0955decf65dd06034f1774f3d5d51635512041127a53c90775c4"),
+    ("conf_proc_spp_boot_v3_tables.py", 37125, "0c50b6a46acd5152d63757956cba65f699c58e1a1566807448f5779e28787824"),
     ("conf_proc_spp_boot_v3_wire.py", 41779, "00c03278031280dd572bf221be2075ab741e36b378af8a7fd2c874560b840e90"),
     ("conf_proc_spp_boot_v3_resource.py", 15109, "c639a585a15f81c9164878af22a59b484a553154dd9b61f3021818b1bf99f84e"),
-    ("conf_proc_spp_boot_v3.py", 31995, "e8b45e60e71b8e3e05f85bc96a3d47d30d9579b0220314a6e50b6c30cb05ce43"),
+    ("conf_proc_spp_boot_v3.py", 35079, "0aff7ca7069da057e67dcfecc34b347945b3e7e36224510378989b52cbc35e73"),
+    ("conf_proc_spp_boot_v3_semantics.py", 51686, "6b6eede213d1c8a94ce936293c97492c1e117bdd34bd1d4fd72dfe21ca8abf85"),
     ("conf_proc_spp_boot_dispatch_v3.py", 1141, "83a0652bff152a7e9e96e4f5daa0bde0278092d012d0b8fbf8832a39f23fa139"),
 )
 _SOURCE_ROWS_V3 = (
@@ -62,6 +66,7 @@ _SOURCE_ROWS_V3 = (
     ("/usr/lib/spp/conf_proc_spp_boot_dispatch_v3.py", "dispatcher", 0o444),
     ("/usr/lib/spp/conf_proc_spp_boot_v3.py", "engine", 0o444),
     ("/usr/lib/spp/conf_proc_spp_boot_v3_resource.py", "support", 0o444),
+    ("/usr/lib/spp/conf_proc_spp_boot_v3_semantics.py", "engine", 0o444),
     ("/usr/lib/spp/conf_proc_spp_boot_v3_tables.py", "support", 0o444),
     ("/usr/lib/spp/conf_proc_spp_boot_v3_wire.py", "support", 0o444),
     ("/usr/lib/spp/conf_proc_spp_reasons_v3.py", "support", 0o444),
@@ -77,7 +82,8 @@ _EXPECTED_LOCAL_IMPORTS_V3 = {
     "conf_proc_reasons": frozenset(),
     "conf_proc_spp_boot": frozenset({"conf_proc_geometry", "conf_proc_json", "conf_proc_lock", "conf_proc_module_authority", "conf_proc_policy", "conf_proc_provenance_v2", "conf_proc_provenance_v2_manifest", "conf_proc_reasons"}),
     "conf_proc_spp_boot_dispatch_v3": frozenset({"conf_proc_json", "conf_proc_spp_boot_v3", "conf_proc_spp_reasons_v3"}),
-    "conf_proc_spp_boot_v3": frozenset({"conf_proc_json", "conf_proc_spp_boot", "conf_proc_spp_boot_v3_resource", "conf_proc_spp_boot_v3_tables", "conf_proc_spp_reasons_v3"}),
+    "conf_proc_spp_boot_v3": frozenset({"conf_proc_json", "conf_proc_spp_boot", "conf_proc_spp_boot_v3_resource", "conf_proc_spp_boot_v3_semantics", "conf_proc_spp_boot_v3_tables", "conf_proc_spp_reasons_v3"}),
+    "conf_proc_spp_boot_v3_semantics": frozenset({"conf_proc_spp_boot", "conf_proc_spp_boot_v3_tables", "conf_proc_spp_reasons_v3"}),
     "conf_proc_spp_boot_v3_resource": frozenset({"conf_proc_spp_boot", "conf_proc_spp_boot_v3_tables", "conf_proc_spp_boot_v3_wire", "conf_proc_spp_reasons_v3"}),
     "conf_proc_spp_boot_v3_tables": frozenset({"conf_proc_spp_boot"}),
     "conf_proc_spp_boot_v3_wire": frozenset({"conf_proc_json", "conf_proc_spp_boot_v3_tables", "conf_proc_spp_reasons_v3"}),
@@ -98,16 +104,9 @@ def _digest(data: bytes) -> str:
 
 
 def _issued_authorities() -> tuple[object, object]:
-    values = {name: f"inline-v3-kat:{name}".encode("ascii") for name in _AUTHORITY_FIELDS_V3 if name not in {"boot_contract_bytes", "literal_v3_observation_shape_bytes"}}
+    values, contract = build_v3_fixture()
+    binding = bind_boot_inputs_v3(contract=contract, **values)
     manifest = values["accepted_manifest_bytes"]
-    document = {"schema": "conf-proc-spp-boot-contract/v3", "contract_version": 3}
-    document.update({name.removesuffix("_bytes") + "_sha256": _digest(values[name]) for name in values})
-    boot_contract_bytes = canonical_dumps(document)
-    binding = bind_boot_inputs_v3(
-        contract=parse_boot_contract_v3(boot_contract_bytes),
-        **values,
-        boot_contract_bytes=boot_contract_bytes,
-    )
     inspection = h4._register_inspection_result(h4.InspectionResult(
         "artifact_consistent", "not_qualified", "1" * 64, "2" * 64,
         "3" * 64, "4" * 64, "5" * 64, "6" * 64, _digest(manifest),
@@ -247,9 +246,9 @@ class BootPayloadV3IndependentSelftest(unittest.TestCase):
             )
 
     def test_pinned_base_and_inline_authority_literals(self) -> None:
-        self.assertEqual(len(_PINS), 17)
-        self.assertEqual(len(_SOURCE_ROWS_V3), 15)
-        self.assertEqual(len(_EXPECTED_LOCAL_IMPORTS_V3), 15)
+        self.assertEqual(len(_PINS), 18)
+        self.assertEqual(len(_SOURCE_ROWS_V3), 16)
+        self.assertEqual(len(_EXPECTED_LOCAL_IMPORTS_V3), 16)
         self.assertEqual((_PLAN_SCHEMA_V3, _PACKAGE_SCHEMA_V3), ("conf-proc-spp-boot-payload-plan/v3", "conf-proc-spp-boot-payload-package/v3"))
         self.assertEqual(len(_AUTHORITY_FIELDS_V3), 13)
 
@@ -259,7 +258,7 @@ class BootPayloadV3IndependentSelftest(unittest.TestCase):
             cpio_bytes=self.cpio, package_bytes=self.package, output_path=str(self.output_path),
         )
         self.assertEqual(result.state, "artifact_consistent")
-        self.assertEqual(len(_cpio_layouts(self.cpio)[0]), 28)
+        self.assertEqual(len(_cpio_layouts(self.cpio)[0]), 29)
         self.assertNotIn("conf_proc_spp_boot_payload_v3", sys.modules)
 
     def test_raw_cpio_and_package_mutations(self) -> None:

@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from conf_proc_json import canonical_dumps
+from conf_proc_json import canonical_loads
 from conf_proc_spp_boot_dispatch_v3 import parse_boot_contract_document_v3
 import conf_proc_spp_boot_v3 as boot_v3
 from conf_proc_spp_boot_v3_resource import ServingAuthorityWrapperV3
@@ -34,6 +35,7 @@ from conf_proc_spp_boot_v3 import (
     parse_boot_contract_v3,
 )
 from conf_proc_spp_reasons_v3 import ApplianceErrorV3, CP_BOOT_V3_BINDING
+from conf_proc_spp_boot_v3_fixture import build_v3_fixture, refresh_v3_contract_bindings
 
 
 _INPUT_NAMES = (
@@ -49,21 +51,8 @@ _INPUT_NAMES = (
     "module_plan_bytes",
     "gpt_layout_rules_bytes",
 )
-_REFERENCE_NAMES = tuple(name.removesuffix("_bytes") + "_sha256" for name in _INPUT_NAMES)
-
-
 def _fixture() -> tuple[dict[str, bytes], object]:
-    inputs = {name: f"{name}-fixture".encode("ascii") for name in _INPUT_NAMES}
-    document = {"schema": BOOT_CONTRACT_V3_SCHEMA, "contract_version": 3}
-    document.update(
-        {
-            reference: hashlib.sha256(inputs[name]).hexdigest()
-            for name, reference in zip(_INPUT_NAMES, _REFERENCE_NAMES, strict=True)
-        }
-    )
-    boot_contract_bytes = canonical_dumps(document)
-    inputs["boot_contract_bytes"] = boot_contract_bytes
-    return inputs, parse_boot_contract_v3(boot_contract_bytes)
+    return build_v3_fixture()
 
 
 def _bind(inputs: dict[str, bytes], contract: object):
@@ -125,6 +114,14 @@ class BootAuthorityV3SelfTest(unittest.TestCase):
             binding.gpt_layout_rules_bytes,
             binding.literal_v3_observation_shape_bytes,
             binding.boot_contract,
+            binding.source_digests,
+            binding.storage,
+            binding.kernel_identity,
+            binding.module_authority,
+            binding.control_inventory,
+            binding.launch_projection,
+            binding.stage2_controller,
+            binding.predicate5,
         )
         self.assertFalse(is_issued_boot_binding_v3(hand_constructed))
         with self.assertRaises(ApplianceErrorV3):
@@ -151,6 +148,37 @@ class BootAuthorityV3SelfTest(unittest.TestCase):
             parse_boot_contract_document_v3(canonical_dumps({}))
         with self.assertRaises(ApplianceErrorV3):
             parse_boot_contract_document_v3(b"{")
+
+    def test_predecessor_parse_and_semantic_falsifications_reject(self) -> None:
+        inputs, contract = _fixture()
+        malformed = dict(inputs)
+        malformed["policy_bytes"] = b"{}"
+        with self.assertRaises(ApplianceErrorV3) as raised:
+            _bind(malformed, contract)
+        self.assertEqual(raised.exception.reason_code, CP_BOOT_V3_BINDING)
+
+        incoherent = dict(inputs)
+        tcb = canonical_loads(incoherent["tcb_identity_bytes"])
+        tcb["kernel_feature_contract"]["sha256"] = "0" * 64
+        incoherent["tcb_identity_bytes"] = canonical_dumps(tcb)
+        refresh_v3_contract_bindings(incoherent)
+        with self.assertRaises(ApplianceErrorV3) as raised:
+            _bind(incoherent, parse_boot_contract_v3(incoherent["boot_contract_bytes"]))
+        self.assertEqual(raised.exception.reason_code, CP_BOOT_V3_BINDING)
+
+    def test_module_plan_binding_is_one_way_and_contract_has_no_plan_hash(self) -> None:
+        inputs, contract = _fixture()
+        old_contract = canonical_loads(inputs["boot_contract_bytes"])
+        old_contract["module_plan_sha256"] = hashlib.sha256(inputs["module_plan_bytes"]).hexdigest()
+        with self.assertRaises(ApplianceErrorV3):
+            parse_boot_contract_v3(canonical_dumps(old_contract))
+        bad_plan = dict(inputs)
+        plan = canonical_loads(bad_plan["module_plan_bytes"])
+        plan["boot_contract_sha256"] = "0" * 64
+        bad_plan["module_plan_bytes"] = canonical_dumps(plan)
+        with self.assertRaises(ApplianceErrorV3) as raised:
+            _bind(bad_plan, contract)
+        self.assertEqual(raised.exception.reason_code, CP_BOOT_V3_BINDING)
 
     def test_every_measurement_frame_and_closed_table_affects_measurement(self) -> None:
         inputs, contract = _fixture()

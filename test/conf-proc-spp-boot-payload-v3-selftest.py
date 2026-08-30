@@ -78,7 +78,7 @@ class BootPayloadV3Selftest(unittest.TestCase):
         cpio = (output / "spp-boot-payload.cpio").read_bytes()
         package = (output / "spp-boot-payload.package.json").read_bytes()
         self.assertEqual(result.state, "built_unqualified")
-        self.assertEqual(len(payload._parse_newc(cpio)), 28)
+        self.assertEqual(len(payload._parse_newc(cpio)), 29)
         self.assertEqual(hashlib.sha256(cpio).hexdigest(), result.cpio_sha256)
         self.assertEqual(hashlib.sha256(package).hexdigest(), result.package_sha256)
         inspected = independent.inspect_boot_payload_v3(
