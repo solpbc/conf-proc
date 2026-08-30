@@ -48,9 +48,9 @@ _PINS = (
     ("conf_proc_spp_reasons_v3.py", 3215, "4ca5821dd0edca148bffa312fd6d9208083fa5f6e22345e61c5284d3cbbcdf75"),
     ("conf_proc_spp_boot_v3_tables.py", 37125, "0c50b6a46acd5152d63757956cba65f699c58e1a1566807448f5779e28787824"),
     ("conf_proc_spp_boot_v3_wire.py", 41779, "00c03278031280dd572bf221be2075ab741e36b378af8a7fd2c874560b840e90"),
-    ("conf_proc_spp_boot_v3_resource.py", 15109, "c639a585a15f81c9164878af22a59b484a553154dd9b61f3021818b1bf99f84e"),
-    ("conf_proc_spp_boot_v3.py", 35079, "0aff7ca7069da057e67dcfecc34b347945b3e7e36224510378989b52cbc35e73"),
-    ("conf_proc_spp_boot_v3_semantics.py", 58000, "04db2acddf6282c5bc556bad1704629f14db0294c0e6ed9c1a75fc88f97a5578"),
+    ("conf_proc_spp_boot_v3_resource.py", 20308, "47aaf114c5ab13aaa9eccc36087a8ad23081f31ed8beaff0de75c1c76c15e6ea"),
+    ("conf_proc_spp_boot_v3.py", 53012, "9b348e1ab4a0b55ab188cb30a65367bcb66171da5fa82668fffa7632781bc209"),
+    ("conf_proc_spp_boot_v3_semantics.py", 65475, "f1a0dfa7c7013e9e6bb8bf78cfb01b090ea63cf177c6bbeef8da9c28d6eeade6"),
     ("conf_proc_spp_boot_dispatch_v3.py", 1141, "83a0652bff152a7e9e96e4f5daa0bde0278092d012d0b8fbf8832a39f23fa139"),
 )
 _SOURCE_ROWS_V3 = (
@@ -84,7 +84,7 @@ _EXPECTED_LOCAL_IMPORTS_V3 = {
     "conf_proc_spp_boot_dispatch_v3": frozenset({"conf_proc_json", "conf_proc_spp_boot_v3", "conf_proc_spp_reasons_v3"}),
     "conf_proc_spp_boot_v3": frozenset({"conf_proc_json", "conf_proc_spp_boot", "conf_proc_spp_boot_v3_resource", "conf_proc_spp_boot_v3_semantics", "conf_proc_spp_boot_v3_tables", "conf_proc_spp_reasons_v3"}),
     "conf_proc_spp_boot_v3_semantics": frozenset({"conf_proc_spp_boot", "conf_proc_spp_boot_v3_tables", "conf_proc_spp_reasons_v3"}),
-    "conf_proc_spp_boot_v3_resource": frozenset({"conf_proc_spp_boot", "conf_proc_spp_boot_v3_tables", "conf_proc_spp_boot_v3_wire", "conf_proc_spp_reasons_v3"}),
+    "conf_proc_spp_boot_v3_resource": frozenset({"conf_proc_spp_boot", "conf_proc_spp_boot_v3", "conf_proc_spp_boot_v3_tables", "conf_proc_spp_boot_v3_wire", "conf_proc_spp_reasons_v3"}),
     "conf_proc_spp_boot_v3_tables": frozenset({"conf_proc_spp_boot"}),
     "conf_proc_spp_boot_v3_wire": frozenset({"conf_proc_json", "conf_proc_spp_boot_v3_tables", "conf_proc_spp_reasons_v3"}),
     "conf_proc_spp_reasons_v3": frozenset(),

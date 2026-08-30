@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import hashlib
 import sys
 import unittest
@@ -19,6 +20,7 @@ if str(ROOT / "test") not in sys.path:
 
 from conf_proc_json import canonical_dumps, canonical_loads
 import conf_proc_spp_boot_v3 as boot
+import conf_proc_spp_boot_v3_semantics as semantics
 from conf_proc_spp_boot_v3_fixture import build_v3_fixture, refresh_v3_contract_bindings
 from conf_proc_spp_reasons_v3 import ApplianceErrorV3, CP_BOOT_V3_BINDING, CP_BOOT_V3_SCHEMA
 from conf_proc_spp_boot_v3_semantics import jit_derivation_sha256_v3
@@ -50,6 +52,17 @@ class BootV3Predicate5Selftest(unittest.TestCase):
             with self.subTest(kwargs=kwargs):
                 self.assertEqual(len(binding.predicate5.jit_derivations), expected_derivations)
                 self.assertEqual(binding.predicate5.startup_kat_sha256, "82840888819a980868766f4273456c9c81d0539a6d2642b8af32f4cb30829976")
+                self.assertEqual(
+                    tuple(row["name"] for row in canonical_loads(docs["boot_contract_bytes"])["execution_closure"]["startup_kat"]["packages"]),
+                    ("libpython3.10-minimal", "libpython3.10-stdlib"),
+                )
+                self.assertEqual(
+                    tuple(row["sha256"] for row in canonical_loads(docs["boot_contract_bytes"])["execution_closure"]["startup_kat"]["packages"]),
+                    (
+                        "d7cfecf69996a03153da25b826b422a27b52c1c4cbcb2fa67bce093c476f0d08",
+                        "5cfe8bd93cde07bf977dc94fdf438e1a5fa70bc79f871147555156b14937c38d",
+                    ),
+                )
 
     def test_static_kat_is_read_from_the_byte_exact_fixture_files(self) -> None:
         kat = ROOT / "test/fixtures/spp-v3/python310-startup-kat-v1.json"
@@ -57,7 +70,7 @@ class BootV3Predicate5Selftest(unittest.TestCase):
         self.assertEqual((len(kat.read_bytes()), hashlib.sha256(kat.read_bytes()).hexdigest()), (2836, "82840888819a980868766f4273456c9c81d0539a6d2642b8af32f4cb30829976"))
         self.assertEqual((len(observer.read_bytes()), hashlib.sha256(observer.read_bytes()).hexdigest()), (1871, "525fa4a1335a95744779ee5e627c150f194ed6e782148553be2547c4d77ee194"))
         docs, raw = _mutated_docs(execution_mode="python_no_jit", cache_policy="absent")
-        raw["execution_closure"]["bootstrap"]["pre_importer_cache"].reverse()
+        raw["execution_closure"]["bootstrap"]["role_pre_importer_cache"].reverse()
         with self.assertRaisesRegex(ApplianceErrorV3, CP_BOOT_V3_SCHEMA):
             _commit_contract(docs, raw)
             _parsed_contract(docs)
@@ -85,6 +98,99 @@ class BootV3Predicate5Selftest(unittest.TestCase):
         with self.assertRaisesRegex(ApplianceErrorV3, CP_BOOT_V3_SCHEMA):
             _commit_contract(docs, raw)
             _parsed_contract(docs)
+
+    def test_startup_kat_receipt_and_package_rows_are_closed(self) -> None:
+        package_fields = ("name", "version", "local_path", "url", "sha256")
+        for index in range(2):
+            for field in package_fields:
+                with self.subTest(package=index, field=field):
+                    docs, raw = _mutated_docs(execution_mode="python_no_jit", cache_policy="absent")
+                    package = raw["execution_closure"]["startup_kat"]["packages"][index]
+                    package[field] = "0" * 64 if field == "sha256" else package[field] + "-mutated"
+                    _commit_contract(docs, raw)
+                    with self.assertRaisesRegex(ApplianceErrorV3, CP_BOOT_V3_SCHEMA):
+                        _parsed_contract(docs)
+
+        for mutation in ("package_order", "package_count", "unknown_field", "missing_field"):
+            with self.subTest(mutation=mutation):
+                docs, raw = _mutated_docs(execution_mode="python_no_jit", cache_policy="absent")
+                kat = raw["execution_closure"]["startup_kat"]
+                if mutation == "package_order":
+                    kat["packages"].reverse()
+                elif mutation == "package_count":
+                    kat["packages"].pop()
+                elif mutation == "unknown_field":
+                    kat["unknown"] = True
+                else:
+                    del kat["binary"]
+                _commit_contract(docs, raw)
+                with self.assertRaisesRegex(ApplianceErrorV3, CP_BOOT_V3_SCHEMA):
+                    _parsed_contract(docs)
+
+    def test_every_startup_kat_scalar_is_receipt_bound(self) -> None:
+        docs, raw = _mutated_docs(execution_mode="python_no_jit", cache_policy="absent")
+        closure = raw["execution_closure"]
+
+        def scalar_paths(value: object, path: tuple[str | int, ...] = ()) -> list[tuple[str | int, ...]]:
+            if type(value) is dict:
+                return [item for key in sorted(value) for item in scalar_paths(value[key], (*path, key))]
+            if type(value) is list:
+                return [item for index, item_value in enumerate(value) for item in scalar_paths(item_value, (*path, index))]
+            return [path]
+
+        def mutate_scalar(value: object) -> object:
+            if value is None:
+                return "mutated"
+            if type(value) is bool:
+                return not value
+            if type(value) is int:
+                return value + 1
+            assert type(value) is str
+            return value + "-mutated"
+
+        for path in scalar_paths(closure["startup_kat"]):
+            with self.subTest(path=path):
+                mutated_closure = deepcopy(closure)
+                parent: object = mutated_closure["startup_kat"]
+                for component in path[:-1]:
+                    parent = parent[component]
+                leaf = path[-1]
+                parent[leaf] = mutate_scalar(parent[leaf])
+                with self.assertRaisesRegex(ApplianceErrorV3, CP_BOOT_V3_SCHEMA):
+                    semantics.parse_execution_closure_v3(mutated_closure)
+
+        for mutation in ("whole_receipt", "binary_path", "binary_size", "capture_argv", "capture_basis", "observation_flags"):
+            with self.subTest(mutation=mutation):
+                docs, raw = _mutated_docs(execution_mode="python_no_jit", cache_policy="absent")
+                kat = raw["execution_closure"]["startup_kat"]
+                if mutation == "whole_receipt":
+                    kat["binary"]["archive_sha256"] = "0" * 64
+                elif mutation == "binary_path":
+                    kat["binary"]["path"] = "/usr/bin/python3"
+                elif mutation == "binary_size":
+                    kat["binary"]["size"] += 1
+                elif mutation == "capture_argv":
+                    kat["capture"]["argv"].reverse()
+                elif mutation == "capture_basis":
+                    kat["capture"]["native_runtime_basis"] = "mutated"
+                else:
+                    kat["capture"]["observation"]["flags"]["isolated"] = 0
+                _commit_contract(docs, raw)
+                with self.assertRaisesRegex(ApplianceErrorV3, CP_BOOT_V3_SCHEMA):
+                    _parsed_contract(docs)
+
+    def test_controller_and_role_bootstrap_caches_are_independent(self) -> None:
+        for target, source in (
+            ("controller_pre_importer_cache", "role_pre_importer_cache"),
+            ("role_pre_importer_cache", "controller_pre_importer_cache"),
+        ):
+            with self.subTest(target=target, source=source):
+                docs, raw = _mutated_docs(execution_mode="python_no_jit", cache_policy="absent")
+                bootstrap = raw["execution_closure"]["bootstrap"]
+                bootstrap[target] = [dict(entry) for entry in bootstrap[source]]
+                _commit_contract(docs, raw)
+                with self.assertRaisesRegex(ApplianceErrorV3, CP_BOOT_V3_SCHEMA):
+                    _parsed_contract(docs)
 
     def test_bootstrap_and_loader_control_escapes_are_rejected(self) -> None:
         docs, raw = _mutated_docs()

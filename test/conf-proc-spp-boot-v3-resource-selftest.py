@@ -15,6 +15,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import conf_proc_spp_boot as boot
+from conf_proc_spp_boot_v3 import (
+    AuthorityStepReadbackV3,
+    BootTransitionEngineV3,
+    BootTransitionStateV3,
+    Pcr15ExtendOutcome,
+    bind_boot_inputs_v3,
+)
 from conf_proc_spp_boot_v3_resource import ServingAuthorityWrapperV3, ServingResourceReducerV3
 from conf_proc_spp_boot_v3_wire import (
     CollectorGenerationV3,
@@ -22,7 +29,8 @@ from conf_proc_spp_boot_v3_wire import (
     RouteV3,
     WorkFinishOutcomeV3,
 )
-from conf_proc_spp_reasons_v3 import ApplianceErrorV3
+from conf_proc_spp_reasons_v3 import ApplianceErrorV3, CP_BOOT_V3_BINDING
+from conf_proc_spp_boot_v3_fixture import build_v3_fixture
 
 
 def _completed_session(reducer: ServingResourceReducerV3) -> bytes:
@@ -50,6 +58,24 @@ class _SessionTransport:
                 effect.contract_sha256, effect.token, effect.ipv4_address, 0
             )
         return boot.ServingSessionReadback(effect.contract_sha256, effect.action)
+
+
+class _AuthorityTransport:
+    def execute(self, effect: boot.BootEffect) -> boot.BootObservation:
+        assert effect.__class__.__name__ == "AuthorityStepEffectV3"
+        observed = effect.expected if effect.expected is not None else ("present", effect.action)
+        if effect.state is BootTransitionStateV3.PCR15_EXTENDED:
+            observed = Pcr15ExtendOutcome.ACKNOWLEDGED
+        return AuthorityStepReadbackV3(effect.contract_sha256, effect.state, effect.action, observed)
+
+
+def _admitted_wrapper() -> ServingAuthorityWrapperV3:
+    inputs, contract = build_v3_fixture()
+    engine = BootTransitionEngineV3(bind_boot_inputs_v3(contract=contract, **inputs))
+    transport = _AuthorityTransport()
+    while engine.next_effect() is not None:
+        engine.advance(transport)
+    return engine.admit_serving_authority()
 
 
 class ServingResourceReducerV3SelfTest(unittest.TestCase):
@@ -162,7 +188,10 @@ class ServingResourceReducerV3SelfTest(unittest.TestCase):
             reducer.session_release(survivor)
 
     def test_wrapper_drives_resource_and_session_in_lockstep(self) -> None:
-        wrapper = ServingAuthorityWrapperV3()
+        with self.assertRaises(ApplianceErrorV3) as missing_capability:
+            ServingAuthorityWrapperV3()
+        self.assertEqual(missing_capability.exception.reason_code, CP_BOOT_V3_BINDING)
+        wrapper = _admitted_wrapper()
         handle = object()
         closed: list[bool] = []
         transport = _SessionTransport(handle)
@@ -188,10 +217,10 @@ class ServingResourceReducerV3SelfTest(unittest.TestCase):
                 wrapper.advance(session, transport)
                 break
             wrapper.advance(session, transport)
-        self.assertEqual(session.session_reducer.state, boot.ServingSessionState.UPSTREAM_OPENED)
+        self.assertEqual(wrapper._reducers[session.session_token].state, boot.ServingSessionState.UPSTREAM_OPENED)
         wrapper.work_finish(session, route_work_permit, WorkFinishOutcomeV3.ORDINARY)
         wrapper.advance(session, transport)
-        self.assertEqual(session.session_reducer.state, boot.ServingSessionState.REQUEST_CLOSED)
+        self.assertEqual(wrapper._reducers[session.session_token].state, boot.ServingSessionState.REQUEST_CLOSED)
         wrapper.request_release(session, request_permit)
         self.assertIsNone(wrapper._resource.sessions[session.session_token].request_permit)
         self.assertEqual(wrapper.session_release(session), (0, None, None, None))

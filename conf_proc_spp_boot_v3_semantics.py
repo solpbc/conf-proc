@@ -34,6 +34,20 @@ _ROLE_ORDER: Final = (
     "attestation-broker", "inference", "asr", "gateway", "collector",
 )
 _KAT_SHA256: Final = "82840888819a980868766f4273456c9c81d0539a6d2642b8af32f4cb30829976"
+_KAT_PACKAGE_ROWS_V3: Final = (
+    (
+        "libpython3.10-minimal", "3.10.12-1~22.04.15",
+        "evidence/python310-startup-kat-packages/libpython3.10-minimal_3.10.12-1~22.04.15_amd64.deb",
+        "https://launchpadlibrarian.net/850349567/libpython3.10-minimal_3.10.12-1~22.04.15_amd64.deb",
+        "d7cfecf69996a03153da25b826b422a27b52c1c4cbcb2fa67bce093c476f0d08",
+    ),
+    (
+        "libpython3.10-stdlib", "3.10.12-1~22.04.15",
+        "evidence/python310-startup-kat-packages/libpython3.10-stdlib_3.10.12-1~22.04.15_amd64.deb",
+        "https://launchpadlibrarian.net/850349568/libpython3.10-stdlib_3.10.12-1~22.04.15_amd64.deb",
+        "5cfe8bd93cde07bf977dc94fdf438e1a5fa70bc79f871147555156b14937c38d",
+    ),
+)
 _OBSERVER_SHA256: Final = "525fa4a1335a95744779ee5e627c150f194ed6e782148553be2547c4d77ee194"
 _PYTHON310_SHA256: Final = "d6bca2b84e73c7775a0dd5e6a76899cfe4ee62863d7c8f88513811d1fda23f49"
 _OBSERVATION_SHA256: Final = "44b7f117d18e6ec4611dd00b9af69f93125e2c6de468441ff86f2f87ea1b9c4f"
@@ -89,6 +103,8 @@ class ExecutionClosureV3:
     schema: str
     startup_kat: FrozenJsonObjectV3
     bootstrap: FrozenJsonObjectV3
+    controller_bootstrap_cache: "ControllerBootstrapCacheProjectionV3"
+    role_bootstrap_cache: "RoleBootstrapCacheProjectionV3"
     launch_rows: tuple[FrozenJsonObjectV3, ...]
     import_roots: tuple[FrozenJsonValueV3, ...]
     native_loader_roots: tuple[FrozenJsonValueV3, ...]
@@ -108,9 +124,28 @@ def _require_sorted_unique_strings(value: object, code: str, message: str) -> tu
     return tuple(value)
 
 
-def _validate_startup_kat_v3(value: object) -> None:
+@dataclass(frozen=True)
+class ControllerBootstrapCacheProjectionV3:
+    entry_path: str
+    entries: tuple[tuple[str, str | None], ...]
+
+
+@dataclass(frozen=True)
+class RoleBootstrapCacheProjectionV3:
+    entry_path: str
+    entries: tuple[tuple[str, str | None], ...]
+
+
+def _validate_startup_kat_v3(frozen_value: object) -> None:
+    value = _thaw_json(frozen_value)
     _require(type(value) is dict and set(value) == {"schema", "binary", "capture", "packages"}, CP_BOOT_V3_SCHEMA, "execution closure startup KAT fields are invalid")
-    _require(value["schema"] == "sol-spp-python310-startup-kat/v1" and type(value["packages"]) is list and len(value["packages"]) == 2, CP_BOOT_V3_SCHEMA, "startup KAT receipt is invalid")
+    packages = value["packages"]
+    _require(value["schema"] == "sol-spp-python310-startup-kat/v1" and type(packages) is list and len(packages) == len(_KAT_PACKAGE_ROWS_V3), CP_BOOT_V3_SCHEMA, "startup KAT receipt is invalid")
+    package_rows: list[tuple[str, str, str, str, str]] = []
+    for package in packages:
+        _require(type(package) is dict and set(package) == {"name", "version", "local_path", "url", "sha256"} and all(type(package[field]) is str for field in ("name", "version", "local_path", "url", "sha256")), CP_BOOT_V3_SCHEMA, "startup KAT package row is invalid")
+        package_rows.append((package["name"], package["version"], package["local_path"], package["url"], package["sha256"]))
+    _require(tuple(package_rows) == _KAT_PACKAGE_ROWS_V3, CP_BOOT_V3_SCHEMA, "startup KAT package rows are invalid")
     binary = value["binary"]
     capture = value["capture"]
     _require(type(binary) is dict and set(binary) == {"archive_sha256", "path", "sha256", "size"} and type(binary["archive_sha256"]) is str and len(binary["archive_sha256"]) == 64 and all(character in "0123456789abcdef" for character in binary["archive_sha256"]), CP_BOOT_V3_SCHEMA, "startup KAT binary archive identity is invalid")
@@ -124,10 +159,34 @@ def _validate_startup_kat_v3(value: object) -> None:
     _require(len(observation_bytes) == 1165 and _sha256(observation_bytes) == _OBSERVATION_SHA256, CP_BOOT_V3_SCHEMA, "startup KAT observation is invalid")
     _require(len(observation_bytes + b"\n") == 1166 and _sha256(observation_bytes + b"\n") == _RAW_STDOUT_SHA256, CP_BOOT_V3_SCHEMA, "startup KAT stdout framing is invalid")
     _require(observation["flags"] == {"dont_write_bytecode": 1, "ignore_environment": 1, "isolated": 1, "no_site": 1, "no_user_site": 1}, CP_BOOT_V3_SCHEMA, "startup KAT flags are invalid")
+    kat_bytes = boot.canonical_dumps(value)
+    _require(_sha256(kat_bytes + b"\n") == _KAT_SHA256, CP_BOOT_V3_SCHEMA, "startup KAT receipt digest is invalid")
 
 
-def _validate_bootstrap_v3(value: object, rows: object, startup_kat: object) -> None:
-    required = {"source_path", "controller_entry", "role_map", "flags", "pre_path", "pre_meta_path", "pre_path_hooks", "pre_importer_cache", "denied_zip", "post_path", "post_meta_path", "post_path_hooks", "post_importer_cache"}
+def _bootstrap_cache_projection_v3(
+    value: object,
+    entry_path: str,
+    projection_type: type[ControllerBootstrapCacheProjectionV3] | type[RoleBootstrapCacheProjectionV3],
+) -> ControllerBootstrapCacheProjectionV3 | RoleBootstrapCacheProjectionV3:
+    expected_cache = (
+        ("/usr/lib/python3.10", "_frozen_importlib_external.FileFinder"),
+        ("/usr/lib/python3.10/encodings", "_frozen_importlib_external.FileFinder"),
+        ("/usr/lib/python310.zip", None),
+    )
+    _require(type(value) is list and len(value) == 4, CP_BOOT_V3_SCHEMA, "bootstrap importer cache is invalid")
+    entries: list[tuple[str, str | None]] = []
+    for row in value:
+        _require(type(row) is dict and set(row) == {"path", "finder"} and type(row["path"]) is str and (type(row["finder"]) is str or row["finder"] is None), CP_BOOT_V3_SCHEMA, "bootstrap importer cache is invalid")
+        entries.append((row["path"], row["finder"]))
+    typed_entries = tuple(entries)
+    _require(typed_entries[:3] == expected_cache and typed_entries[3] == (entry_path, None), CP_BOOT_V3_SCHEMA, "bootstrap typed entry-script cache is invalid")
+    return projection_type(entry_path, typed_entries)
+
+
+def _validate_bootstrap_v3(
+    value: object, rows: object, startup_kat: object,
+) -> tuple[ControllerBootstrapCacheProjectionV3, RoleBootstrapCacheProjectionV3]:
+    required = {"source_path", "controller_entry", "role_map", "flags", "pre_path", "pre_meta_path", "pre_path_hooks", "controller_pre_importer_cache", "role_pre_importer_cache", "denied_zip", "post_path", "post_meta_path", "post_path_hooks", "post_importer_cache"}
     _require(type(value) is dict and set(value) == required, CP_BOOT_V3_SCHEMA, "execution closure bootstrap fields are invalid")
     _require(value["source_path"] == "/usr/lib/spp/conf_proc_spp_role_bootstrap.py" and value["controller_entry"] == "/usr/lib/spp/conf_proc_spp_init.py", CP_BOOT_V3_SCHEMA, "execution closure bootstrap entries are invalid")
     _require(value["flags"] == {"dont_write_bytecode": 1, "ignore_environment": 1, "isolated": 1, "no_site": 1, "no_user_site": 1}, CP_BOOT_V3_SCHEMA, "bootstrap flags are invalid")
@@ -147,18 +206,14 @@ def _validate_bootstrap_v3(value: object, rows: object, startup_kat: object) -> 
         CP_BOOT_V3_SCHEMA,
         "bootstrap path hooks are invalid",
     )
-    _require(type(value["pre_importer_cache"]) is list and len(value["pre_importer_cache"]) == 4, CP_BOOT_V3_SCHEMA, "bootstrap importer cache is invalid")
-    expected_cache = [
-        {"path": "/usr/lib/python3.10", "finder": "_frozen_importlib_external.FileFinder"},
-        {"path": "/usr/lib/python3.10/encodings", "finder": "_frozen_importlib_external.FileFinder"},
-        {"path": "/usr/lib/python310.zip", "finder": None},
-    ]
-    _require(value["pre_importer_cache"][:3] == expected_cache and type(value["pre_importer_cache"][3]) is dict and set(value["pre_importer_cache"][3]) == {"path", "finder"} and value["pre_importer_cache"][3]["path"] in (value["source_path"], value["controller_entry"]) and value["pre_importer_cache"][3]["finder"] is None, CP_BOOT_V3_SCHEMA, "bootstrap typed entry-script cache is invalid")
+    controller_cache = _bootstrap_cache_projection_v3(value["controller_pre_importer_cache"], value["controller_entry"], ControllerBootstrapCacheProjectionV3)
+    role_cache = _bootstrap_cache_projection_v3(value["role_pre_importer_cache"], value["source_path"], RoleBootstrapCacheProjectionV3)
     _require(type(value["role_map"]) is list and len(value["role_map"]) == len(_ROLE_ORDER), CP_BOOT_V3_SCHEMA, "execution closure role map is invalid")
     _require(type(rows) is list and len(rows) == len(_ROLE_ORDER), CP_BOOT_V3_SCHEMA, "execution closure launch rows are invalid")
     for mapping, launch, role, table_row in zip(value["role_map"], rows, _ROLE_ORDER, tables.LAUNCH_ROLE_ROWS_V3, strict=True):
         _require(type(mapping) is dict and set(mapping) == {"role", "source_path"} and mapping == {"role": role, "source_path": table_row.source_path}, CP_BOOT_V3_SCHEMA, "execution closure role map entry is invalid")
         _require(type(launch) is dict and set(launch) == {"role", "source_path"} and launch == mapping, CP_BOOT_V3_SCHEMA, "execution closure launch row is invalid")
+    return controller_cache, role_cache
 
 
 def parse_execution_closure_v3(raw: object) -> ExecutionClosureV3:
@@ -166,17 +221,19 @@ def parse_execution_closure_v3(raw: object) -> ExecutionClosureV3:
 
     _require(type(raw) is dict and set(raw) == _EXECUTION_CLOSURE_KEYS, CP_BOOT_V3_SCHEMA, "execution closure fields are invalid")
     _require(raw["schema"] == EXECUTION_CLOSURE_V3_SCHEMA, CP_BOOT_V3_SCHEMA, "execution closure schema is invalid")
-    _validate_startup_kat_v3(raw["startup_kat"])
-    _validate_bootstrap_v3(raw["bootstrap"], raw["launch_rows"], raw["startup_kat"])
+    frozen_startup = _freeze_json(raw["startup_kat"])
+    assert type(frozen_startup) is FrozenJsonObjectV3
+    _validate_startup_kat_v3(frozen_startup)
+    startup_kat = _thaw_json(frozen_startup)
+    controller_cache, role_cache = _validate_bootstrap_v3(raw["bootstrap"], raw["launch_rows"], startup_kat)
     _require(raw["import_roots"] == list(_PYTHON_ROOTS) and raw["native_loader_roots"] == list(_NATIVE_LOADER_ROOTS), CP_BOOT_V3_SCHEMA, "execution closure roots are invalid")
     arrays = ("loader_controls", "eligible_files", "jit_derivations", "expected_outputs", "cache_selectors")
     _require(all(type(raw[key]) is list for key in arrays), CP_BOOT_V3_SCHEMA, "execution closure collection is invalid")
-    frozen_startup = _freeze_json(raw["startup_kat"])
     frozen_bootstrap = _freeze_json(raw["bootstrap"])
-    assert type(frozen_startup) is FrozenJsonObjectV3 and type(frozen_bootstrap) is FrozenJsonObjectV3
+    assert type(frozen_bootstrap) is FrozenJsonObjectV3
     frozen_rows = tuple(_freeze_json(item) for item in raw["launch_rows"])
     assert all(type(item) is FrozenJsonObjectV3 for item in frozen_rows)
-    return ExecutionClosureV3(raw["schema"], frozen_startup, frozen_bootstrap, frozen_rows, tuple(raw["import_roots"]), tuple(raw["native_loader_roots"]), *[tuple(_freeze_json(item) for item in raw[key]) for key in arrays])
+    return ExecutionClosureV3(raw["schema"], frozen_startup, frozen_bootstrap, controller_cache, role_cache, frozen_rows, tuple(raw["import_roots"]), tuple(raw["native_loader_roots"]), *[tuple(_freeze_json(item) for item in raw[key]) for key in arrays])
 
 
 def validate_execution_mode_v3(execution_mode: object, cache_policy: object, closure: ExecutionClosureV3) -> None:
@@ -305,6 +362,15 @@ class Stage2ControllerSnapshotV3:
 
 
 @dataclass(frozen=True)
+class ProcessAuthoritySnapshotV3:
+    boot_roots: tuple[str, ...]
+    process_nodes: tuple[tuple[object, ...], ...]
+    process_edges: tuple[tuple[str, str, str, str, str], ...]
+    network_policy: tuple[tuple[str, str], ...]
+    capability_policy: tuple[tuple[str, tuple[str, ...], tuple[str, ...], bool], ...]
+
+
+@dataclass(frozen=True)
 class EligibleFileSnapshotV3:
     input_id: str
     image: str
@@ -373,6 +439,8 @@ class Predicate5SnapshotV3:
     import_roots: tuple[str, ...]
     native_loader_roots: tuple[str, ...]
     bootstrap_source: LaunchSourceProjectionV3
+    controller_bootstrap_cache: ControllerBootstrapCacheProjectionV3
+    role_bootstrap_cache: RoleBootstrapCacheProjectionV3
     loader_controls: tuple[LoaderControlSnapshotV3, ...]
     eligible_files: tuple[EligibleFileSnapshotV3, ...]
     jit_derivations: tuple[JitDerivationSnapshotV3, ...]
@@ -388,6 +456,7 @@ class SemanticSnapshotsV3:
     control_inventory: ControlInventorySnapshotV3
     launch_projection: LaunchProjectionV3
     stage2_controller: Stage2ControllerSnapshotV3
+    process_authority: ProcessAuthoritySnapshotV3
     predicate5: Predicate5SnapshotV3
 
 
@@ -467,6 +536,7 @@ def _launch_require(condition: bool, message: str) -> None:
 
 def _runtime_source_projection_v3(
     parsed: ParsedPredecessorsV3, *, path: str, label: str,
+    expected_role: str = "runtime_tree_input",
 ) -> LaunchSourceProjectionV3:
     """Join one executable source across lock, policy, manifest and runtime closure."""
 
@@ -478,7 +548,7 @@ def _runtime_source_projection_v3(
     ]
     _launch_require(len(lock_matches) == 1, f"{label} source placement is not unique")
     lock_input, placement = lock_matches[0]
-    _launch_require(lock_input.role == "runtime_tree_input", f"{label} source is not a runtime_tree_input")
+    _launch_require(lock_input.role == expected_role, f"{label} source role disagrees")
     _launch_require(placement.source_input_id == lock_input.id, f"{label} lock source identity disagrees")
     policy_nodes = [node for node in parsed.policy.images["runtime-policy"].nodes if node.path == path]
     _launch_require(len(policy_nodes) == 1, f"{label} runtime policy source is not unique")
@@ -508,7 +578,7 @@ def _runtime_source_projection_v3(
     _launch_require(
         closure["node_type"] == "file"
         and closure["root_lock_input_id"] == lock_input.id
-        and closure["logical_role"] == "runtime_tree_input"
+        and closure["logical_role"] == expected_role
         and closure["sha256"] == lock_input.sha256
         and closure["size_bytes"] == lock_input.size_bytes
         and closure["mode"] == placement.mode,
@@ -541,7 +611,92 @@ def _locked_interpreter_v3(parsed: ParsedPredecessorsV3) -> tuple[object, object
     return item, placement
 
 
-def _launch_projection_v3(parsed: ParsedPredecessorsV3) -> tuple[LaunchProjectionV3, Stage2ControllerSnapshotV3]:
+def _process_node_row_v3(node: object) -> tuple[object, ...]:
+    return (
+        node.id, node.kind, node.path, node.sha256, node.argv,
+        node.network_scope, node.capabilities, node.source_input_id,
+    )
+
+
+def _process_edge_row_v3(edge: object) -> tuple[str, str, str, str, str]:
+    return edge.from_id, edge.to_id, edge.kind, edge.origin_path, edge.origin_key
+
+
+def _process_authority_snapshot_v3(
+    parsed: ParsedPredecessorsV3, interpreter_input: object,
+    exec_source: LaunchSourceProjectionV3,
+) -> ProcessAuthoritySnapshotV3:
+    role_nodes = tuple(
+        (
+            row.role, row.process_kind, row.interpreter_path, interpreter_input.sha256,
+            row.argv, row.expected_network_scope, row.expected_process_capabilities,
+            interpreter_input.id,
+        )
+        for row in tables.LAUNCH_ROLE_ROWS_V3
+    )
+    expected_nodes = tuple(sorted((
+        *role_nodes,
+        (
+            "unit:spp.service", "unit", "spp.service", None, (), "none", (), None,
+        ),
+        (
+            "exec:/usr/bin/spp", "exec", exec_source.path, exec_source.sha256,
+            (exec_source.path,), "none", (), exec_source.source_input_id,
+        ),
+    ), key=lambda row: row[0]))
+    expected_edges = tuple(sorted((
+        *(
+            (
+                "unit:spp.service", row.role, "script_interpreter", row.source_path,
+                "stage2-launch",
+            )
+            for row in tables.LAUNCH_ROLE_ROWS_V3
+        ),
+        (
+            "unit:spp.service", "exec:/usr/bin/spp", "unit_exec", "spp.service",
+            "ExecStart",
+        ),
+    )))
+    expected_network = tuple(sorted((
+        *((row.role, row.expected_network_scope) for row in tables.LAUNCH_ROLE_ROWS_V3),
+        ("exec:/usr/bin/spp", "none"),
+        ("unit:spp.service", "none"),
+    )))
+    expected_capability = tuple(sorted(
+        (
+            row.role, row.expected_capability_bounding_set,
+            row.expected_ambient_capabilities, row.expected_no_new_privileges,
+        )
+        for row in tables.LAUNCH_ROLE_ROWS_V3
+    ))
+    actual_nodes = tuple(_process_node_row_v3(node) for node in parsed.policy.process_nodes)
+    actual_edges = tuple(_process_edge_row_v3(edge) for edge in parsed.policy.process_edges)
+    actual_network = tuple(sorted(parsed.policy.network_policy.items()))
+    actual_capability = tuple(sorted(
+        (
+            role, value.capability_bounding_set, value.ambient_capabilities,
+            value.no_new_privileges,
+        )
+        for role, value in parsed.policy.capability_policy.items()
+    ))
+    _launch_require(len(actual_nodes) == 7, "process-node cardinality disagrees")
+    _launch_require(len(actual_edges) == 6, "process-edge cardinality disagrees")
+    _launch_require(parsed.policy.boot_roots == ("unit:spp.service",), "process boot roots disagree")
+    _launch_require(len(actual_network) == 7, "network-policy cardinality disagrees")
+    _launch_require(len(actual_capability) == 5, "capability-policy cardinality disagrees")
+    _launch_require(actual_nodes == expected_nodes, "process-node authority disagrees")
+    _launch_require(actual_edges == expected_edges, "process-edge authority disagrees")
+    _launch_require(actual_network == expected_network, "network-policy authority disagrees")
+    _launch_require(actual_capability == expected_capability, "capability-policy authority disagrees")
+    return ProcessAuthoritySnapshotV3(
+        parsed.policy.boot_roots, actual_nodes, actual_edges, actual_network,
+        actual_capability,
+    )
+
+
+def _launch_projection_v3(
+    parsed: ParsedPredecessorsV3,
+) -> tuple[LaunchProjectionV3, Stage2ControllerSnapshotV3, ProcessAuthoritySnapshotV3]:
     sources = tuple(_launch_source_projection_v3(parsed, row) for row in tables.LAUNCH_ROLE_ROWS_V3)
     _launch_require(len({item.source_input_id for item in sources}) == len(sources), "service sources share a lock input")
     conf_sources = [item for item in parsed.runtime_closure["entries"] if item["logical_role"] == "conf_proc_source"]
@@ -575,9 +730,17 @@ def _launch_projection_v3(parsed: ParsedPredecessorsV3) -> tuple[LaunchProjectio
         parsed, path=controller.source_path, label="stage2 controller",
     )
     _launch_require(controller.interpreter_path == "/usr/bin/python3.10" and controller.argv[:5] == ("/usr/bin/python3.10", "-I", "-B", "-S", "/usr/lib/spp/conf_proc_spp_init.py"), "stage2 controller interpreter authority disagrees")
+    exec_source = _runtime_source_projection_v3(
+        parsed, path="/usr/bin/spp", label="stage2 executable",
+        expected_role="final_systemd_stub",
+    )
+    process_authority = _process_authority_snapshot_v3(
+        parsed, interpreter_input, exec_source,
+    )
     return (
         LaunchProjectionV3(tuple(RoleLaunchSnapshotV3(row, source) for row, source in zip(tables.LAUNCH_ROLE_ROWS_V3, sources, strict=True))),
         Stage2ControllerSnapshotV3(controller, controller_source, interpreter_input.id, interpreter_input.sha256, interpreter_input.size_bytes, interpreter_placement.mode),
+        process_authority,
     )
 
 
@@ -824,7 +987,7 @@ def _predicate5_snapshot_v3(
     if contract.execution_mode == "python_no_jit":
         _require(not ({"compiler", "compiler_source", "jit_cache"} & tags) and not raw_derivations and not raw_outputs and not raw_selectors, CP_BOOT_V3_BINDING, "no-JIT predicate admits compiler or cache authority")
         _require(not any(item.path == "/run/spp-jit" for item in eligible), CP_BOOT_V3_BINDING, "no-JIT predicate admits workspace")
-        return Predicate5SnapshotV3(contract.execution_mode, contract.cache_policy, closure.schema, _KAT_SHA256, _OBSERVER_SHA256, _PYTHON_ROOTS, _NATIVE_LOADER_ROOTS, bootstrap_source, controls, eligible, (), ())
+        return Predicate5SnapshotV3(contract.execution_mode, contract.cache_policy, closure.schema, _KAT_SHA256, _OBSERVER_SHA256, _PYTHON_ROOTS, _NATIVE_LOADER_ROOTS, bootstrap_source, closure.controller_bootstrap_cache, closure.role_bootstrap_cache, controls, eligible, (), ())
     _require({"compiler", "compiler_source"} <= tags and raw_derivations and len(raw_derivations) == len(raw_outputs) and (len(raw_selectors) == len(raw_derivations) if contract.cache_policy == "measured_read_only" else not raw_selectors), CP_BOOT_V3_BINDING, "JIT predicate lacks compiler, source, outputs, or selectors")
     eligible_by_path = {item.path: item for item in eligible}
     snapshots: list[JitDerivationSnapshotV3] = []
@@ -866,7 +1029,7 @@ def _predicate5_snapshot_v3(
         else:
             _require(selector_record is None and expected_path not in eligible_by_path, CP_BOOT_V3_BINDING, "ephemeral JIT admits a preexisting cache output")
         snapshots.append(JitDerivationSnapshotV3(digest, compiler["input_id"], compiler["sha256"], loader["input_id"], loader["sha256"], tuple(argv_env["compiler_argv"]), tuple(argv_env["loader_argv"]), tuple((item[0], item[1]) for item in argv_env["environment"]), tuple(typed), output["output_name"], output["relative_path"], output["sha256"], output["size_bytes"], output["mode"], record["cache_policy"]))
-    return Predicate5SnapshotV3(contract.execution_mode, contract.cache_policy, closure.schema, _KAT_SHA256, _OBSERVER_SHA256, _PYTHON_ROOTS, _NATIVE_LOADER_ROOTS, bootstrap_source, controls, eligible, tuple(snapshots), tuple(selectors))
+    return Predicate5SnapshotV3(contract.execution_mode, contract.cache_policy, closure.schema, _KAT_SHA256, _OBSERVER_SHA256, _PYTHON_ROOTS, _NATIVE_LOADER_ROOTS, bootstrap_source, closure.controller_bootstrap_cache, closure.role_bootstrap_cache, controls, eligible, tuple(snapshots), tuple(selectors))
 
 
 def validate_semantic_conjunction_v3(
@@ -936,7 +1099,7 @@ def validate_semantic_conjunction_v3(
             digests.kernel_feature_contract_sha256,
             tuple((item.name, item.support.value) for item in parsed.kernel_feature_contract.mutable_controls),
         )
-        launch_projection, stage2_controller = _launch_projection_v3(parsed)
+        launch_projection, stage2_controller, process_authority = _launch_projection_v3(parsed)
         bootstrap_source = _runtime_source_projection_v3(
             parsed,
             path="/usr/lib/spp/conf_proc_spp_role_bootstrap.py",
@@ -949,6 +1112,7 @@ def validate_semantic_conjunction_v3(
             ControlInventorySnapshotV3(tuple(tables.CONTROL_INVENTORY_ROWS_V3)),
             launch_projection,
             stage2_controller,
+            process_authority,
             predicate5,
         )
     except ApplianceErrorV3:

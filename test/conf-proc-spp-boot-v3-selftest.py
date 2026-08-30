@@ -121,6 +121,7 @@ class BootAuthorityV3SelfTest(unittest.TestCase):
             binding.control_inventory,
             binding.launch_projection,
             binding.stage2_controller,
+            binding.process_authority,
             binding.predicate5,
         )
         self.assertFalse(is_issued_boot_binding_v3(hand_constructed))
@@ -204,7 +205,9 @@ class BootAuthorityV3SelfTest(unittest.TestCase):
             with self.subTest(name=name):
                 original = getattr(binding, name)
                 object.__setattr__(binding, name, original + b"\0")
-                self.assertNotEqual(engine.pcr15_measurement_v3, measurement)
+                with self.assertRaises(ApplianceErrorV3) as raised:
+                    _ = engine.pcr15_measurement_v3
+                self.assertEqual(raised.exception.reason_code, CP_BOOT_V3_BINDING)
                 object.__setattr__(binding, name, original)
         self.assertEqual(
             engine.predicted_pcr15_v3,

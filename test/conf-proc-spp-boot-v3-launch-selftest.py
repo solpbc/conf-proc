@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
 import sys
 import unittest
 from pathlib import Path
@@ -22,6 +23,44 @@ import conf_proc_spp_boot_v3_semantics as semantics
 import conf_proc_spp_boot_v3_tables as tables
 from conf_proc_spp_boot_v3_fixture import build_v3_fixture
 from conf_proc_spp_reasons_v3 import ApplianceErrorV3, CP_BOOT_V3_LAUNCH_SUPERVISION
+
+
+def _tuple(*fields: object) -> tuple[object, ...]:
+    return tuple(fields)
+
+
+_EXPECTED_PROCESS_AUTHORITY = _tuple(
+    _tuple("unit:spp.service"),
+    _tuple(
+        _tuple("asr", "interpreter", "/usr/bin/python3.10", "ebad5b838937791ccc924214b1db8316ed73019852b578db62343dc28d98ff9a", _tuple("/usr/bin/python3.10", "-I", "-B", "-S", "/usr/lib/spp/conf_proc_spp_role_bootstrap.py", "--role=asr"), "loopback", _tuple(), "runtime-python310"),
+        _tuple("attestation-broker", "interpreter", "/usr/bin/python3.10", "ebad5b838937791ccc924214b1db8316ed73019852b578db62343dc28d98ff9a", _tuple("/usr/bin/python3.10", "-I", "-B", "-S", "/usr/lib/spp/conf_proc_spp_role_bootstrap.py", "--role=attestation-broker"), "none", _tuple(), "runtime-python310"),
+        _tuple("collector", "interpreter", "/usr/bin/python3.10", "ebad5b838937791ccc924214b1db8316ed73019852b578db62343dc28d98ff9a", _tuple("/usr/bin/python3.10", "-I", "-B", "-S", "/usr/lib/spp/conf_proc_spp_role_bootstrap.py", "--role=collector"), "none", _tuple(), "runtime-python310"),
+        _tuple("exec:/usr/bin/spp", "exec", "/usr/bin/spp", "725c546b990dd1b41f3d5791b37c3c0edcb1f08cf150bdae32a73dfd166e02d7", _tuple("/usr/bin/spp"), "none", _tuple(), "stub"),
+        _tuple("gateway", "interpreter", "/usr/bin/python3.10", "ebad5b838937791ccc924214b1db8316ed73019852b578db62343dc28d98ff9a", _tuple("/usr/bin/python3.10", "-I", "-B", "-S", "/usr/lib/spp/conf_proc_spp_role_bootstrap.py", "--role=gateway"), "loopback", _tuple(), "runtime-python310"),
+        _tuple("inference", "interpreter", "/usr/bin/python3.10", "ebad5b838937791ccc924214b1db8316ed73019852b578db62343dc28d98ff9a", _tuple("/usr/bin/python3.10", "-I", "-B", "-S", "/usr/lib/spp/conf_proc_spp_role_bootstrap.py", "--role=inference"), "loopback", _tuple(), "runtime-python310"),
+        _tuple("unit:spp.service", "unit", "spp.service", None, _tuple(), "none", _tuple(), None),
+    ),
+    _tuple(
+        _tuple("unit:spp.service", "asr", "script_interpreter", "/usr/lib/spp/asr_shim.py", "stage2-launch"),
+        _tuple("unit:spp.service", "attestation-broker", "script_interpreter", "/usr/lib/spp/conf_proc_spp_attestation_broker.py", "stage2-launch"),
+        _tuple("unit:spp.service", "collector", "script_interpreter", "/usr/lib/spp/ratls_collector.py", "stage2-launch"),
+        _tuple("unit:spp.service", "exec:/usr/bin/spp", "unit_exec", "spp.service", "ExecStart"),
+        _tuple("unit:spp.service", "gateway", "script_interpreter", "/usr/lib/spp/ratls_gateway.py", "stage2-launch"),
+        _tuple("unit:spp.service", "inference", "script_interpreter", "/usr/lib/spp/conf_proc_spp_inference.py", "stage2-launch"),
+    ),
+    _tuple(
+        _tuple("asr", "loopback"), _tuple("attestation-broker", "none"),
+        _tuple("collector", "none"), _tuple("exec:/usr/bin/spp", "none"),
+        _tuple("gateway", "loopback"), _tuple("inference", "loopback"),
+        _tuple("unit:spp.service", "none"),
+    ),
+    _tuple(
+        _tuple("asr", _tuple(), _tuple(), True), _tuple("attestation-broker", _tuple(), _tuple(), True),
+        _tuple("collector", _tuple(), _tuple(), True), _tuple("gateway", _tuple(), _tuple(), True),
+        _tuple("inference", _tuple(), _tuple(), True),
+    ),
+)
+_EXPECTED_PROCESS_AUTHORITY_FRAME_SHA256 = "4f29ee11e7444c1fafd623273fceb95ebf6009885cc7cac440f079790b237c1c"
 
 
 class BootV3LaunchAuthoritySelftest(unittest.TestCase):
@@ -60,6 +99,135 @@ class BootV3LaunchAuthoritySelftest(unittest.TestCase):
             self.assertEqual(item.authority.expected_capability_bounding_set, ())
             self.assertEqual(item.authority.expected_ambient_capabilities, ())
             self.assertTrue(item.authority.expected_no_new_privileges)
+
+    def _assert_graph_rejected(self, parsed: semantics.ParsedPredecessorsV3) -> None:
+        with self.assertRaisesRegex(ApplianceErrorV3, CP_BOOT_V3_LAUNCH_SUPERVISION):
+            semantics._launch_projection_v3(parsed)
+
+    def test_exact_process_authority_projection_and_measurement_frame(self) -> None:
+        process = self.binding.process_authority
+        self.assertEqual(
+            (
+                process.boot_roots,
+                process.process_nodes,
+                process.process_edges,
+                process.network_policy,
+                process.capability_policy,
+            ),
+            _EXPECTED_PROCESS_AUTHORITY,
+        )
+        self.assertEqual((len(process.process_nodes), len(process.process_edges)), (7, 6))
+        self.assertEqual((len(process.network_policy), len(process.capability_policy)), (7, 5))
+        frame = ("process_authority", * _EXPECTED_PROCESS_AUTHORITY)
+        frame_bytes = repr(frame).encode("utf-8")
+        self.assertEqual(
+            hashlib.sha256(frame_bytes).hexdigest(),
+            _EXPECTED_PROCESS_AUTHORITY_FRAME_SHA256,
+        )
+        self.assertIn(frame_bytes, self.binding.literal_v3_observation_shape_bytes)
+        self.assertLess(
+            self.binding.literal_v3_observation_shape_bytes.index(frame_bytes),
+            self.binding.literal_v3_observation_shape_bytes.rindex(b"('wire_message_types',"),
+        )
+        self.assertNotEqual(
+            boot._literal_v3_observation_shape_bytes(
+                replace(process, boot_roots=("exec:/usr/bin/spp",))
+            ),
+            self.binding.literal_v3_observation_shape_bytes,
+        )
+
+    def test_exact_process_authority_mutations_are_rejected(self) -> None:
+        node_mutations = {
+            "id": "z-extra", "kind": "exec", "path": "/bad", "sha256": "0" * 64,
+            "argv": ("/bad",), "network_scope": "none", "capabilities": ("CAP_NET_ADMIN",),
+            "source_input_id": "other-input",
+        }
+        for field, replacement in node_mutations.items():
+            with self.subTest(node_field=field):
+                parsed = self._parsed()
+                node = next(value for value in parsed.policy.process_nodes if value.id == "asr")
+                object.__setattr__(parsed.policy, "process_nodes", tuple(
+                    replace(value, **{field: replacement}) if value is node else value
+                    for value in parsed.policy.process_nodes
+                ))
+                self._assert_graph_rejected(parsed)
+
+        edge_mutations = {
+            "from_id": "exec:/usr/bin/spp", "to_id": "gateway", "kind": "unit_exec",
+            "origin_path": "spp.service", "origin_key": "ExecStart",
+        }
+        for field, replacement in edge_mutations.items():
+            with self.subTest(edge_field=field):
+                parsed = self._parsed()
+                edge = next(value for value in parsed.policy.process_edges if value.to_id == "asr")
+                object.__setattr__(parsed.policy, "process_edges", tuple(
+                    replace(value, **{field: replacement}) if value is edge else value
+                    for value in parsed.policy.process_edges
+                ))
+                self._assert_graph_rejected(parsed)
+
+        parsed = self._parsed()
+        role_edges = [edge for edge in parsed.policy.process_edges if edge.kind == "script_interpreter"]
+        swapped_paths = {edge.to_id: path for edge, path in zip(role_edges, reversed([edge.origin_path for edge in role_edges]), strict=True)}
+        object.__setattr__(parsed.policy, "process_edges", tuple(
+            replace(edge, origin_path=swapped_paths[edge.to_id]) if edge.to_id in swapped_paths else edge
+            for edge in parsed.policy.process_edges
+        ))
+        self._assert_graph_rejected(parsed)
+
+        for mutation in ("remove_node", "duplicate_node", "extra_node", "remove_edge", "duplicate_edge", "extra_edge"):
+            with self.subTest(cardinality=mutation):
+                parsed = self._parsed()
+                if mutation.endswith("node"):
+                    values = list(parsed.policy.process_nodes)
+                    if mutation == "remove_node":
+                        values.pop()
+                    elif mutation == "duplicate_node":
+                        values.append(values[0])
+                    else:
+                        values.append(replace(values[0], id="z-extra"))
+                    object.__setattr__(parsed.policy, "process_nodes", tuple(values))
+                else:
+                    values = list(parsed.policy.process_edges)
+                    if mutation == "remove_edge":
+                        values.pop()
+                    elif mutation == "duplicate_edge":
+                        values.append(values[0])
+                    else:
+                        values.append(replace(values[0], to_id="z-extra", origin_path="/z-extra"))
+                    object.__setattr__(parsed.policy, "process_edges", tuple(values))
+                self._assert_graph_rejected(parsed)
+
+        parsed = self._parsed()
+        object.__setattr__(parsed.policy, "boot_roots", ("exec:/usr/bin/spp",))
+        self._assert_graph_rejected(parsed)
+
+        for mutation in ("network_value", "network_missing", "network_extra", "capability_bounding", "capability_ambient", "capability_nnp", "capability_missing", "capability_extra"):
+            with self.subTest(policy=mutation):
+                parsed = self._parsed()
+                if mutation.startswith("network"):
+                    values = dict(parsed.policy.network_policy)
+                    if mutation == "network_value":
+                        values["gateway"] = "none"
+                    elif mutation == "network_missing":
+                        del values["gateway"]
+                    else:
+                        values["z-extra"] = "none"
+                    object.__setattr__(parsed.policy, "network_policy", values)
+                else:
+                    values = dict(parsed.policy.capability_policy)
+                    if mutation == "capability_bounding":
+                        values["gateway"] = replace(values["gateway"], capability_bounding_set=("CAP_NET_ADMIN",))
+                    elif mutation == "capability_ambient":
+                        values["gateway"] = replace(values["gateway"], ambient_capabilities=("CAP_NET_ADMIN",))
+                    elif mutation == "capability_nnp":
+                        values["gateway"] = replace(values["gateway"], no_new_privileges=False)
+                    elif mutation == "capability_missing":
+                        del values["gateway"]
+                    else:
+                        values["z-extra"] = values["gateway"]
+                    object.__setattr__(parsed.policy, "capability_policy", values)
+                self._assert_graph_rejected(parsed)
 
     def test_role_operational_literals_and_policy_agreement_are_closed(self) -> None:
         original_rows = tables.LAUNCH_ROLE_ROWS_V3
@@ -141,18 +309,18 @@ class BootV3LaunchAuthoritySelftest(unittest.TestCase):
         with self.assertRaisesRegex(ApplianceErrorV3, CP_BOOT_V3_LAUNCH_SUPERVISION):
             semantics._launch_projection_v3(parsed)
 
-        baseline = boot._literal_v3_observation_shape_bytes()
+        baseline = boot._literal_v3_observation_shape_bytes(self.binding.process_authority)
         original_rows = tables.LAUNCH_ROLE_ROWS_V3
         original_controller = tables.STAGE2_CONTROLLER_ROW_V3
         try:
             gateway_row = original_rows[3]
             tables.LAUNCH_ROLE_ROWS_V3 = (*original_rows[:3], replace(gateway_row, upstream_policy="non_loopback"), *original_rows[4:])
-            self.assertNotEqual(boot._literal_v3_observation_shape_bytes(), baseline)
+            self.assertNotEqual(boot._literal_v3_observation_shape_bytes(self.binding.process_authority), baseline)
             tables.LAUNCH_ROLE_ROWS_V3 = original_rows
             tables.STAGE2_CONTROLLER_ROW_V3 = replace(original_controller, initial_capabilities=original_controller.initial_capabilities[:-1])
-            self.assertNotEqual(boot._literal_v3_observation_shape_bytes(), baseline)
+            self.assertNotEqual(boot._literal_v3_observation_shape_bytes(self.binding.process_authority), baseline)
             tables.STAGE2_CONTROLLER_ROW_V3 = replace(original_controller, steady_capabilities=(*original_controller.steady_capabilities, "CAP_NET_BIND_SERVICE"))
-            self.assertNotEqual(boot._literal_v3_observation_shape_bytes(), baseline)
+            self.assertNotEqual(boot._literal_v3_observation_shape_bytes(self.binding.process_authority), baseline)
         finally:
             tables.LAUNCH_ROLE_ROWS_V3 = original_rows
             tables.STAGE2_CONTROLLER_ROW_V3 = original_controller
@@ -165,13 +333,13 @@ class BootV3LaunchAuthoritySelftest(unittest.TestCase):
         self.assertEqual((len(request), len(result)), (32, 80))
         self.assertNotEqual(bytes([request[0] ^ 1]) + request[1:], request)
         self.assertNotEqual(bytes([result[0] ^ 1]) + result[1:], result)
-        baseline = boot._literal_v3_observation_shape_bytes()
+        baseline = boot._literal_v3_observation_shape_bytes(self.binding.process_authority)
         original_rows = tables.LAUNCH_ROLE_ROWS_V3
         try:
             row = original_rows[0]
             assert row.readiness is not None
             tables.LAUNCH_ROLE_ROWS_V3 = (replace(row, readiness=replace(row.readiness, request_magic=b"BADRDQ3\0")), *original_rows[1:])
-            self.assertNotEqual(boot._literal_v3_observation_shape_bytes(), baseline)
+            self.assertNotEqual(boot._literal_v3_observation_shape_bytes(self.binding.process_authority), baseline)
         finally:
             tables.LAUNCH_ROLE_ROWS_V3 = original_rows
 
@@ -195,7 +363,7 @@ class BootV3LaunchAuthoritySelftest(unittest.TestCase):
 
     def test_every_wire_row_and_constraint_is_measured(self) -> None:
         original = tables.WIRE_MESSAGE_AUTHORITY_ROWS_V3
-        baseline = boot._literal_v3_observation_shape_bytes()
+        baseline = boot._literal_v3_observation_shape_bytes(self.binding.process_authority)
         self.assertEqual(tuple(row.type_id for row in original), tuple(range(1, 28)))
         self.assertEqual(tuple(row.type_id for row in original if row.fd_rule != "no_fd"), (1, 25))
         try:
@@ -204,23 +372,23 @@ class BootV3LaunchAuthoritySelftest(unittest.TestCase):
                 changed[index] = replace(row, prerequisite=row.prerequisite + "_mutated")
                 tables.WIRE_MESSAGE_AUTHORITY_ROWS_V3 = tuple(changed)
                 with self.subTest(type_id=row.type_id):
-                    self.assertNotEqual(boot._literal_v3_observation_shape_bytes(), baseline)
+                    self.assertNotEqual(boot._literal_v3_observation_shape_bytes(self.binding.process_authority), baseline)
             for index, row in ((0, original[0]), (2, original[2]), (24, original[24])):
                 changed = list(original)
                 changed[index] = replace(row, payload_shape=(replace(row.payload_shape[0], name="mutated_field"), *row.payload_shape[1:]))
                 tables.WIRE_MESSAGE_AUTHORITY_ROWS_V3 = tuple(changed)
                 with self.subTest(payload_type_id=row.type_id):
-                    self.assertNotEqual(boot._literal_v3_observation_shape_bytes(), baseline)
+                    self.assertNotEqual(boot._literal_v3_observation_shape_bytes(self.binding.process_authority), baseline)
             changed = list(original)
             changed[0] = replace(original[0], fd_rule="no_fd", direction="gateway->PID1", type_id=99)
             tables.WIRE_MESSAGE_AUTHORITY_ROWS_V3 = tuple(changed)
-            self.assertNotEqual(boot._literal_v3_observation_shape_bytes(), baseline)
+            self.assertNotEqual(boot._literal_v3_observation_shape_bytes(self.binding.process_authority), baseline)
         finally:
             tables.WIRE_MESSAGE_AUTHORITY_ROWS_V3 = original
         original_routes = tables.WIRE_ROUTE_ENUM_ROWS_V3
         tables.WIRE_ROUTE_ENUM_ROWS_V3 = (replace(original_routes[0], name="mutated"), *original_routes[1:])
         try:
-            self.assertNotEqual(boot._literal_v3_observation_shape_bytes(), baseline)
+            self.assertNotEqual(boot._literal_v3_observation_shape_bytes(self.binding.process_authority), baseline)
         finally:
             tables.WIRE_ROUTE_ENUM_ROWS_V3 = original_routes
         self.assertEqual(tables.WIRE_HEADER_BYTES_V3, 72)

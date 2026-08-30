@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import secrets
+import threading
 from typing import Callable
 
 from conf_proc_spp_boot import (
@@ -29,11 +31,15 @@ from conf_proc_spp_boot_v3_wire import (
     RouteV3,
     WorkFinishOutcomeV3,
 )
-from conf_proc_spp_reasons_v3 import ApplianceErrorV3, CP_BOOT_V3_RESOURCE_REDUCER
+from conf_proc_spp_reasons_v3 import ApplianceErrorV3, CP_BOOT_V3_BINDING, CP_BOOT_V3_RESOURCE_REDUCER
 
 
 def _reject(message: str) -> None:
     raise ApplianceErrorV3(CP_BOOT_V3_RESOURCE_REDUCER, message)
+
+
+def _binding_reject(message: str) -> None:
+    raise ApplianceErrorV3(CP_BOOT_V3_BINDING, message)
 
 
 def _opaque_token(value: object, label: str) -> bytes:
@@ -243,16 +249,73 @@ class ServingResourceReducerV3:
 @dataclass(frozen=True)
 class ServingGatewaySessionV3:
     session_token: bytes
-    session_reducer: object
 
 
 class ServingAuthorityWrapperV3:
     """Thin PID1-side composition of resource and gateway session authorities."""
 
-    def __init__(self, on_global_fault: Callable[[], None] | None = None) -> None:
-        self._resource = ServingResourceReducerV3()
-        self._sessions: dict[bytes, ServingGatewaySessionV3] = {}
-        self._on_global_fault = on_global_fault
+    def __init__(
+        self,
+        *,
+        admission_capability: object = None,
+        on_global_fault: Callable[[], None] | None = None,
+    ) -> None:
+        from conf_proc_spp_boot_v3 import _claim_serving_wrapper_construction_v3
+
+        _claim_serving_wrapper_construction_v3(admission_capability, self)
+        self._admission_capability = admission_capability
+        try:
+            self._resource = ServingResourceReducerV3()
+            self._sessions: dict[bytes, ServingGatewaySessionV3] = {}
+            self._reducers: dict[bytes, ServingSessionReducer] = {}
+            self._on_global_fault = on_global_fault
+            self._operation_lock = threading.RLock()
+            self._cleanup_condition = threading.Condition(threading.RLock())
+            self._cleanup_phase = "active"
+            self._cleanup_owner_thread_id: int | None = None
+            self._cleanup_error: BaseException | None = None
+            self._revoke_count = 0
+        except BaseException:
+            from conf_proc_spp_boot_v3 import _abandon_serving_wrapper_construction_v3
+
+            _abandon_serving_wrapper_construction_v3(admission_capability, self)
+            raise
+
+    def _verify_admission_v3(self, *, allow_complete: bool = False) -> None:
+        from conf_proc_spp_boot_v3 import _verify_serving_wrapper_v3
+
+        _verify_serving_wrapper_v3(
+            getattr(self, "_admission_capability", None),
+            self,
+            allow_complete=allow_complete,
+        )
+
+    def __copy__(self) -> "ServingAuthorityWrapperV3":
+        clone = object.__new__(ServingAuthorityWrapperV3)
+        clone.__dict__.update(self.__dict__)
+        return clone
+
+    def __deepcopy__(self, memo: dict[int, object]) -> "ServingAuthorityWrapperV3":
+        del memo
+        return self.__copy__()
+
+    def _guard_active_v3(self) -> None:
+        self._verify_admission_v3()
+        thread_id = threading.get_ident()
+        with self._cleanup_condition:
+            while self._cleanup_phase == "cleaning":
+                if self._cleanup_owner_thread_id == thread_id:
+                    _binding_reject("serving authority is cleaning")
+                self._cleanup_condition.wait()
+            if self._cleanup_phase != "active":
+                _binding_reject("serving authority is revoked")
+
+    @contextmanager
+    def _active_operation_v3(self):
+        self._guard_active_v3()
+        with self._operation_lock:
+            self._guard_active_v3()
+            yield
 
     def _session(self, session: object) -> ServingGatewaySessionV3:
         if type(session) is not ServingGatewaySessionV3:
@@ -264,16 +327,19 @@ class ServingAuthorityWrapperV3:
     def open_session(
         self, session_transport: BootTransport, close_callback: object
     ) -> ServingGatewaySessionV3 | None:
-        token = self._resource.session_acquire()
-        if token is None:
-            return None
-        try:
-            session = ServingGatewaySessionV3(token, ServingSessionReducer(session_transport, close_callback))
-        except Exception:
-            self._resource.session_release(token)
-            raise
-        self._sessions[token] = session
-        return session
+        with self._active_operation_v3():
+            token = self._resource.session_acquire()
+            if token is None:
+                return None
+            try:
+                reducer = ServingSessionReducer(session_transport, close_callback)
+                session = ServingGatewaySessionV3(token)
+            except BaseException:
+                self._resource.session_release(token)
+                raise
+            self._sessions[token] = session
+            self._reducers[token] = reducer
+            return session
 
     def begin_request(
         self,
@@ -283,13 +349,14 @@ class ServingAuthorityWrapperV3:
         body_length: int,
         opaque_handle: object,
     ) -> tuple[bytes, bytes, bytes, int] | RequestRejectReasonV3:
-        claimed = self._session(session)
-        result = self._resource.request_acquire(claimed.session_token, self._route_for_path(path))
-        if isinstance(result, RequestRejectReasonV3):
+        with self._active_operation_v3():
+            claimed = self._session(session)
+            result = self._resource.request_acquire(claimed.session_token, self._route_for_path(path))
+            if isinstance(result, RequestRejectReasonV3):
+                return result
+            reducer = self._reducer(claimed)
+            reducer.begin_request(path=path, body_length=body_length, opaque_handle=opaque_handle)
             return result
-        reducer = self._reducer(claimed)
-        reducer.begin_request(path=path, body_length=body_length, opaque_handle=opaque_handle)
-        return result
 
     @staticmethod
     def _route_for_path(path: object) -> RouteV3:
@@ -297,18 +364,19 @@ class ServingAuthorityWrapperV3:
             _reject("request path is invalid")
         return RouteV3.ASR if path.startswith("/v1/audio/") else RouteV3.INFERENCE
 
-    @staticmethod
-    def _reducer(session: ServingGatewaySessionV3) -> ServingSessionReducer:
-        if type(session.session_reducer) is not ServingSessionReducer:
+    def _reducer(self, session: ServingGatewaySessionV3) -> ServingSessionReducer:
+        reducer = self._reducers.get(session.session_token)
+        if type(reducer) is not ServingSessionReducer:
             _reject("session reducer is invalid")
-        return session.session_reducer
+        return reducer
 
     def work_begin(self, session: ServingGatewaySessionV3, route_work_permit: bytes) -> None:
-        claimed = self._session(session)
-        effect = self._reducer(claimed).next_effect()
-        if type(effect) is not ServingSessionEffect or effect.action != "upstream_open":
-            _reject("upstream open effect is not pending")
-        self._resource.work_begin(claimed.session_token, route_work_permit)
+        with self._active_operation_v3():
+            claimed = self._session(session)
+            effect = self._reducer(claimed).next_effect()
+            if type(effect) is not ServingSessionEffect or effect.action != "upstream_open":
+                _reject("upstream open effect is not pending")
+            self._resource.work_begin(claimed.session_token, route_work_permit)
 
     def work_finish(
         self,
@@ -316,58 +384,114 @@ class ServingAuthorityWrapperV3:
         route_work_permit: bytes,
         outcome: WorkFinishOutcomeV3,
     ) -> None:
-        claimed = self._session(session)
-        if type(outcome) is not WorkFinishOutcomeV3:
-            _reject("work finish outcome is invalid")
-        self._resource.work_finish(claimed.session_token, route_work_permit)
+        with self._active_operation_v3():
+            claimed = self._session(session)
+            if type(outcome) is not WorkFinishOutcomeV3:
+                _reject("work finish outcome is invalid")
+            self._resource.work_finish(claimed.session_token, route_work_permit)
 
     def request_release(self, session: ServingGatewaySessionV3, request_permit: bytes) -> None:
-        claimed = self._session(session)
-        state = self._reducer(claimed).state
-        if state not in (ServingSessionState.REQUEST_CLOSED, ServingSessionState.SESSION_CLOSED):
-            _reject("session request is not closed")
-        self._resource.request_release(claimed.session_token, request_permit)
+        with self._active_operation_v3():
+            claimed = self._session(session)
+            state = self._reducer(claimed).state
+            if state not in (ServingSessionState.REQUEST_CLOSED, ServingSessionState.SESSION_CLOSED):
+                _reject("session request is not closed")
+            self._resource.request_release(claimed.session_token, request_permit)
 
     def session_release(self, session: ServingGatewaySessionV3) -> tuple[int, bytes | None, bytes | None, bytes | None]:
-        claimed = self._session(session)
-        result = self._resource.session_release(claimed.session_token)
-        del self._sessions[claimed.session_token]
-        self._reducer(claimed).close()
-        return result
+        with self._active_operation_v3():
+            claimed = self._session(session)
+            result = self._resource.session_release(claimed.session_token)
+            reducer = self._reducer(claimed)
+            del self._sessions[claimed.session_token]
+            del self._reducers[claimed.session_token]
+            reducer.close()
+            return result
 
     def global_revoke(self) -> None:
+        self._verify_admission_v3(allow_complete=True)
+        thread_id = threading.get_ident()
+        reducers: tuple[ServingSessionReducer, ...] = ()
+        error: BaseException | None = None
+        cleanup_owner = False
+        with self._operation_lock:
+            with self._cleanup_condition:
+                if self._cleanup_phase == "complete":
+                    error = self._cleanup_error
+                elif self._cleanup_phase == "cleaning":
+                    if self._cleanup_owner_thread_id == thread_id:
+                        return
+                    while self._cleanup_phase == "cleaning":
+                        self._cleanup_condition.wait()
+                    error = self._cleanup_error
+                else:
+                    cleanup_owner = True
+                    self._cleanup_phase = "cleaning"
+                    self._cleanup_owner_thread_id = thread_id
+                    self._revoke_count += 1
+                    reducers = tuple(self._reducers.values())
+                    self._sessions.clear()
+                    self._reducers.clear()
+                    try:
+                        self._resource.global_revoke()
+                    except BaseException as caught:
+                        error = caught
+            if not cleanup_owner:
+                if error is not None:
+                    raise error
+                return
+        # No wrapper or registry lock is held while invoking user callbacks.
         try:
             if self._on_global_fault is not None:
                 self._on_global_fault()
-        finally:
-            self._resource.global_revoke()
-            for session in self._sessions.values():
-                self._reducer(session).close()
-            self._sessions.clear()
+        except BaseException as caught:
+            error = caught
+        for reducer in reducers:
+            try:
+                reducer.close()
+            except BaseException as caught:
+                if error is None:
+                    error = caught
+        with self._cleanup_condition:
+            self._cleanup_error = error
+            self._cleanup_phase = "complete"
+            self._cleanup_owner_thread_id = None
+            self._cleanup_condition.notify_all()
+        from conf_proc_spp_boot_v3 import _retire_serving_admission_v3
+
+        _retire_serving_admission_v3(self._admission_capability, self)
+        if error is not None:
+            raise error
 
     def next_effect(self, session: ServingGatewaySessionV3) -> BootEffect | None:
-        return self._reducer(self._session(session)).next_effect()
+        with self._active_operation_v3():
+            return self._reducer(self._session(session)).next_effect()
 
     def advance(self, session: ServingGatewaySessionV3, transport: BootTransport) -> ServingSessionState:
-        return self._reducer(self._session(session)).advance(transport)
+        with self._active_operation_v3():
+            return self._reducer(self._session(session)).advance(transport)
 
     def accept(self, session: ServingGatewaySessionV3, observation: BootObservation) -> ServingSessionState:
-        return self._reducer(self._session(session)).accept(observation)
+        with self._active_operation_v3():
+            return self._reducer(self._session(session)).accept(observation)
 
     def collector_acquire(
         self, session: ServingGatewaySessionV3, generation: CollectorGenerationV3
     ) -> bytes | None:
-        claimed = self._session(session)
-        return self._resource.collector_acquire(claimed.session_token, generation)
+        with self._active_operation_v3():
+            claimed = self._session(session)
+            return self._resource.collector_acquire(claimed.session_token, generation)
 
     def collector_finish(
         self, session: ServingGatewaySessionV3, generation: CollectorGenerationV3, permit_token: bytes
     ) -> None:
-        claimed = self._session(session)
-        self._resource.collector_finish(claimed.session_token, generation, permit_token)
+        with self._active_operation_v3():
+            claimed = self._session(session)
+            self._resource.collector_finish(claimed.session_token, generation, permit_token)
 
     def collector_abort(
         self, session: ServingGatewaySessionV3, generation: CollectorGenerationV3, permit_token: bytes
     ) -> None:
-        claimed = self._session(session)
-        self._resource.collector_abort(claimed.session_token, generation, permit_token)
+        with self._active_operation_v3():
+            claimed = self._session(session)
+            self._resource.collector_abort(claimed.session_token, generation, permit_token)

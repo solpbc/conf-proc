@@ -5,12 +5,15 @@
 
 from __future__ import annotations
 
+import copy
+import dataclasses
 import hashlib
 import threading
 import weakref
 from collections import namedtuple
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
+from types import MappingProxyType
 from typing import Final
 
 from conf_proc_json import canonical_loads
@@ -25,13 +28,16 @@ from conf_proc_spp_boot import (
     _record_extend_transport_closed,
 )
 from conf_proc_spp_boot_v3_resource import ServingAuthorityWrapperV3
+import conf_proc_spp_boot_v3_semantics as semantics
 from conf_proc_spp_boot_v3_semantics import (
     ControlInventorySnapshotV3,
     ExecutionClosureV3,
     KernelIdentitySnapshotV3,
     LaunchProjectionV3,
+    LaunchSourceProjectionV3,
     ModuleAuthoritySnapshotV3,
     Predicate5SnapshotV3,
+    ProcessAuthoritySnapshotV3,
     SourceDigestsV3,
     Stage2ControllerSnapshotV3,
     StorageSnapshotV3,
@@ -178,6 +184,7 @@ class BootBindingV3:
     control_inventory: ControlInventorySnapshotV3
     launch_projection: LaunchProjectionV3
     stage2_controller: Stage2ControllerSnapshotV3
+    process_authority: ProcessAuthoritySnapshotV3
     predicate5: Predicate5SnapshotV3
 
     @property
@@ -185,21 +192,202 @@ class BootBindingV3:
         return hashlib.sha256(self.boot_contract_bytes).hexdigest()
 
 
-_ISSUED_BOOT_BINDINGS_V3: Final = weakref.WeakValueDictionary[int, BootBindingV3]()
-_ISSUED_BOOT_BINDINGS_V3_LOCK: Final = threading.Lock()
+_BINDING_TYPE_TAGS_V3: Final = MappingProxyType({
+    BootBindingV3: "binding",
+    BootContractV3: "contract",
+    semantics.FrozenJsonObjectV3: "fjson",
+    ExecutionClosureV3: "closure",
+    semantics.ControllerBootstrapCacheProjectionV3: "controller_cache",
+    semantics.RoleBootstrapCacheProjectionV3: "role_cache",
+    SourceDigestsV3: "digests",
+    semantics.PartitionLocatorSnapshotV3: "partition",
+    semantics.VerityPairSnapshotV3: "verity",
+    StorageSnapshotV3: "storage",
+    KernelIdentitySnapshotV3: "kernel",
+    semantics.ModuleEntrySnapshotV3: "module_entry",
+    ModuleAuthoritySnapshotV3: "module_authority",
+    ControlInventorySnapshotV3: "control_inventory",
+    LaunchSourceProjectionV3: "launch_source",
+    semantics.RoleLaunchSnapshotV3: "role_launch",
+    LaunchProjectionV3: "launch",
+    Stage2ControllerSnapshotV3: "stage2",
+    ProcessAuthoritySnapshotV3: "process_authority",
+    semantics.EligibleFileSnapshotV3: "eligible_file",
+    semantics.LoaderControlSnapshotV3: "loader_control",
+    semantics.JitInputSnapshotV3: "jit_input",
+    semantics.JitDerivationSnapshotV3: "jit_derivation",
+    semantics.CacheSelectorSnapshotV3: "cache_selector",
+    Predicate5SnapshotV3: "predicate5",
+    tables.ControlValueRuleV3: "control_rule",
+    tables.ControlInventoryRowV3: "control_row",
+    tables.LaunchFdRowV3: "launch_fd",
+    tables.PipeCensusRowV3: "pipe",
+    tables.ReadinessProtocolRowV3: "readiness",
+    tables.LaunchRoleRowV3: "launch_role",
+    tables.Stage2FdRowV3: "stage2_fd",
+    tables.Stage2ControllerRowV3: "stage2_row",
+})
+
+
+def _normalize_binding_material_v3(
+    value: object,
+) -> tuple[bytes, tuple[tuple[tuple[str | int, ...], int], ...]]:
+    """Return canonical binding material and its recursively-owned container layout."""
+
+    layout: list[tuple[tuple[str | int, ...], int]] = []
+    active: set[int] = set()
+
+    def frame(tag: bytes, payload: bytes) -> bytes:
+        return tag + len(payload).to_bytes(8, "big") + payload
+
+    def walk(item: object, path: tuple[str | int, ...]) -> bytes:
+        item_type = type(item)
+        if item is None:
+            return b"n"
+        if item_type is bool:
+            return b"b1" if item else b"b0"
+        if item_type is int:
+            return frame(b"i", str(item).encode("ascii"))
+        if item_type is str:
+            return frame(b"s", item.encode("utf-8"))
+        if item_type is bytes:
+            return frame(b"y", item)
+        if item_type is tuple:
+            object_id = id(item)
+            if object_id in active:
+                raise TypeError("binding material contains a cycle")
+            active.add(object_id)
+            layout.append((path, object_id))
+            try:
+                return frame(
+                    b"t",
+                    len(item).to_bytes(8, "big")
+                    + b"".join(walk(member, path + (index,)) for index, member in enumerate(item)),
+                )
+            finally:
+                active.remove(object_id)
+        tag = _BINDING_TYPE_TAGS_V3.get(item_type)
+        if tag is None:
+            raise TypeError("binding material has an unrecognized type")
+        object_id = id(item)
+        if object_id in active:
+            raise TypeError("binding material contains a cycle")
+        active.add(object_id)
+        layout.append((path, object_id))
+        try:
+            if isinstance(item, Enum):
+                return frame(b"e", frame(b"g", tag.encode("ascii")) + walk(item.value, path + ("value",)))
+            if not dataclasses.is_dataclass(item):
+                raise TypeError("binding material type is neither dataclass nor enum")
+            declared_fields = dataclasses.fields(item)
+            if set(vars(item)) != {field.name for field in declared_fields}:
+                raise TypeError("binding material dataclass fields are invalid")
+            fields_bytes = b"".join(
+                frame(field.name.encode("ascii"), walk(getattr(item, field.name), path + (field.name,)))
+                for field in declared_fields
+            )
+            return frame(b"d", frame(b"g", tag.encode("ascii")) + fields_bytes)
+        finally:
+            active.remove(object_id)
+
+    return walk(value, ()), tuple(layout)
+
+
+@dataclass(frozen=True)
+class _IssuedBindingRecordV3:
+    binding_ref: weakref.ReferenceType[BootBindingV3]
+    retirement_ref: weakref.ReferenceType[BootBindingV3]
+    generation: int
+    fingerprint: str
+    identity_layout: tuple[tuple[tuple[str | int, ...], int], ...]
+    material: BootBindingV3
+    engine_claimed: bool = False
+    engine_ref: weakref.ReferenceType["BootTransitionEngineV3"] | None = None
+    admission_capability: "ServingAdmissionCapabilityV3 | None" = None
+
+
+class _IssuedBindingRegistryV3:
+    def __init__(self) -> None:
+        self.lock = threading.RLock()
+        self.generation = 0
+        self.records: dict[int, _IssuedBindingRecordV3] = {}
+
+
+_ISSUED_BOOT_BINDINGS_V3: Final = _IssuedBindingRegistryV3()
+
+
+def _retire_boot_binding_v3(binding_id: int, generation: int) -> None:
+    with _ISSUED_BOOT_BINDINGS_V3.lock:
+        record = _ISSUED_BOOT_BINDINGS_V3.records.get(binding_id)
+        if record is not None and record.generation == generation and record.binding_ref() is None:
+            del _ISSUED_BOOT_BINDINGS_V3.records[binding_id]
+
+
+def _binding_record_v3(binding: object) -> _IssuedBindingRecordV3 | None:
+    if type(binding) is not BootBindingV3:
+        return None
+    try:
+        normalized, identity_layout = _normalize_binding_material_v3(binding)
+        fingerprint = _sha256(normalized)
+    except BaseException:
+        return None
+    with _ISSUED_BOOT_BINDINGS_V3.lock:
+        record = _ISSUED_BOOT_BINDINGS_V3.records.get(id(binding))
+        if (
+            record is None
+            or record.binding_ref() is not binding
+            or record.fingerprint != fingerprint
+            or record.identity_layout != identity_layout
+        ):
+            return None
+        return record
 
 
 def _register_boot_binding_v3(binding: BootBindingV3) -> BootBindingV3:
-    with _ISSUED_BOOT_BINDINGS_V3_LOCK:
-        _ISSUED_BOOT_BINDINGS_V3[id(binding)] = binding
+    try:
+        normalized, identity_layout = _normalize_binding_material_v3(binding)
+        detached_material = copy.deepcopy(binding)
+        detached_normalized, detached_layout = _normalize_binding_material_v3(detached_material)
+    except BaseException:
+        raise ApplianceErrorV3(CP_BOOT_V3_BINDING, "binding material cannot be normalized") from None
+    _require(
+        normalized == detached_normalized and len(identity_layout) == len(detached_layout),
+        CP_BOOT_V3_BINDING,
+        "binding material cannot be detached",
+    )
+    fingerprint = _sha256(normalized)
+    binding_id = id(binding)
+    with _ISSUED_BOOT_BINDINGS_V3.lock:
+        _ISSUED_BOOT_BINDINGS_V3.generation += 1
+        generation = _ISSUED_BOOT_BINDINGS_V3.generation
+        retirement_ref = weakref.ref(
+            binding,
+            lambda _reference: _retire_boot_binding_v3(binding_id, generation),
+        )
+        _ISSUED_BOOT_BINDINGS_V3.records[binding_id] = _IssuedBindingRecordV3(
+            weakref.ref(binding),
+            retirement_ref,
+            generation,
+            fingerprint,
+            identity_layout,
+            detached_material,
+        )
     return binding
 
 
 def is_issued_boot_binding_v3(binding: object) -> bool:
-    return type(binding) is BootBindingV3 and _ISSUED_BOOT_BINDINGS_V3.get(id(binding)) is binding
+    """Return whether this exact, unmodified binding object was issued by v3."""
+
+    return _binding_record_v3(binding) is not None
 
 
-def _literal_v3_observation_shape_bytes() -> bytes:
+def _binding_reject_v3(message: str) -> None:
+    raise ApplianceErrorV3(CP_BOOT_V3_BINDING, message)
+
+
+def _literal_v3_observation_shape_bytes(
+    process_authority: ProcessAuthoritySnapshotV3,
+) -> bytes:
     """Serialize every v3-owned closed inventory in a stable, ordered form."""
 
     shape = (
@@ -271,6 +459,14 @@ def _literal_v3_observation_shape_bytes() -> bytes:
             tables.AGGREGATE_BUFFER_BYTES_V3,
             tables.REQUEST_HEAD_CAPACITY_BYTES_V3,
             tables.RELAY_COPY_CHUNK_BYTES_V3,
+        ),
+        (
+            "process_authority",
+            process_authority.boot_roots,
+            process_authority.process_nodes,
+            process_authority.process_edges,
+            process_authority.network_policy,
+            process_authority.capability_policy,
         ),
         ("wire_message_types", tables.WIRE_MESSAGE_TYPE_ROWS_V3),
     )
@@ -345,7 +541,7 @@ def bind_boot_inputs_v3(
             boot_contract_bytes,
             module_plan_bytes,
             gpt_layout_rules_bytes,
-            _literal_v3_observation_shape_bytes(),
+            _literal_v3_observation_shape_bytes(snapshots.process_authority),
             contract,
             snapshots.source_digests,
             snapshots.storage,
@@ -354,9 +550,170 @@ def bind_boot_inputs_v3(
             snapshots.control_inventory,
             snapshots.launch_projection,
             snapshots.stage2_controller,
+            snapshots.process_authority,
             snapshots.predicate5,
         )
     )
+
+
+class ServingAdmissionCapabilityV3:
+    """One binding-scoped, single-publication serving admission capability."""
+
+    def __init__(self, binding: BootBindingV3, generation: int, engine: "BootTransitionEngineV3") -> None:
+        self.binding_ref = weakref.ref(binding)
+        self.binding_id = id(binding)
+        self.generation = generation
+        self.engine_ref = weakref.ref(engine)
+        self.condition = threading.Condition(threading.RLock())
+        self.phase = "none"
+        self.owner_thread_id: int | None = None
+        self.constructing_wrapper_ref: weakref.ReferenceType[ServingAuthorityWrapperV3] | None = None
+        self.published_wrapper_ref: weakref.ReferenceType[ServingAuthorityWrapperV3] | None = None
+        self.retired = False
+
+
+def _claim_engine_v3(binding: BootBindingV3, engine: "BootTransitionEngineV3") -> None:
+    record = _binding_record_v3(binding)
+    if record is None:
+        _binding_reject_v3("binding was not issued")
+    with _ISSUED_BOOT_BINDINGS_V3.lock:
+        current = _ISSUED_BOOT_BINDINGS_V3.records.get(id(binding))
+        if current is None or current.binding_ref() is not binding:
+            _binding_reject_v3("binding was not issued")
+        if current.engine_claimed:
+            _binding_reject_v3("duplicate engine for boot binding")
+        _ISSUED_BOOT_BINDINGS_V3.records[id(binding)] = replace(
+            current,
+            engine_claimed=True,
+            engine_ref=weakref.ref(engine),
+        )
+
+
+def _serving_admission_capability_v3(
+    binding: BootBindingV3, engine: "BootTransitionEngineV3"
+) -> ServingAdmissionCapabilityV3:
+    record = _binding_record_v3(binding)
+    if record is None:
+        _binding_reject_v3("binding was not issued")
+    with _ISSUED_BOOT_BINDINGS_V3.lock:
+        current = _ISSUED_BOOT_BINDINGS_V3.records.get(id(binding))
+        if (
+            current is None
+            or current.binding_ref() is not binding
+            or current.engine_ref is None
+            or current.engine_ref() is not engine
+        ):
+            _binding_reject_v3("binding engine is not current")
+        capability = current.admission_capability
+        if capability is None:
+            capability = ServingAdmissionCapabilityV3(binding, current.generation, engine)
+            _ISSUED_BOOT_BINDINGS_V3.records[id(binding)] = replace(
+                current, admission_capability=capability
+            )
+        return capability
+
+
+def _claim_serving_wrapper_construction_v3(
+    capability: object, wrapper: ServingAuthorityWrapperV3
+) -> None:
+    if type(capability) is not ServingAdmissionCapabilityV3:
+        _binding_reject_v3("serving admission capability is invalid")
+    binding = capability.binding_ref()
+    engine = capability.engine_ref()
+    if binding is None or engine is None:
+        _binding_reject_v3("serving admission capability is stale")
+    engine._verify_v3()
+    with _ISSUED_BOOT_BINDINGS_V3.lock:
+        record = _ISSUED_BOOT_BINDINGS_V3.records.get(capability.binding_id)
+        valid_capability = (
+            record is not None
+            and record.generation == capability.generation
+            and record.binding_ref() is binding
+            and record.admission_capability is capability
+            and record.engine_ref is not None
+            and record.engine_ref() is engine
+        )
+    if not valid_capability:
+        _binding_reject_v3("serving admission capability is foreign")
+    with capability.condition:
+        if (
+            capability.retired
+            or capability.phase != "constructing"
+            or capability.owner_thread_id != threading.get_ident()
+            or capability.constructing_wrapper_ref is not None
+        ):
+            _binding_reject_v3("serving admission capability is not live")
+        capability.constructing_wrapper_ref = weakref.ref(wrapper)
+
+
+def _abandon_serving_wrapper_construction_v3(
+    capability: ServingAdmissionCapabilityV3, wrapper: ServingAuthorityWrapperV3
+) -> None:
+    with capability.condition:
+        if capability.constructing_wrapper_ref is not None and capability.constructing_wrapper_ref() is wrapper:
+            capability.constructing_wrapper_ref = None
+        if capability.phase == "constructing" and capability.owner_thread_id == threading.get_ident():
+            capability.phase = "none"
+            capability.owner_thread_id = None
+            capability.condition.notify_all()
+
+
+def _verify_serving_wrapper_v3(
+    capability: object, wrapper: ServingAuthorityWrapperV3, *, allow_complete: bool = False
+) -> None:
+    if type(capability) is not ServingAdmissionCapabilityV3:
+        _binding_reject_v3("serving admission capability is invalid")
+    binding = capability.binding_ref()
+    engine = capability.engine_ref()
+    if binding is None or engine is None:
+        _binding_reject_v3("serving admission capability is stale")
+    engine._verify_v3()
+    with _ISSUED_BOOT_BINDINGS_V3.lock:
+        record = _ISSUED_BOOT_BINDINGS_V3.records.get(capability.binding_id)
+        if (
+            record is None
+            or record.generation != capability.generation
+            or record.binding_ref() is not binding
+            or record.admission_capability is not capability
+            or record.engine_ref is None
+            or record.engine_ref() is not engine
+        ):
+            _binding_reject_v3("serving admission capability is foreign")
+    with capability.condition:
+        constructing = (
+            capability.phase == "constructing"
+            and capability.constructing_wrapper_ref is not None
+            and capability.constructing_wrapper_ref() is wrapper
+        )
+        published = (
+            capability.phase == "admitted"
+            and capability.published_wrapper_ref is not None
+            and capability.published_wrapper_ref() is wrapper
+        )
+        completed = (
+            allow_complete
+            and capability.phase == "retired"
+            and capability.published_wrapper_ref is not None
+            and capability.published_wrapper_ref() is wrapper
+        )
+        if not (constructing or published or completed):
+            _binding_reject_v3("serving authority was not admitted")
+
+
+def _retire_serving_admission_v3(
+    capability: ServingAdmissionCapabilityV3, wrapper: ServingAuthorityWrapperV3
+) -> None:
+    with capability.condition:
+        if capability.published_wrapper_ref is not None and capability.published_wrapper_ref() is wrapper:
+            capability.phase = "retired"
+            capability.retired = True
+            capability.owner_thread_id = None
+            capability.condition.notify_all()
+        elif capability.constructing_wrapper_ref is not None and capability.constructing_wrapper_ref() is wrapper:
+            capability.phase = "retired"
+            capability.retired = True
+            capability.owner_thread_id = None
+            capability.condition.notify_all()
 
 
 class BootTransitionEngineV3:
@@ -364,7 +721,8 @@ class BootTransitionEngineV3:
 
     def __init__(self, binding: BootBindingV3) -> None:
         if not is_issued_boot_binding_v3(binding):
-            raise ApplianceErrorV3(CP_BOOT_V3_BINDING, "binding was not issued")
+            _binding_reject_v3("binding was not issued")
+        _claim_engine_v3(binding, self)
         self.binding = binding
         self.state = BootTransitionStateV3.PID1_IDENTITY_ESTABLISHED
         self._pending: AuthorityStepEffectV3 | None = None
@@ -374,36 +732,58 @@ class BootTransitionEngineV3:
         self._serving_authority: ServingAuthorityWrapperV3 | None = None
         self.failure_diagnostic_token: str | None = None
 
+    def _verify_v3(self) -> _IssuedBindingRecordV3:
+        record = _binding_record_v3(getattr(self, "binding", None))
+        if record is None:
+            _binding_reject_v3("binding was not issued or was modified")
+        with _ISSUED_BOOT_BINDINGS_V3.lock:
+            current = _ISSUED_BOOT_BINDINGS_V3.records.get(id(self.binding))
+            if (
+                current is None
+                or current.binding_ref() is not self.binding
+                or current.engine_ref is None
+                or current.engine_ref() is not self
+            ):
+                _binding_reject_v3("engine is not the issued binding engine")
+            return current
+
     @property
     def contract_sha256(self) -> str:
-        return _sha256(self.binding.boot_contract_bytes)
+        return _sha256(self._verify_v3().material.boot_contract_bytes)
 
     @property
     def pcr15_measurement_v3(self) -> bytes:
+        binding = self._verify_v3().material
+        return self._pcr15_measurement_from_binding_v3(binding)
+
+    @staticmethod
+    def _pcr15_measurement_from_binding_v3(binding: BootBindingV3) -> bytes:
         frame = lambda value: len(value).to_bytes(8, "big") + value
         material = (
             b"sol-spp-appliance-manifest-v3" + b"\0"
-            + frame(self.binding.root_lock_bytes)
-            + frame(self.binding.runtime_closure_bytes)
-            + frame(self.binding.verity_rules_bytes)
-            + frame(self.binding.tcb_identity_bytes)
-            + frame(self.binding.builder_source_bytes)
-            + frame(self.binding.policy_bytes)
-            + frame(self.binding.accepted_manifest_bytes)
-            + frame(self.binding.kernel_feature_contract_bytes)
-            + frame(self.binding.trusted_certificate_bundle_bytes)
-            + frame(self.binding.boot_contract_bytes)
-            + frame(self.binding.module_plan_bytes)
-            + frame(self.binding.gpt_layout_rules_bytes)
-            + frame(self.binding.literal_v3_observation_shape_bytes)
+            + frame(binding.root_lock_bytes)
+            + frame(binding.runtime_closure_bytes)
+            + frame(binding.verity_rules_bytes)
+            + frame(binding.tcb_identity_bytes)
+            + frame(binding.builder_source_bytes)
+            + frame(binding.policy_bytes)
+            + frame(binding.accepted_manifest_bytes)
+            + frame(binding.kernel_feature_contract_bytes)
+            + frame(binding.trusted_certificate_bundle_bytes)
+            + frame(binding.boot_contract_bytes)
+            + frame(binding.module_plan_bytes)
+            + frame(binding.gpt_layout_rules_bytes)
+            + frame(binding.literal_v3_observation_shape_bytes)
         )
         return hashlib.sha256(material).digest()
 
     @property
     def predicted_pcr15_v3(self) -> bytes:
-        return hashlib.sha256(b"\0" * 32 + self.pcr15_measurement_v3).digest()
+        binding = self._verify_v3().material
+        return hashlib.sha256(b"\0" * 32 + self._pcr15_measurement_from_binding_v3(binding)).digest()
 
     def next_effect(self) -> AuthorityStepEffectV3 | None:
+        binding = self._verify_v3().material
         if self._pending is not None:
             return self._pending
         if self.state is BootTransitionStateV3.FAILED_NON_SERVING:
@@ -415,13 +795,14 @@ class BootTransitionEngineV3:
             if not _claim_extend_transport():
                 self._fail(CP_BOOT_V3_LATCH, "a PCR15 extend transport was already claimed for this process")
             self._extend_request_issued = True
-            expected: object = self.pcr15_measurement_v3
+            expected: object = self._pcr15_measurement_from_binding_v3(binding)
         else:
             expected = step.expected
-        self._pending = AuthorityStepEffectV3(self.contract_sha256, self.state, step.action, expected)
+        self._pending = AuthorityStepEffectV3(_sha256(binding.boot_contract_bytes), self.state, step.action, expected)
         return self._pending
 
     def advance(self, transport: BootTransport) -> BootTransitionStateV3:
+        self._verify_v3()
         effect = self.next_effect()
         if effect is None:
             self._fail(_reason_for_state_v3(self.state), "v3 boot transition has no further normal effect")
@@ -453,6 +834,7 @@ class BootTransitionEngineV3:
     def accept(self, observation: BootObservation) -> BootTransitionStateV3:
         """Accept one typed step readback for deterministic reducer tests."""
 
+        binding = self._verify_v3().material
         state = self.state
         step = _STEP_BY_STATE_V3.get(state)
         if step is None:
@@ -461,7 +843,7 @@ class BootTransitionEngineV3:
         if (
             effect is None
             or type(observation) is not AuthorityStepReadbackV3
-            or observation.contract_sha256 != self.contract_sha256
+            or observation.contract_sha256 != _sha256(binding.boot_contract_bytes)
             or observation.state is not state
             or observation.action != step.action
             or observation.accepted is not True
@@ -497,18 +879,62 @@ class BootTransitionEngineV3:
         raise ApplianceErrorV3(reason_code, message)
 
     def admit_serving_authority(self) -> ServingAuthorityWrapperV3:
+        self._verify_v3()
+        capability = _serving_admission_capability_v3(self.binding, self)
+        with capability.condition:
+            if capability.retired or capability.phase == "retired":
+                _binding_reject_v3("serving admission capability was retired")
         if self.state is not BootTransitionStateV3.SERVING_AVAILABLE:
             self._fail(
                 CP_BOOT_V3_LAUNCH_SUPERVISION,
                 "v3 serving authority is not available before SERVING_AVAILABLE",
             )
-        # Wrapper admission has no transport argument; its later per-session
-        # open_session boundary owns session transport identity and freshness.
-        if self._serving_authority is None:
-            self._serving_authority = ServingAuthorityWrapperV3(
-                on_global_fault=self._on_wrapper_global_fault
+        while True:
+            with capability.condition:
+                if capability.retired or capability.phase == "retired":
+                    _binding_reject_v3("serving admission capability was retired")
+                if capability.phase == "admitted":
+                    if capability.published_wrapper_ref is None:
+                        _binding_reject_v3("serving admission publication is invalid")
+                    wrapper = capability.published_wrapper_ref()
+                    if wrapper is None:
+                        _binding_reject_v3("serving admission publication was lost")
+                    self._serving_authority = wrapper
+                    return wrapper
+                if capability.phase == "constructing":
+                    capability.condition.wait()
+                    self._verify_v3()
+                    continue
+                if capability.phase != "none":
+                    _binding_reject_v3("serving admission capability is invalid")
+                capability.phase = "constructing"
+                capability.owner_thread_id = threading.get_ident()
+                capability.constructing_wrapper_ref = None
+                break
+        try:
+            wrapper = ServingAuthorityWrapperV3(
+                admission_capability=capability,
+                on_global_fault=self._on_wrapper_global_fault,
             )
-        return self._serving_authority
+            self._verify_v3()
+            with capability.condition:
+                if (
+                    capability.retired
+                    or capability.phase != "constructing"
+                    or capability.owner_thread_id != threading.get_ident()
+                    or capability.constructing_wrapper_ref is None
+                    or capability.constructing_wrapper_ref() is not wrapper
+                ):
+                    _binding_reject_v3("serving admission was retired before publication")
+                self._serving_authority = wrapper
+                capability.published_wrapper_ref = weakref.ref(wrapper)
+                capability.phase = "admitted"
+                capability.owner_thread_id = None
+                capability.condition.notify_all()
+                return wrapper
+        except BaseException:
+            _abandon_serving_wrapper_construction_v3(capability, locals().get("wrapper"))
+            raise
 
     def _on_wrapper_global_fault(self) -> None:
         if self.state is BootTransitionStateV3.FAILED_NON_SERVING:
