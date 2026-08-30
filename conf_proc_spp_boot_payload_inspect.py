@@ -14,7 +14,7 @@ import ast
 import hashlib
 import stat
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, Iterator
 
 from conf_proc_json import canonical_dumps, canonical_loads
 from conf_proc_provenance_v2_inspect import InspectionResult, _is_issued_inspection_result
@@ -40,20 +40,22 @@ _SOURCE_ROWS: Final = (
     ("/usr/lib/spp/conf_proc_reasons.py", "support", 0o444, 12571, "c56b629a0fc156860c7400d6bc6884c1f41c8a9e4b0626ef4f2821f71102067a"),
     ("/usr/lib/spp/conf_proc_spp_boot.py", "engine", 0o444, 147664, "c1dfba4c4ca71cf64ab8ecef12440950edab88f6ef3e2fb73791fc1f900076a6"),
 )
-_AUTHORITY_ROWS: Final = (
-    ("root_lock_bytes", "/etc/spp/authority/root-lock.json", "root_lock"),
-    ("runtime_closure_bytes", "/etc/spp/authority/runtime-closure.json", "runtime_closure"),
-    ("verity_rules_bytes", "/etc/spp/authority/verity-rules.json", "verity_rules"),
-    ("tcb_identity_bytes", "/etc/spp/authority/tcb-identity.json", "tcb_identity"),
-    ("builder_source_bytes", "/etc/spp/authority/designated-builder-source.py", "designated_builder_source"),
-    ("policy_bytes", "/etc/spp/authority/policy.json", "policy"),
-    ("accepted_manifest_bytes", "/etc/spp/authority/appliance.manifest.json", "accepted_manifest"),
-    ("kernel_feature_contract_bytes", "/etc/spp/authority/kernel-features.json", "kernel_features"),
-    ("trusted_certificate_bundle_bytes", "/etc/spp/authority/trusted-module-signers.pem", "trusted_module_signers"),
-    ("boot_contract_bytes", "/etc/spp/authority/boot-contract.json", "boot_contract"),
-    ("module_plan_bytes", "/etc/spp/authority/module-load-plan.json", "module_load_plan"),
-    ("gpt_layout_rules_bytes", "/etc/spp/authority/gpt-layout-rules.json", "gpt_layout_rules"),
-)
+def _authority_rows() -> Iterator[tuple[str, str, str]]:
+    yield "root_lock_bytes", "/etc/spp/authority/root-lock.json", "root_lock"
+    yield "runtime_closure_bytes", "/etc/spp/authority/runtime-closure.json", "runtime_closure"
+    yield "verity_rules_bytes", "/etc/spp/authority/verity-rules.json", "verity_rules"
+    yield "tcb_identity_bytes", "/etc/spp/authority/tcb-identity.json", "tcb_identity"
+    yield "builder_source_bytes", "/etc/spp/authority/designated-builder-source.py", "designated_builder_source"
+    yield "policy_bytes", "/etc/spp/authority/policy.json", "policy"
+    yield "accepted_manifest_bytes", "/etc/spp/authority/appliance.manifest.json", "accepted_manifest"
+    yield "kernel_feature_contract_bytes", "/etc/spp/authority/kernel-features.json", "kernel_features"
+    yield "trusted_certificate_bundle_bytes", "/etc/spp/authority/trusted-module-signers.pem", "trusted_module_signers"
+    yield "boot_contract_bytes", "/etc/spp/authority/boot-contract.json", "boot_contract"
+    yield "module_plan_bytes", "/etc/spp/authority/module-load-plan.json", "module_load_plan"
+    yield "gpt_layout_rules_bytes", "/etc/spp/authority/gpt-layout-rules.json", "gpt_layout_rules"
+
+
+_AUTHORITY_ROWS: Final = tuple(_authority_rows())
 _LOCAL_IMPORTS: Final = {
     "conf_proc_spp_boot": frozenset({"conf_proc_geometry", "conf_proc_json", "conf_proc_lock", "conf_proc_module_authority", "conf_proc_policy", "conf_proc_provenance_v2", "conf_proc_provenance_v2_manifest", "conf_proc_reasons"}),
     "conf_proc_geometry": frozenset(),

@@ -67,8 +67,8 @@ BOOT_PAYLOAD_SOURCE_AUTHORITY_V3: Final = (
     _SourceAuthorityV3("/usr/lib/spp/conf_proc_reasons.py", "support", 0o444, 12571, "c56b629a0fc156860c7400d6bc6884c1f41c8a9e4b0626ef4f2821f71102067a"),
     _SourceAuthorityV3("/usr/lib/spp/conf_proc_spp_boot.py", "engine", 0o444, 147664, "c1dfba4c4ca71cf64ab8ecef12440950edab88f6ef3e2fb73791fc1f900076a6"),
     _SourceAuthorityV3("/usr/lib/spp/conf_proc_spp_boot_dispatch_v3.py", "dispatcher", 0o444, 1141, "83a0652bff152a7e9e96e4f5daa0bde0278092d012d0b8fbf8832a39f23fa139"),
-    _SourceAuthorityV3("/usr/lib/spp/conf_proc_spp_boot_v3.py", "engine", 0o444, 53012, "9b348e1ab4a0b55ab188cb30a65367bcb66171da5fa82668fffa7632781bc209"),
-    _SourceAuthorityV3("/usr/lib/spp/conf_proc_spp_boot_v3_resource.py", "support", 0o444, 20308, "47aaf114c5ab13aaa9eccc36087a8ad23081f31ed8beaff0de75c1c76c15e6ea"),
+    _SourceAuthorityV3("/usr/lib/spp/conf_proc_spp_boot_v3.py", "engine", 0o444, 88910, "05aa22b99b2c99274e06147dbcc40053cb110f9a99b4b1433deca2f532b5b6ab"),
+    _SourceAuthorityV3("/usr/lib/spp/conf_proc_spp_boot_v3_resource.py", "support", 0o444, 25792, "b172f2dd4dbe70e295e4dbdd0ebe066c7e247e8d2183db22b15ac48f5afc57de"),
     _SourceAuthorityV3("/usr/lib/spp/conf_proc_spp_boot_v3_semantics.py", "engine", 0o444, 65475, "f1a0dfa7c7013e9e6bb8bf78cfb01b090ea63cf177c6bbeef8da9c28d6eeade6"),
     _SourceAuthorityV3("/usr/lib/spp/conf_proc_spp_boot_v3_tables.py", "support", 0o444, 37125, "0c50b6a46acd5152d63757956cba65f699c58e1a1566807448f5779e28787824"),
     _SourceAuthorityV3("/usr/lib/spp/conf_proc_spp_boot_v3_wire.py", "support", 0o444, 41779, "00c03278031280dd572bf221be2075ab741e36b378af8a7fd2c874560b840e90"),
@@ -86,8 +86,8 @@ _EXPECTED_LITERAL_SOURCE_ROWS_V3: Final = (
     _ExpectedSourceRowV3("/usr/lib/spp/conf_proc_reasons.py", "support", 0o444, 12571, "c56b629a0fc156860c7400d6bc6884c1f41c8a9e4b0626ef4f2821f71102067a"),
     _ExpectedSourceRowV3("/usr/lib/spp/conf_proc_spp_boot.py", "engine", 0o444, 147664, "c1dfba4c4ca71cf64ab8ecef12440950edab88f6ef3e2fb73791fc1f900076a6"),
     _ExpectedSourceRowV3("/usr/lib/spp/conf_proc_spp_boot_dispatch_v3.py", "dispatcher", 0o444, 1141, "83a0652bff152a7e9e96e4f5daa0bde0278092d012d0b8fbf8832a39f23fa139"),
-    _ExpectedSourceRowV3("/usr/lib/spp/conf_proc_spp_boot_v3.py", "engine", 0o444, 53012, "9b348e1ab4a0b55ab188cb30a65367bcb66171da5fa82668fffa7632781bc209"),
-    _ExpectedSourceRowV3("/usr/lib/spp/conf_proc_spp_boot_v3_resource.py", "support", 0o444, 20308, "47aaf114c5ab13aaa9eccc36087a8ad23081f31ed8beaff0de75c1c76c15e6ea"),
+    _ExpectedSourceRowV3("/usr/lib/spp/conf_proc_spp_boot_v3.py", "engine", 0o444, 88910, "05aa22b99b2c99274e06147dbcc40053cb110f9a99b4b1433deca2f532b5b6ab"),
+    _ExpectedSourceRowV3("/usr/lib/spp/conf_proc_spp_boot_v3_resource.py", "support", 0o444, 25792, "b172f2dd4dbe70e295e4dbdd0ebe066c7e247e8d2183db22b15ac48f5afc57de"),
     _ExpectedSourceRowV3("/usr/lib/spp/conf_proc_spp_boot_v3_semantics.py", "engine", 0o444, 65475, "f1a0dfa7c7013e9e6bb8bf78cfb01b090ea63cf177c6bbeef8da9c28d6eeade6"),
     _ExpectedSourceRowV3("/usr/lib/spp/conf_proc_spp_boot_v3_tables.py", "support", 0o444, 37125, "0c50b6a46acd5152d63757956cba65f699c58e1a1566807448f5779e28787824"),
     _ExpectedSourceRowV3("/usr/lib/spp/conf_proc_spp_boot_v3_wire.py", "support", 0o444, 41779, "00c03278031280dd572bf221be2075ab741e36b378af8a7fd2c874560b840e90"),
@@ -294,7 +294,7 @@ def _validate_literal_authority() -> None:
         previous = encoded
         seen.add(row.archive_path)
         roles[row.role] += 1
-    if roles != {"support": 12, "engine": 3, "dispatcher": 1} or sum(row.size_bytes for row in rows) != 469345:
+    if roles != {"support": 12, "engine": 3, "dispatcher": 1} or sum(row.size_bytes for row in rows) != 510727:
         _error(CP_SPP_PAYLOAD_V3_AUTHORITY)
     paths = sorted(seen, key=lambda value: value.encode("utf-8"))
     if any(right.startswith(left + "/") for left, right in zip(paths, paths[1:], strict=False)):

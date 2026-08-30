@@ -251,8 +251,81 @@ class ServingGatewaySessionV3:
     session_token: bytes
 
 
+class _WrapperCleanupStateV3:
+    __slots__ = (
+        "condition",
+        "phase",
+        "owner_thread_id",
+        "error",
+        "binding_mismatch",
+        "revoke_count",
+        "on_global_fault",
+    )
+
+    def __init__(self, on_global_fault: Callable[[], None] | None) -> None:
+        self.condition = threading.Condition(threading.RLock())
+        self.phase = "active"
+        self.owner_thread_id: int | None = None
+        self.error: BaseException | None = None
+        self.binding_mismatch = False
+        self.revoke_count = 0
+        self.on_global_fault = on_global_fault
+
+
 class ServingAuthorityWrapperV3:
     """Thin PID1-side composition of resource and gateway session authorities."""
+
+    @property
+    def _cleanup_condition(self) -> threading.Condition:
+        return self._cleanup_state.condition
+
+    @property
+    def _cleanup_phase(self) -> str:
+        return self._cleanup_state.phase
+
+    @_cleanup_phase.setter
+    def _cleanup_phase(self, value: str) -> None:
+        self._cleanup_state.phase = value
+
+    @property
+    def _cleanup_owner_thread_id(self) -> int | None:
+        return self._cleanup_state.owner_thread_id
+
+    @_cleanup_owner_thread_id.setter
+    def _cleanup_owner_thread_id(self, value: int | None) -> None:
+        self._cleanup_state.owner_thread_id = value
+
+    @property
+    def _cleanup_error(self) -> BaseException | None:
+        return self._cleanup_state.error
+
+    @_cleanup_error.setter
+    def _cleanup_error(self, value: BaseException | None) -> None:
+        self._cleanup_state.error = value
+
+    @property
+    def _cleanup_binding_mismatch(self) -> bool:
+        return self._cleanup_state.binding_mismatch
+
+    @_cleanup_binding_mismatch.setter
+    def _cleanup_binding_mismatch(self, value: bool) -> None:
+        self._cleanup_state.binding_mismatch = value
+
+    @property
+    def _revoke_count(self) -> int:
+        return self._cleanup_state.revoke_count
+
+    @_revoke_count.setter
+    def _revoke_count(self, value: int) -> None:
+        self._cleanup_state.revoke_count = value
+
+    @property
+    def _on_global_fault(self) -> Callable[[], None] | None:
+        return self._cleanup_state.on_global_fault
+
+    @_on_global_fault.setter
+    def _on_global_fault(self, value: Callable[[], None] | None) -> None:
+        self._cleanup_state.on_global_fault = value
 
     def __init__(
         self,
@@ -262,24 +335,62 @@ class ServingAuthorityWrapperV3:
     ) -> None:
         from conf_proc_spp_boot_v3 import _claim_serving_wrapper_construction_v3
 
-        _claim_serving_wrapper_construction_v3(admission_capability, self)
-        self._admission_capability = admission_capability
+        self._construction_condition = threading.Condition(threading.RLock())
+        self._construction_owner_thread_id = threading.get_ident()
+        self._construction_cancelled = False
+        self._construction_complete = False
+        self._construction_failed = False
+        construction_claimed = False
         try:
-            self._resource = ServingResourceReducerV3()
-            self._sessions: dict[bytes, ServingGatewaySessionV3] = {}
-            self._reducers: dict[bytes, ServingSessionReducer] = {}
-            self._on_global_fault = on_global_fault
-            self._operation_lock = threading.RLock()
-            self._cleanup_condition = threading.Condition(threading.RLock())
-            self._cleanup_phase = "active"
-            self._cleanup_owner_thread_id: int | None = None
-            self._cleanup_error: BaseException | None = None
-            self._revoke_count = 0
+            binding_anchor = _claim_serving_wrapper_construction_v3(
+                admission_capability, self
+            )
+            construction_claimed = True
+            resource = ServingResourceReducerV3()
+            sessions: dict[bytes, ServingGatewaySessionV3] = {}
+            reducers: dict[bytes, ServingSessionReducer] = {}
+            operation_lock = threading.RLock()
+            cleanup_state = _WrapperCleanupStateV3(on_global_fault)
+
+            self._binding_liveness_anchor = binding_anchor
+            self._admission_capability = admission_capability
+            self._resource = resource
+            self._sessions = sessions
+            self._reducers = reducers
+            self._operation_lock = operation_lock
+            self._cleanup_state = cleanup_state
+            with self._construction_condition:
+                self._construction_complete = True
+                cancelled = self._construction_cancelled
+                self._construction_condition.notify_all()
+            if cancelled:
+                self._binding_mismatch_cleanup_v3()
+                _binding_reject("binding was not issued")
         except BaseException:
+            with self._construction_condition:
+                if not self._construction_complete:
+                    self._construction_failed = True
+                    self._construction_complete = True
+                    self._construction_condition.notify_all()
             from conf_proc_spp_boot_v3 import _abandon_serving_wrapper_construction_v3
 
-            _abandon_serving_wrapper_construction_v3(admission_capability, self)
+            if construction_claimed:
+                _abandon_serving_wrapper_construction_v3(admission_capability, self)
             raise
+
+    def _discard_unpublished_construction_v3(self) -> None:
+        with self._construction_condition:
+            self._construction_cancelled = True
+            if (
+                not self._construction_complete
+                and self._construction_owner_thread_id == threading.get_ident()
+            ):
+                return
+            while not self._construction_complete:
+                self._construction_condition.wait()
+            failed = self._construction_failed
+        if not failed:
+            self._binding_mismatch_cleanup_v3()
 
     def _verify_admission_v3(self, *, allow_complete: bool = False) -> None:
         from conf_proc_spp_boot_v3 import _verify_serving_wrapper_v3
@@ -289,6 +400,13 @@ class ServingAuthorityWrapperV3:
             self,
             allow_complete=allow_complete,
         )
+
+    def _terminal_binding_mismatch_v3(self) -> bool:
+        with self._cleanup_condition:
+            return (
+                self._cleanup_phase == "complete"
+                and self._cleanup_binding_mismatch
+            )
 
     def __copy__(self) -> "ServingAuthorityWrapperV3":
         clone = object.__new__(ServingAuthorityWrapperV3)
@@ -310,11 +428,16 @@ class ServingAuthorityWrapperV3:
             if self._cleanup_phase != "active":
                 _binding_reject("serving authority is revoked")
 
+    def _guard_active_after_operation_lock_v3(self) -> None:
+        with self._cleanup_condition:
+            if self._cleanup_phase != "active":
+                _binding_reject("serving authority is revoked")
+
     @contextmanager
     def _active_operation_v3(self):
         self._guard_active_v3()
         with self._operation_lock:
-            self._guard_active_v3()
+            self._guard_active_after_operation_lock_v3()
             yield
 
     def _session(self, session: object) -> ServingGatewaySessionV3:
@@ -405,47 +528,63 @@ class ServingAuthorityWrapperV3:
             reducer = self._reducer(claimed)
             del self._sessions[claimed.session_token]
             del self._reducers[claimed.session_token]
-            reducer.close()
-            return result
+        reducer.close()
+        return result
 
-    def global_revoke(self) -> None:
-        self._verify_admission_v3(allow_complete=True)
+    def _run_cleanup_v3(self, *, binding_mismatch: bool) -> None:
         thread_id = threading.get_ident()
         reducers: tuple[ServingSessionReducer, ...] = ()
         error: BaseException | None = None
         cleanup_owner = False
+        with self._cleanup_condition:
+            if binding_mismatch:
+                self._cleanup_binding_mismatch = True
+            if self._cleanup_phase == "complete":
+                error = (
+                    None
+                    if self._cleanup_binding_mismatch
+                    else self._cleanup_error
+                )
+            elif self._cleanup_phase == "cleaning":
+                if self._cleanup_owner_thread_id == thread_id:
+                    if self._cleanup_binding_mismatch:
+                        _binding_reject("binding was not issued")
+                    return
+                while self._cleanup_phase == "cleaning":
+                    self._cleanup_condition.wait()
+                error = (
+                    None
+                    if self._cleanup_binding_mismatch
+                    else self._cleanup_error
+                )
+            elif self._cleanup_phase == "active":
+                cleanup_owner = True
+                self._cleanup_phase = "cleaning"
+                self._cleanup_owner_thread_id = thread_id
+            else:
+                _binding_reject("serving authority cleanup state is invalid")
+        if not cleanup_owner:
+            if error is not None:
+                raise error
+            return
         with self._operation_lock:
-            with self._cleanup_condition:
-                if self._cleanup_phase == "complete":
-                    error = self._cleanup_error
-                elif self._cleanup_phase == "cleaning":
-                    if self._cleanup_owner_thread_id == thread_id:
-                        return
-                    while self._cleanup_phase == "cleaning":
-                        self._cleanup_condition.wait()
-                    error = self._cleanup_error
-                else:
-                    cleanup_owner = True
-                    self._cleanup_phase = "cleaning"
-                    self._cleanup_owner_thread_id = thread_id
-                    self._revoke_count += 1
-                    reducers = tuple(self._reducers.values())
-                    self._sessions.clear()
-                    self._reducers.clear()
-                    try:
-                        self._resource.global_revoke()
-                    except BaseException as caught:
-                        error = caught
-            if not cleanup_owner:
-                if error is not None:
-                    raise error
-                return
+            self._revoke_count += 1
+            reducers = tuple(self._reducers.values())
+            self._sessions.clear()
+            self._reducers.clear()
+            try:
+                self._resource.global_revoke()
+            except BaseException as caught:
+                error = caught
         # No wrapper or registry lock is held while invoking user callbacks.
-        try:
-            if self._on_global_fault is not None:
-                self._on_global_fault()
-        except BaseException as caught:
-            error = caught
+        with self._cleanup_condition:
+            suppress_global_fault = self._cleanup_binding_mismatch
+        if not suppress_global_fault:
+            try:
+                if self._on_global_fault is not None:
+                    self._on_global_fault()
+            except BaseException as caught:
+                error = caught
         for reducer in reducers:
             try:
                 reducer.close()
@@ -453,15 +592,29 @@ class ServingAuthorityWrapperV3:
                 if error is None:
                     error = caught
         with self._cleanup_condition:
-            self._cleanup_error = error
+            self._cleanup_binding_mismatch = (
+                self._cleanup_binding_mismatch or binding_mismatch
+            )
+            terminal_binding_mismatch = self._cleanup_binding_mismatch
+            self._cleanup_error = None if terminal_binding_mismatch else error
+            self._on_global_fault = None
             self._cleanup_phase = "complete"
             self._cleanup_owner_thread_id = None
             self._cleanup_condition.notify_all()
+        if error is not None and not terminal_binding_mismatch:
+            raise error
+
+    def _binding_mismatch_cleanup_v3(self) -> None:
+        self._run_cleanup_v3(binding_mismatch=True)
+
+    def global_revoke(self) -> None:
+        self._verify_admission_v3(allow_complete=True)
         from conf_proc_spp_boot_v3 import _retire_serving_admission_v3
 
-        _retire_serving_admission_v3(self._admission_capability, self)
-        if error is not None:
-            raise error
+        try:
+            self._run_cleanup_v3(binding_mismatch=False)
+        finally:
+            _retire_serving_admission_v3(self._admission_capability, self)
 
     def next_effect(self, session: ServingGatewaySessionV3) -> BootEffect | None:
         with self._active_operation_v3():

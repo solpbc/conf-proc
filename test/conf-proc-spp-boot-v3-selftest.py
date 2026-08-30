@@ -203,12 +203,15 @@ class BootAuthorityV3SelfTest(unittest.TestCase):
         )
         for name in frame_names:
             with self.subTest(name=name):
-                original = getattr(binding, name)
-                object.__setattr__(binding, name, original + b"\0")
+                changed_binding = _bind(inputs, contract)
+                changed_engine = BootTransitionEngineV3(changed_binding)
+                original = getattr(changed_binding, name)
+                object.__setattr__(changed_binding, name, original + b"\0")
                 with self.assertRaises(ApplianceErrorV3) as raised:
-                    _ = engine.pcr15_measurement_v3
+                    _ = changed_engine.pcr15_measurement_v3
                 self.assertEqual(raised.exception.reason_code, CP_BOOT_V3_BINDING)
-                object.__setattr__(binding, name, original)
+                object.__setattr__(changed_binding, name, original)
+                self.assertFalse(boot_v3.is_issued_boot_binding_v3(changed_binding))
         self.assertEqual(
             engine.predicted_pcr15_v3,
             hashlib.sha256(b"\0" * 32 + measurement).digest(),

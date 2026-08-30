@@ -12,7 +12,7 @@ import hashlib
 import os
 import stat
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, Iterator
 
 from conf_proc_json import canonical_dumps, canonical_loads
 from conf_proc_prohibited import check_content_markers
@@ -96,20 +96,22 @@ _PROHIBITED_COMPONENTS: Final = frozenset({
     "hibernate", "journald", "kdump", "mok", "packagekit", "recovery", "serial",
     "shim", "socket", "ssh", "sshd", "subprocess", "swap", "waagent", "walinux",
 })
-_AUTHORITY_SPECS: Final = (
-    ("root_lock_bytes", "/etc/spp/authority/root-lock.json", "root_lock"),
-    ("runtime_closure_bytes", "/etc/spp/authority/runtime-closure.json", "runtime_closure"),
-    ("verity_rules_bytes", "/etc/spp/authority/verity-rules.json", "verity_rules"),
-    ("tcb_identity_bytes", "/etc/spp/authority/tcb-identity.json", "tcb_identity"),
-    ("builder_source_bytes", "/etc/spp/authority/designated-builder-source.py", "designated_builder_source"),
-    ("policy_bytes", "/etc/spp/authority/policy.json", "policy"),
-    ("accepted_manifest_bytes", "/etc/spp/authority/appliance.manifest.json", "accepted_manifest"),
-    ("kernel_feature_contract_bytes", "/etc/spp/authority/kernel-features.json", "kernel_features"),
-    ("trusted_certificate_bundle_bytes", "/etc/spp/authority/trusted-module-signers.pem", "trusted_module_signers"),
-    ("boot_contract_bytes", "/etc/spp/authority/boot-contract.json", "boot_contract"),
-    ("module_plan_bytes", "/etc/spp/authority/module-load-plan.json", "module_load_plan"),
-    ("gpt_layout_rules_bytes", "/etc/spp/authority/gpt-layout-rules.json", "gpt_layout_rules"),
-)
+def _authority_specs() -> Iterator[tuple[str, str, str]]:
+    yield "root_lock_bytes", "/etc/spp/authority/root-lock.json", "root_lock"
+    yield "runtime_closure_bytes", "/etc/spp/authority/runtime-closure.json", "runtime_closure"
+    yield "verity_rules_bytes", "/etc/spp/authority/verity-rules.json", "verity_rules"
+    yield "tcb_identity_bytes", "/etc/spp/authority/tcb-identity.json", "tcb_identity"
+    yield "builder_source_bytes", "/etc/spp/authority/designated-builder-source.py", "designated_builder_source"
+    yield "policy_bytes", "/etc/spp/authority/policy.json", "policy"
+    yield "accepted_manifest_bytes", "/etc/spp/authority/appliance.manifest.json", "accepted_manifest"
+    yield "kernel_feature_contract_bytes", "/etc/spp/authority/kernel-features.json", "kernel_features"
+    yield "trusted_certificate_bundle_bytes", "/etc/spp/authority/trusted-module-signers.pem", "trusted_module_signers"
+    yield "boot_contract_bytes", "/etc/spp/authority/boot-contract.json", "boot_contract"
+    yield "module_plan_bytes", "/etc/spp/authority/module-load-plan.json", "module_load_plan"
+    yield "gpt_layout_rules_bytes", "/etc/spp/authority/gpt-layout-rules.json", "gpt_layout_rules"
+
+
+_AUTHORITY_SPECS: Final = tuple(_authority_specs())
 
 
 @dataclass(frozen=True)

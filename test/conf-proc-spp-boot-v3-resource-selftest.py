@@ -188,9 +188,8 @@ class ServingResourceReducerV3SelfTest(unittest.TestCase):
             reducer.session_release(survivor)
 
     def test_wrapper_drives_resource_and_session_in_lockstep(self) -> None:
-        with self.assertRaises(ApplianceErrorV3) as missing_capability:
+        with self.assertRaises(TypeError):
             ServingAuthorityWrapperV3()
-        self.assertEqual(missing_capability.exception.reason_code, CP_BOOT_V3_BINDING)
         wrapper = _admitted_wrapper()
         handle = object()
         closed: list[bool] = []

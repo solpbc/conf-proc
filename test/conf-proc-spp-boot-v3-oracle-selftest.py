@@ -136,21 +136,23 @@ PERSISTENCE_REQUIREMENTS_V3 = (
 DEV_DIRECTORIES_V3 = (("/dev", 0o755, 0, 0), ("/dev/nvidia-caps", 0o755, 0, 0))
 SEALED_BROKER_UID_V3 = "sealed-attestation-broker-uid"
 SEALED_BROKER_GID_V3 = "sealed-attestation-broker-gid"
-DEV_ROWS_V3 = (
-    ("/dev/console", "char", "literal", 5, 1, 0o600, 0, 0),
-    ("/dev/null", "char", "literal", 1, 3, 0o666, 0, 0),
-    ("/dev/zero", "char", "literal", 1, 5, 0o666, 0, 0),
-    ("/dev/full", "char", "literal", 1, 7, 0o666, 0, 0),
-    ("/dev/random", "char", "literal", 1, 8, 0o666, 0, 0),
-    ("/dev/urandom", "char", "literal", 1, 9, 0o666, 0, 0),
-    ("/dev/tpmrm0", "char", "registered", "tpm_rm", 65536, 0o660, SEALED_BROKER_UID_V3, SEALED_BROKER_GID_V3),
-    ("/dev/nvidia0", "char", "registered", "nvidia_gpu", 0, 0o666, 0, 0),
-    ("/dev/nvidiactl", "char", "registered", "nvidia_gpu", 255, 0o666, 0, 0),
-    ("/dev/nvidia-uvm", "char", "registered", "nvidia_uvm", 0, 0o666, 0, 0),
-    ("/dev/nvidia-uvm-tools", "char", "registered", "nvidia_uvm", 1, 0o666, 0, 0),
-    ("/dev/nvidia-caps/nvidia-cap1", "char", "registered", "nvidia_caps", 1, 0o400, 0, 0),
-    ("/dev/nvidia-caps/nvidia-cap2", "char", "registered", "nvidia_caps", 2, 0o400, 0, 0),
-)
+def _dev_rows_v3():
+    yield ("/dev/console", "char", "literal", 5, 1, 0o600, 0, 0)
+    yield ("/dev/null", "char", "literal", 1, 3, 0o666, 0, 0)
+    yield ("/dev/zero", "char", "literal", 1, 5, 0o666, 0, 0)
+    yield ("/dev/full", "char", "literal", 1, 7, 0o666, 0, 0)
+    yield ("/dev/random", "char", "literal", 1, 8, 0o666, 0, 0)
+    yield ("/dev/urandom", "char", "literal", 1, 9, 0o666, 0, 0)
+    yield ("/dev/tpmrm0", "char", "registered", "tpm_rm", 65536, 0o660, SEALED_BROKER_UID_V3, SEALED_BROKER_GID_V3)
+    yield ("/dev/nvidia0", "char", "registered", "nvidia_gpu", 0, 0o666, 0, 0)
+    yield ("/dev/nvidiactl", "char", "registered", "nvidia_gpu", 255, 0o666, 0, 0)
+    yield ("/dev/nvidia-uvm", "char", "registered", "nvidia_uvm", 0, 0o666, 0, 0)
+    yield ("/dev/nvidia-uvm-tools", "char", "registered", "nvidia_uvm", 1, 0o666, 0, 0)
+    yield ("/dev/nvidia-caps/nvidia-cap1", "char", "registered", "nvidia_caps", 1, 0o400, 0, 0)
+    yield ("/dev/nvidia-caps/nvidia-cap2", "char", "registered", "nvidia_caps", 2, 0o400, 0, 0)
+
+
+DEV_ROWS_V3 = tuple(_dev_rows_v3())
 REGISTERED_MAJORS_V3 = {"tpm_rm": 240, "nvidia_gpu": 195, "nvidia_uvm": 511, "nvidia_caps": 508}
 
 LAUNCH_ROLES_V3 = (
@@ -206,20 +208,22 @@ HAS_FD_FLAG_V3 = 4
 MAX_CHUNK_PAYLOAD_BYTES_V3 = 16384
 MAX_COLLECTOR_RESPONSE_BYTES_V3 = 44 + 8388608
 
-SERVING_SESSION_ROWS_V3 = (
-    ("request_started", "session_readback"),
-    ("credential_observed", "handle_and_bearer_sha256"),
-    ("entitlement_dns_query", "session_readback"),
-    ("entitlement_dns_result", "token_ipv4_ttl"),
-    ("entitlement_tls_connect", "token_ipv4_dns_age"),
-    ("entitlement_tls_verified", "accepted_readback"),
-    ("entitlement_authorize_request", "session_readback"),
-    ("entitlement_authorized", "accepted_or_denied_readback"),
-    ("upstream_open", "role_address_socket_readback"),
-    ("upstream_opened", "completion_readback"),
-    ("reject_413", "status_write_and_close_requested"),
-    ("drain_exact", "drained_count_and_close_requested"),
-)
+def _serving_session_rows_v3():
+    yield "request_started", "session_readback"
+    yield "credential_observed", "handle_and_bearer_sha256"
+    yield "entitlement_dns_query", "session_readback"
+    yield "entitlement_dns_result", "token_ipv4_ttl"
+    yield "entitlement_tls_connect", "token_ipv4_dns_age"
+    yield "entitlement_tls_verified", "accepted_readback"
+    yield "entitlement_authorize_request", "session_readback"
+    yield "entitlement_authorized", "accepted_or_denied_readback"
+    yield "upstream_open", "role_address_socket_readback"
+    yield "upstream_opened", "completion_readback"
+    yield "reject_413", "status_write_and_close_requested"
+    yield "drain_exact", "drained_count_and_close_requested"
+
+
+SERVING_SESSION_ROWS_V3 = tuple(_serving_session_rows_v3())
 SERVING_DEADLINES_V3 = {
     "credential": 5,
     "dns": 5,
@@ -601,27 +605,28 @@ class BootV3RawOracleTests(unittest.TestCase):
             final_queue=(),
         )
         _accept_prefirewall_network(**arguments)
-        mutations = (
-            ("cmdline", ("ip=off", "ip=off")),
-            ("cmdline", ("ip=off", "rd.neednet")),
-            ("cmdline", ("ip=off", "BOOTIF=01-00-11-22-33-44-55")),
-            ("cmdline", ("ip=off", "net.ifnames=0")),
-            ("initial_nics", (("eth0", True, False, False),)),
-            ("initial_nics", (("eth0", False, True, False),)),
-            ("initial_nics", (("eth0", False, False, True),)),
-            ("final_nics", (("eth1", False, False, False),)),
-            ("inet_socket_count", 1),
-            ("packet_socket_count", 1),
-            ("monitor_sockets", ()),
-            ("monitor_sockets", (("AF_NETLINK", "NETLINK_ROUTE", "bound"), ("AF_NETLINK", "NETLINK_ROUTE", "bound"))),
-            ("enobufs", True),
-            ("rxq_ovfl", True),
-            ("ack_sequence_matches", False),
-            ("dump_generation_contiguous", False),
-            ("monitor_close_reopen", True),
-            ("uncorrelated_event", True),
-            ("final_queue", ("uevent",)),
-        )
+        def _mutations():
+            yield "cmdline", ("ip=off", "ip=off")
+            yield "cmdline", ("ip=off", "rd.neednet")
+            yield "cmdline", ("ip=off", "BOOTIF=01-00-11-22-33-44-55")
+            yield "cmdline", ("ip=off", "net.ifnames=0")
+            yield "initial_nics", (("eth0", True, False, False),)
+            yield "initial_nics", (("eth0", False, True, False),)
+            yield "initial_nics", (("eth0", False, False, True),)
+            yield "final_nics", (("eth1", False, False, False),)
+            yield "inet_socket_count", 1
+            yield "packet_socket_count", 1
+            yield "monitor_sockets", ()
+            yield "monitor_sockets", (("AF_NETLINK", "NETLINK_ROUTE", "bound"), ("AF_NETLINK", "NETLINK_ROUTE", "bound"))
+            yield "enobufs", True
+            yield "rxq_ovfl", True
+            yield "ack_sequence_matches", False
+            yield "dump_generation_contiguous", False
+            yield "monitor_close_reopen", True
+            yield "uncorrelated_event", True
+            yield "final_queue", ("uevent",)
+
+        mutations = tuple(_mutations())
         for key, value in mutations:
             changed = dict(arguments)
             changed[key] = value
