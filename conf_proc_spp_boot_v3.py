@@ -215,6 +215,7 @@ _BINDING_TYPE_TAGS_V3: Final = MappingProxyType({
     ProcessAuthoritySnapshotV3: "process_authority",
     semantics.EligibleFileSnapshotV3: "eligible_file",
     semantics.LoaderControlSnapshotV3: "loader_control",
+    semantics.ElfLoaderControlRowV3: "elf_loader_control",
     semantics.JitInputSnapshotV3: "jit_input",
     semantics.JitDerivationSnapshotV3: "jit_derivation",
     semantics.CacheSelectorSnapshotV3: "cache_selector",

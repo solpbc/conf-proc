@@ -177,8 +177,9 @@ def _eligible_records_v3(docs: dict[str, bytes]) -> list[dict[str, object]]:
 
 
 def _executable_graph_v3(
-    docs: dict[str, bytes], *, jit_record: dict[str, object] | None,
+    docs: dict[str, bytes], *, jit_records: list[dict[str, object]],
     cache_policy: str, eligible: list[dict[str, object]], controls: list[dict[str, object]],
+    elf_controls: list[dict[str, object]],
 ) -> dict[str, object]:
     """Build the fixture's declarative graph from its already-created predecessor rows."""
 
@@ -200,7 +201,7 @@ def _executable_graph_v3(
         "dynamic_library", "compiler", "compiler_source", "model_code", "plugin", "jit_cache",
     }
     noncode_paths: set[str] = set()
-    if jit_record is not None:
+    for jit_record in jit_records:
         for row in jit_record["inputs"]:
             assert type(row) is dict
             if row["kind"] in ("configuration", "model"):
@@ -221,8 +222,7 @@ def _executable_graph_v3(
     for row in policy["images"][image]["nodes"]:
         if row["node_type"] == "directory" and row["path"] in root_paths:
             nodes.append({"id": directory_id(row["path"]), "kind": "measured_directory", "image": image, "path": row["path"], "mode": row["mode"], "uid": row["uid"], "gid": row["gid"]})
-    derivation_digest: str | None = None
-    if jit_record is not None:
+    for jit_record in jit_records:
         derivation_digest = jit_derivation_sha256_v3(jit_record)
         output = jit_record["output"]
         assert type(output) is dict
@@ -295,7 +295,8 @@ def _executable_graph_v3(
 
     def add_source_edge(kind: str, from_id: str, to_id: str, order_group: str, ordinal: int, requested_path: str | None, payload: object, source_kind: str, alias_chain: list[str] | None = None, source_ordinal: int | None = None) -> None:
         chain = [] if alias_chain is None else alias_chain
-        reference = _source_ref(source_kind=source_kind, phase=None, kind=kind, ordinal=ordinal if source_ordinal is None else source_ordinal, payload=payload)
+        source_payload = {"derivation_sha256": from_id.removeprefix("derivation:"), "relation": payload} if source_kind == "jit_derivation" else payload
+        reference = _source_ref(source_kind=source_kind, phase=None, kind=kind, ordinal=ordinal if source_ordinal is None else source_ordinal, payload=source_payload)
         edges.append({"id": _edge_id(kind=kind, from_id=from_id, to_id=to_id, order_group=order_group, ordinal=ordinal, requested_path=requested_path, resolved_id=to_id, alias_chain=chain, declaration_kind=source_kind, declaration_ref=reference), "kind": kind, "from_id": from_id, "to_id": to_id, "order_group": order_group, "ordinal": ordinal, "requested_path": requested_path, "resolved_id": to_id, "alias_chain": chain, "declaration_kind": source_kind, "declaration_ref": reference})
 
     def add_declarative_edge(kind: str, owner_id: str, target_id: str, order_group: str, ordinal: int, requested_path: str | None, alias_chain: list[str] | None = None) -> None:
@@ -314,16 +315,32 @@ def _executable_graph_v3(
     add_declarative_edge("python_import", file_id(_CONTROLLER_SOURCE), file_id(_BOOTSTRAP_SOURCE), "python-import:" + file_id(_CONTROLLER_SOURCE) + ":post_bootstrap", 0, alias_file, [alias_file])
     alias_dir = "/lib/x86_64-linux-gnu"
     add_declarative_edge("elf_search", file_id("/usr/bin/spp"), directory_id("/usr/lib/x86_64-linux-gnu"), "elf-search:" + file_id("/usr/bin/spp"), 0, alias_dir, [alias_dir])
-    if jit_record is not None:
-        assert derivation_digest is not None
-        derivation_id = _graph_derivation_id(derivation_digest)
-        output = jit_record["output"]
-        assert type(output) is dict
+    for control in elf_controls:
+        target_id = directory_id(control["resolved_path"]) if control["kind"] == "elf_search" else file_id(control["resolved_path"])
+        payload = {
+            "control_type": "elf_loader_control", "owner_path": control["owner_path"],
+            "requested_path": control["requested_path"], "resolved_image": control["resolved_image"],
+            "resolved_path": control["resolved_path"], "alias_chain": control["alias_chain"],
+        }
+        reference = _source_ref(source_kind="loader_control", phase=None, kind=control["kind"], ordinal=control["ordinal"], payload=payload)
+        graph_controls.append({
+            "kind": control["kind"], "owner_id": file_id(control["owner_path"]), "ordinal": control["ordinal"],
+            "requested_path": control["requested_path"], "resolved_id": target_id,
+            "alias_chain": control["alias_chain"], "declaration_kind": "loader_control",
+            "declaration_ref": reference,
+        })
+        add_source_edge(control["kind"], file_id(control["owner_path"]), target_id, control["kind"].replace("_", "-") + ":" + file_id(control["owner_path"]) + ":loader-control", control["ordinal"], control["requested_path"], payload, "loader_control", control["alias_chain"])
+    if jit_records:
         compiler_path = "/usr/lib/spp/bin/triton-compile"
         add_declarative_edge("elf_interpreter", file_id(compiler_path), file_id("/usr/lib/x86_64-linux-gnu/ld-spp"), "elf-interpreter:" + file_id(compiler_path), 0, "/usr/lib/x86_64-linux-gnu/ld-spp")
         add_declarative_edge("elf_needed", file_id(compiler_path), file_id("/usr/lib/spp/lib/libtriton.so"), "elf-needed:" + file_id(compiler_path), 0, "/usr/lib/spp/lib/libtriton.so")
         add_declarative_edge("dlopen", file_id(compiler_path), file_id("/usr/lib/spp/lib/plugin.so"), "dlopen:" + file_id(compiler_path), 0, "/usr/lib/spp/lib/plugin.so")
-        add_declarative_edge("jit_invoke", file_id("/usr/lib/spp/conf_proc_spp_inference.py"), derivation_id, "jit-invoke:" + file_id("/usr/lib/spp/conf_proc_spp_inference.py"), 0, None)
+    for invoke_ordinal, jit_record in enumerate(jit_records):
+        derivation_digest = jit_derivation_sha256_v3(jit_record)
+        derivation_id = _graph_derivation_id(derivation_digest)
+        output = jit_record["output"]
+        assert type(output) is dict
+        add_declarative_edge("jit_invoke", file_id("/usr/lib/spp/conf_proc_spp_inference.py"), derivation_id, "jit-invoke:" + file_id("/usr/lib/spp/conf_proc_spp_inference.py"), invoke_ordinal, None)
         compiler = jit_record["compiler"]
         loader = jit_record["loader"]
         assert type(compiler) is dict and type(loader) is dict
@@ -338,14 +355,21 @@ def _executable_graph_v3(
     return {"schema": "sol-spp-executable-graph/v1", "alias_hop_limit": 40, "entrypoints": entrypoints, "nodes": nodes, "aliases": aliases, "controls": graph_controls, "declarations": declarations, "edges": edges}
 
 
-def _closure_v3(docs: dict[str, bytes], *, execution_mode: str, cache_policy: str, jit_record: dict[str, object] | None = None) -> dict[str, object]:
+def _closure_v3(docs: dict[str, bytes], *, execution_mode: str, cache_policy: str, jit_records: list[dict[str, object]]) -> dict[str, object]:
     eligible = _eligible_records_v3(docs)
     controls: list[dict[str, object]] = []
-    if jit_record is not None:
+    if jit_records:
         controls = [
             {"path": "/usr/lib/spp/vendor/spp_jit.pth", "kind": "pth", "read_only": True, "contributed_paths": ["/usr/lib/spp/vendor"], "imports": ["/usr/lib/spp/vendor/sitecustomize.py"], "hooks": []},
             {"path": "/usr/lib/spp/vendor/sitecustomize.py", "kind": "startup_hook", "read_only": True, "contributed_paths": [], "imports": [], "hooks": ["/usr/lib/spp/vendor/sitecustomize.py"]},
+            {"path": "/usr/lib/spp/vendor/namespace/sitecustomize.py", "kind": "namespace_package", "read_only": True, "contributed_paths": ["/usr/lib/spp/vendor"], "imports": [], "hooks": []},
         ]
+    elf_controls: list[dict[str, object]] = [
+        {"kind": "elf_search", "owner_path": "/usr/bin/spp", "ordinal": 0, "requested_path": "/usr/lib/spp/lib", "resolved_image": "runtime-policy", "resolved_path": "/usr/lib/spp/lib", "alias_chain": []},
+    ]
+    if jit_records:
+        elf_controls.append({"kind": "elf_interpreter", "owner_path": "/usr/bin/python3.10", "ordinal": 0, "requested_path": "/usr/lib/x86_64-linux-gnu/ld-spp", "resolved_image": "runtime-policy", "resolved_path": "/usr/lib/x86_64-linux-gnu/ld-spp", "alias_chain": []})
+    elf_controls.sort(key=lambda row: (row["owner_path"].encode("utf-8"), row["kind"].encode("utf-8"), row["ordinal"]))
     result: dict[str, object] = {
         "schema": "conf-proc-spp-execution-closure/v3",
         "startup_kat": _startup_kat_v3(),
@@ -354,18 +378,16 @@ def _closure_v3(docs: dict[str, bytes], *, execution_mode: str, cache_policy: st
         "import_roots": ["/usr/lib/python3.10", "/usr/lib/python3.10/lib-dynload", "/usr/lib/spp", "/usr/lib/spp/vendor"],
         "native_loader_roots": ["/lib/x86_64-linux-gnu", "/usr/lib/x86_64-linux-gnu", "/usr/lib/spp/lib"],
         "loader_controls": controls,
+        "elf_loader_controls": elf_controls,
         "eligible_files": eligible,
         "jit_derivations": [], "expected_outputs": [], "cache_selectors": [],
     }
-    if jit_record is not None:
-        digest = jit_derivation_sha256_v3(jit_record)
-        output = jit_record["output"]
-        assert type(output) is dict
-        result["jit_derivations"] = [jit_record]
-        result["expected_outputs"] = [{"derivation_sha256": digest, **output}]
-        result["cache_selectors"] = ([{"derivation_sha256": digest, "output_name": output["output_name"], "path": "/usr/lib/spp/jit-cache/" + digest + "/" + output["output_name"]}] if cache_policy == "measured_read_only" else [])
+    if jit_records:
+        result["jit_derivations"] = jit_records
+        result["expected_outputs"] = [{"derivation_sha256": jit_derivation_sha256_v3(record), **record["output"]} for record in jit_records]
+        result["cache_selectors"] = ([{"derivation_sha256": jit_derivation_sha256_v3(record), "output_name": record["output"]["output_name"], "path": "/usr/lib/spp/jit-cache/" + jit_derivation_sha256_v3(record) + "/" + record["output"]["output_name"]} for record in jit_records] if cache_policy == "measured_read_only" else [])
     result["executable_graph"] = _executable_graph_v3(
-        docs, jit_record=jit_record, cache_policy=cache_policy, eligible=eligible, controls=controls,
+        docs, jit_records=jit_records, cache_policy=cache_policy, eligible=eligible, controls=controls, elf_controls=elf_controls,
     )
     return result
 
@@ -408,7 +430,7 @@ def _set_runtime_closure(docs: dict[str, bytes], lock: dict[str, object]) -> Non
     })
 
 
-def build_v3_fixture(*, execution_mode: str = "python_no_jit", cache_policy: str = "absent") -> tuple[dict[str, bytes], object]:
+def build_v3_fixture(*, execution_mode: str = "python_no_jit", cache_policy: str = "absent", extra_jit_derivation: bool = False) -> tuple[dict[str, bytes], object]:
     """Build the final contract first, then its one-way-bound module plan."""
 
     docs = _V1.build_compact_fixture()
@@ -424,6 +446,8 @@ def build_v3_fixture(*, execution_mode: str = "python_no_jit", cache_policy: str
         ("python_no_jit", "absent"), ("python_jit_triton", "ephemeral_rebuild"), ("python_jit_triton", "measured_read_only"),
     ):
         raise ValueError("unsupported v3 fixture execution mode")
+    if extra_jit_derivation and execution_mode != "python_jit_triton":
+        raise ValueError("extra JIT derivation requires JIT execution mode")
     service_inputs: list[tuple[str, bytes, str, int, str]] = []
     for row in tables.LAUNCH_ROLE_ROWS_V3:
         input_id = "runtime-role-" + row.role
@@ -437,6 +461,7 @@ def build_v3_fixture(*, execution_mode: str = "python_no_jit", cache_policy: str
         service_inputs.extend((
             ("runtime-jit-pth", b"/usr/lib/spp/vendor\n", "/usr/lib/spp/vendor/spp_jit.pth", 0o444, "config"),
             ("runtime-jit-site", b"# measured site control\n", "/usr/lib/spp/vendor/sitecustomize.py", 0o444, "config"),
+            ("runtime-jit-namespace", b"# namespace control\n", "/usr/lib/spp/vendor/namespace/sitecustomize.py", 0o444, "config"),
             ("runtime-jit-plugin", b"plugin shared object", "/usr/lib/spp/lib/plugin.so", 0o555, "executable"),
             ("runtime-jit-compiler", b"triton compiler", "/usr/lib/spp/bin/triton-compile", 0o555, "executable"),
             ("runtime-jit-source", b"triton source", "/usr/lib/spp/vendor/triton_kernel.py", 0o444, "config"),
@@ -514,7 +539,7 @@ def build_v3_fixture(*, execution_mode: str = "python_no_jit", cache_policy: str
         builder_source_bytes=docs["builder_source_bytes"], policy_bytes=docs["policy_bytes"],
         images=images, module_observations=modules, firmware_observations=firmware,
     ).manifest_bytes
-    jit_record: dict[str, object] | None = None
+    jit_records: list[dict[str, object]] = []
     if execution_mode == "python_jit_triton":
         records = {item["path"]: item for item in _eligible_records_v3(docs)}
         typed_paths = (
@@ -527,7 +552,7 @@ def build_v3_fixture(*, execution_mode: str = "python_no_jit", cache_policy: str
         def identity(path: str) -> dict[str, object]:
             source = records[path]
             return {key: source[key] for key in ("input_id", "image", "path", "sha256", "size_bytes", "mode")}
-        jit_record = {
+        jit_record: dict[str, object] = {
             "schema": "conf-proc-spp-jit-derivation/v3",
             "compiler": identity("/usr/lib/spp/bin/triton-compile"),
             "loader": identity("/usr/bin/python3.10"),
@@ -536,19 +561,26 @@ def build_v3_fixture(*, execution_mode: str = "python_no_jit", cache_policy: str
             "output": {"output_name": "kernel.so", "relative_path": "kernel.so", "sha256": _sha256(b"jit-output"), "size_bytes": len(b"jit-output"), "mode": 0o555},
             "cache_policy": cache_policy,
         }
+        jit_records.append(jit_record)
+        if extra_jit_derivation:
+            extra = dict(jit_record)
+            extra["output"] = {"output_name": "kernel-extra.so", "relative_path": "kernel-extra.so", "sha256": _sha256(b"jit-output-extra"), "size_bytes": len(b"jit-output-extra"), "mode": 0o555}
+            jit_records.append(extra)
         if cache_policy == "measured_read_only":
-            digest = jit_derivation_sha256_v3(jit_record)
-            output = jit_record["output"]
-            assert type(output) is dict
-            cache_path = "/usr/lib/spp/jit-cache/" + digest + "/" + output["output_name"]
-            cache_data = b"jit-output"
-            placement = _V1._placement("runtime-policy", cache_path, "runtime-jit-cache")
-            placement["mode"] = 0o555
             lock = canonical_loads(docs["root_lock_bytes"])
-            lock["inputs"].append(_V1._record("runtime-jit-cache", "runtime_tree_input", cache_data, [placement]))
-            lock["inputs"].sort(key=lambda item: item["id"])
             policy = canonical_loads(docs["policy_bytes"])
-            policy["images"]["runtime-policy"]["nodes"].append({"path": cache_path, "node_type": "file", "mode": 0o555, "uid": 0, "gid": 0, "xattrs": [], "source_input_id": "runtime-jit-cache", "target": None, "content_class": "executable"})
+            for index, record in enumerate(jit_records):
+                digest = jit_derivation_sha256_v3(record)
+                output = record["output"]
+                assert type(output) is dict
+                cache_path = "/usr/lib/spp/jit-cache/" + digest + "/" + output["output_name"]
+                cache_data = b"jit-output" if index == 0 else b"jit-output-extra"
+                input_id = "runtime-jit-cache" if index == 0 else "runtime-jit-cache-extra"
+                placement = _V1._placement("runtime-policy", cache_path, input_id)
+                placement["mode"] = 0o555
+                lock["inputs"].append(_V1._record(input_id, "runtime_tree_input", cache_data, [placement]))
+                policy["images"]["runtime-policy"]["nodes"].append({"path": cache_path, "node_type": "file", "mode": 0o555, "uid": 0, "gid": 0, "xattrs": [], "source_input_id": input_id, "target": None, "content_class": "executable"})
+            lock["inputs"].sort(key=lambda item: item["id"])
             policy["images"]["runtime-policy"]["nodes"].sort(key=lambda item: item["path"])
             docs["policy_bytes"] = canonical_dumps(policy)
             policy_input = next(item for item in lock["inputs"] if item["id"] == "policy")
@@ -561,7 +593,7 @@ def build_v3_fixture(*, execution_mode: str = "python_no_jit", cache_policy: str
     contract = {
         "schema": BOOT_CONTRACT_V3_SCHEMA,
         "contract_version": 3,
-        "execution_closure": _closure_v3(docs, execution_mode=execution_mode, cache_policy=cache_policy, jit_record=jit_record),
+        "execution_closure": _closure_v3(docs, execution_mode=execution_mode, cache_policy=cache_policy, jit_records=jit_records),
         "execution_mode": execution_mode,
         "cache_policy": cache_policy,
     }

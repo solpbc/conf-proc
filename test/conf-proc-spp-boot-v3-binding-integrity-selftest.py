@@ -129,6 +129,7 @@ _INDEPENDENT_TYPE_TAGS = {
     boot_v3.ProcessAuthoritySnapshotV3: "process_authority",
     boot_v3.semantics.EligibleFileSnapshotV3: "eligible_file",
     boot_v3.semantics.LoaderControlSnapshotV3: "loader_control",
+    boot_v3.semantics.ElfLoaderControlRowV3: "elf_loader_control",
     boot_v3.semantics.JitInputSnapshotV3: "jit_input",
     boot_v3.semantics.JitDerivationSnapshotV3: "jit_derivation",
     boot_v3.semantics.CacheSelectorSnapshotV3: "cache_selector",
@@ -218,7 +219,7 @@ class BootBindingIntegritySelftest(unittest.TestCase):
         independent = _independent_fingerprint(binding)
         self.assertEqual(
             independent.hex(),
-            "8288c823844ced6e4105388cc4cea4df54cbec137c87626225bf24c5cc61b135",
+            "931d14f0835803e79ab6005139dec568b891fdd43529644b0eb6f2e575f9501b",
         )
         record = boot_v3._ISSUED_BOOT_BINDINGS_V3.records[id(binding)]
         self.assertEqual(record.fingerprint, independent)

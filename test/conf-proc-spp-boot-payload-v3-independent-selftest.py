@@ -49,8 +49,8 @@ _PINS = (
     ("conf_proc_spp_boot_v3_tables.py", 37125, "0c50b6a46acd5152d63757956cba65f699c58e1a1566807448f5779e28787824"),
     ("conf_proc_spp_boot_v3_wire.py", 41779, "00c03278031280dd572bf221be2075ab741e36b378af8a7fd2c874560b840e90"),
     ("conf_proc_spp_boot_v3_resource.py", 25792, "b172f2dd4dbe70e295e4dbdd0ebe066c7e247e8d2183db22b15ac48f5afc57de"),
-    ("conf_proc_spp_boot_v3.py", 89950, "74340f33435914e7b7ae744099757db249586949d60645232bd064e28fc3e47c"),
-    ("conf_proc_spp_boot_v3_semantics.py", 117606, "b12318ee33241d4b52603facd2f8811570cea28bc8cb61aad07252cc113f544c"),
+    ("conf_proc_spp_boot_v3.py", 90009, "0253d0c995fb2609668ac5909db7652940d7bf11c31daaa96b148b4fd87b2bae"),
+    ("conf_proc_spp_boot_v3_semantics.py", 127970, "573e613c082557952c47041dbe1e88ca5473e97b781f78038d2c983cf9cc96a9"),
     ("conf_proc_spp_boot_dispatch_v3.py", 1141, "83a0652bff152a7e9e96e4f5daa0bde0278092d012d0b8fbf8832a39f23fa139"),
 )
 _SOURCE_ROWS_V3 = (

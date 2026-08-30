@@ -6,9 +6,12 @@
 from __future__ import annotations
 
 import ast
+import base64
 from copy import deepcopy
 import hashlib
+import json
 import posixpath
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -21,7 +24,48 @@ if str(ROOT / "test") not in sys.path:
     sys.path.insert(0, str(ROOT / "test"))
 
 from conf_proc_json import canonical_dumps, canonical_loads
+
+
+_PRODUCTION_V3_MODULES = {
+    "conf_proc_spp_boot_v3", "conf_proc_spp_boot_v3_semantics", "conf_proc_spp_boot_v3_tables",
+    "conf_proc_spp_boot_v3_wire", "conf_proc_spp_boot_v3_resource", "conf_proc_spp_boot_dispatch_v3",
+    "conf_proc_spp_boot_payload_v3", "conf_proc_spp_boot_payload_v3_inspect",
+}
+_FIXTURE_CHILD = r"""
+import base64
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "test"))
+sys.path.insert(0, str(root))
 from conf_proc_spp_boot_v3_fixture import build_v3_fixture
+
+docs, _ = build_v3_fixture(**json.loads(sys.argv[2]))
+sys.stdout.write(json.dumps({key: base64.b64encode(value).decode("ascii") for key, value in docs.items()}, sort_keys=True))
+"""
+
+
+def _build_v3_fixture(**kwargs: object) -> tuple[dict[str, bytes], None]:
+    """Obtain raw producer bytes without loading its fixture or v3 code here."""
+
+    _fail(not (_PRODUCTION_V3_MODULES & set(sys.modules)), "oracle process preloaded production v3 module")
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", _FIXTURE_CHILD, str(ROOT), json.dumps(kwargs, sort_keys=True)],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={
+            "LANG": "C", "LC_ALL": "C", "PATH": "/nonexistent",
+            "PYTHONDONTWRITEBYTECODE": "1", "PYTHONNOUSERSITE": "1",
+        },
+        timeout=30,
+    )
+    encoded = json.loads(completed.stdout)
+    _fail(type(encoded) is dict and all(type(key) is str and type(value) is str for key, value in encoded.items()), "fixture child result")
+    _fail(not (_PRODUCTION_V3_MODULES & set(sys.modules)), "fixture contaminated oracle process")
+    return {key: base64.b64decode(value, validate=True) for key, value in encoded.items()}, None
 
 
 def _sha(value: bytes) -> str:
@@ -46,6 +90,14 @@ def _derivation(digest: str) -> str:
 
 def _output(digest: str, name: str) -> str:
     return f"jit:{digest}:{name}"
+
+
+def _expected_tmpfs(execution_mode: str) -> tuple[tuple[str, int, int], ...]:
+    return (
+        (("/run/spp-state", 1048576, 0o755), ("/run/spp-jit", 1073741824, 0o700))
+        if execution_mode == "python_jit_triton"
+        else (("/run/spp-state", 1048576, 0o755),)
+    )
 
 
 def _source_ref(source_kind: str, phase: str | None, kind: str, ordinal: int, payload: object) -> str:
@@ -114,6 +166,24 @@ def _expected_controls(closure: dict[str, object]) -> list[dict[str, object]]:
     for ordinal, control in enumerate(closure["loader_controls"]):
         payload = {key: control[key] for key in ("path", "kind", "read_only", "contributed_paths", "imports", "hooks")}
         rows.append({"kind": "python_" + control["kind"], "phase": "runtime_startup", "ordinal": ordinal, "owner_id": _file("runtime-policy", control["path"]), "read_only": control["read_only"], "contributed_paths": control["contributed_paths"], "imports": control["imports"], "hooks": control["hooks"], "declaration_kind": "loader_control", "declaration_ref": _source_ref("loader_control", None, control["kind"], ordinal, payload)})
+    for control in closure["elf_loader_controls"]:
+        target_id = (
+            _directory(control["resolved_image"], control["resolved_path"])
+            if control["kind"] == "elf_search"
+            else _file(control["resolved_image"], control["resolved_path"])
+        )
+        payload = {
+            "control_type": "elf_loader_control", "owner_path": control["owner_path"],
+            "requested_path": control["requested_path"], "resolved_image": control["resolved_image"],
+            "resolved_path": control["resolved_path"], "alias_chain": control["alias_chain"],
+        }
+        rows.append({
+            "kind": control["kind"], "owner_id": _file("runtime-policy", control["owner_path"]),
+            "ordinal": control["ordinal"], "requested_path": control["requested_path"],
+            "resolved_id": target_id, "alias_chain": control["alias_chain"],
+            "declaration_kind": "loader_control",
+            "declaration_ref": _source_ref("loader_control", None, control["kind"], control["ordinal"], payload),
+        })
     return rows
 
 
@@ -134,12 +204,14 @@ def _expected_declarations_and_edges(closure: dict[str, object]) -> tuple[list[d
     declarations: list[dict[str, object]] = []
     edges: list[dict[str, object]] = []
 
-    def add_source_edge(kind: str, from_id: str, to_id: str, order_group: str, ordinal: int, requested_path: str | None, payload: object, source_kind: str, source_ordinal: int | None = None) -> None:
-        reference = _source_ref(source_kind, None, kind, ordinal if source_ordinal is None else source_ordinal, payload)
+    def add_source_edge(kind: str, from_id: str, to_id: str, order_group: str, ordinal: int, requested_path: str | None, payload: object, source_kind: str, source_ordinal: int | None = None, alias_chain: list[str] | None = None) -> None:
+        source_payload = {"derivation_sha256": from_id.removeprefix("derivation:"), "relation": payload} if source_kind == "jit_derivation" else payload
+        reference = _source_ref(source_kind, None, kind, ordinal if source_ordinal is None else source_ordinal, source_payload)
+        chain = [] if alias_chain is None else alias_chain
         edge = {
             "kind": kind, "from_id": from_id, "to_id": to_id, "order_group": order_group,
             "ordinal": ordinal, "requested_path": requested_path, "resolved_id": to_id,
-            "alias_chain": [], "declaration_kind": source_kind, "declaration_ref": reference,
+            "alias_chain": chain, "declaration_kind": source_kind, "declaration_ref": reference,
         }
         edge["id"] = _edge_id(edge)
         edges.append(edge)
@@ -184,7 +256,36 @@ def _expected_declarations_and_edges(closure: dict[str, object]) -> tuple[list[d
     add_declarative_edge("python_import", file_id(controller_path), file_id(bootstrap_path), "python-import:" + file_id(controller_path) + ":post_bootstrap", 0, file_alias, [file_alias])
     add_declarative_edge("elf_search", file_id("/usr/bin/spp"), _directory(image, native_directory), "elf-search:" + file_id("/usr/bin/spp"), 0, directory_alias, [directory_alias])
 
-    for record in jit_records:
+    for control in closure["elf_loader_controls"]:
+        kind = control["kind"]
+        owner_id = file_id(control["owner_path"])
+        target_id = (
+            _directory(control["resolved_image"], control["resolved_path"])
+            if kind == "elf_search" else _file(control["resolved_image"], control["resolved_path"])
+        )
+        payload = {
+            "control_type": "elf_loader_control", "owner_path": control["owner_path"],
+            "requested_path": control["requested_path"], "resolved_image": control["resolved_image"],
+            "resolved_path": control["resolved_path"], "alias_chain": control["alias_chain"],
+        }
+        add_source_edge(
+            kind, owner_id, target_id,
+            kind.replace("_", "-") + ":" + owner_id + ":loader-control",
+            control["ordinal"], control["requested_path"], payload, "loader_control",
+            alias_chain=control["alias_chain"],
+        )
+
+    if jit_records:
+        first = jit_records[0]
+        compiler = first["compiler"]
+        assert type(first) is dict and type(compiler) is dict
+        compiler_path = compiler["path"]
+        assert type(compiler_path) is str
+        add_declarative_edge("elf_interpreter", file_id(compiler_path), file_id("/usr/lib/x86_64-linux-gnu/ld-spp"), "elf-interpreter:" + file_id(compiler_path), 0, "/usr/lib/x86_64-linux-gnu/ld-spp")
+        add_declarative_edge("elf_needed", file_id(compiler_path), file_id("/usr/lib/spp/lib/libtriton.so"), "elf-needed:" + file_id(compiler_path), 0, "/usr/lib/spp/lib/libtriton.so")
+        add_declarative_edge("dlopen", file_id(compiler_path), file_id("/usr/lib/spp/lib/plugin.so"), "dlopen:" + file_id(compiler_path), 0, "/usr/lib/spp/lib/plugin.so")
+
+    for invoke_ordinal, record in enumerate(jit_records):
         compiler = record["compiler"]
         loader = record["loader"]
         inputs = record["inputs"]
@@ -192,13 +293,8 @@ def _expected_declarations_and_edges(closure: dict[str, object]) -> tuple[list[d
         assert type(record) is dict and type(compiler) is dict and type(loader) is dict and type(inputs) is list and type(output) is dict
         digest = _jit_digest(record)
         derivation_id = _derivation(digest)
-        compiler_path = compiler["path"]
-        assert type(compiler_path) is str
-        add_declarative_edge("elf_interpreter", file_id(compiler_path), file_id("/usr/lib/x86_64-linux-gnu/ld-spp"), "elf-interpreter:" + file_id(compiler_path), 0, "/usr/lib/x86_64-linux-gnu/ld-spp")
-        add_declarative_edge("elf_needed", file_id(compiler_path), file_id("/usr/lib/spp/lib/libtriton.so"), "elf-needed:" + file_id(compiler_path), 0, "/usr/lib/spp/lib/libtriton.so")
-        add_declarative_edge("dlopen", file_id(compiler_path), file_id("/usr/lib/spp/lib/plugin.so"), "dlopen:" + file_id(compiler_path), 0, "/usr/lib/spp/lib/plugin.so")
         invoke_path = "/usr/lib/spp/conf_proc_spp_inference.py"
-        add_declarative_edge("jit_invoke", file_id(invoke_path), derivation_id, "jit-invoke:" + file_id(invoke_path), 0, None)
+        add_declarative_edge("jit_invoke", file_id(invoke_path), derivation_id, "jit-invoke:" + file_id(invoke_path), invoke_ordinal, None)
         add_source_edge("jit_compiler", derivation_id, file_id(compiler["path"]), "jit-compiler:" + derivation_id, 0, None, compiler, "jit_derivation")
         add_source_edge("jit_loader", derivation_id, file_id(loader["path"]), "jit-loader:" + derivation_id, 0, None, loader, "jit_derivation")
         for ordinal, item in enumerate(inputs):
@@ -225,6 +321,32 @@ def _validate_graph(docs: dict[str, bytes]) -> dict[str, object]:
     entry_paths = ("/usr/bin/spp", "/usr/bin/python3.10", "/usr/lib/spp/conf_proc_spp_init.py", "/usr/lib/spp/conf_proc_spp_role_bootstrap.py", "/usr/lib/spp/conf_proc_spp_attestation_broker.py", "/usr/lib/spp/conf_proc_spp_inference.py", "/usr/lib/spp/asr_shim.py", "/usr/lib/spp/ratls_gateway.py", "/usr/lib/spp/ratls_collector.py")
     _fail(graph["entrypoints"] == [_file(image, path) for path in entry_paths], "entrypoints")
     jit_records = closure["jit_derivations"]
+    _fail(
+        (contract["execution_mode"] == "python_jit_triton" and bool(jit_records))
+        or (contract["execution_mode"] == "python_no_jit" and not jit_records),
+        "JIT mode denominator",
+    )
+    expected_outputs = []
+    expected_selectors = []
+    for record in jit_records:
+        _fail(record["cache_policy"] == contract["cache_policy"], "JIT cache policy")
+        flags = ["--jit-workspace=/run/spp-jit", "--isolated"]
+        _fail(
+            record["argv_env"]["compiler_argv"] == [record["compiler"]["path"], *flags]
+            and record["argv_env"]["loader_argv"] == [record["loader"]["path"], *flags],
+            "JIT compiler/loader argv",
+        )
+        digest = _jit_digest(record)
+        output = record["output"]
+        expected_outputs.append({"derivation_sha256": digest, **output})
+        measured_path = "/usr/lib/spp/jit-cache/" + digest + "/" + output["output_name"]
+        if contract["cache_policy"] == "measured_read_only":
+            expected_selectors.append({"derivation_sha256": digest, "output_name": output["output_name"], "path": measured_path})
+            cached = by_path.get(measured_path)
+            _fail(cached is not None and "jit_cache" in cached["semantic_tags"] and (cached["sha256"], cached["size_bytes"], cached["mode"]) == (output["sha256"], output["size_bytes"], output["mode"]), "measured JIT selector target")
+        else:
+            _fail(measured_path not in by_path, "ephemeral JIT admits measured cache")
+    _fail(closure["expected_outputs"] == expected_outputs and closure["cache_selectors"] == expected_selectors, "JIT output and selector denominator")
     noncode = {item["path"] for record in jit_records for item in record["inputs"] if item["kind"] in ("configuration", "model")}
     tags = {"launch_executable", "importable_module", "python_loading_control", "native_extension", "dynamic_library", "compiler", "compiler_source", "model_code", "plugin", "jit_cache"}
     expected_nodes = [{"id": _file(row["image"], row["path"]), "kind": "measured_file", "image": row["image"], "path": row["path"], "sha256": row["sha256"], "size_bytes": row["size_bytes"], "mode": row["mode"], "content_kind": row["content_kind"], "semantic_tags": row["semantic_tags"], "input_id": row["input_id"]} for row in eligible if tags & set(row["semantic_tags"]) or row["path"] in noncode]
@@ -237,6 +359,27 @@ def _validate_graph(docs: dict[str, bytes]) -> dict[str, object]:
         expected_nodes += [{"id": _derivation(digest), "kind": "jit_derivation", "derivation_sha256": digest}, {"id": _output(digest, output["output_name"]), "kind": "jit_output", "derivation_sha256": digest, "output_name": output["output_name"], "path": path, "sha256": output["sha256"], "size_bytes": output["size_bytes"], "mode": output["mode"]}]
     expected_nodes.sort(key=lambda row: row["id"].encode("utf-8"))
     _fail(graph["nodes"] == expected_nodes, "node denominator")
+    for control in closure["loader_controls"]:
+        _fail(all(path in roots for path in control["contributed_paths"]), "loader directory target")
+        _fail(all(path in by_path and ({"importable_module", "native_extension"} & set(by_path[path]["semantic_tags"])) for path in control["imports"]), "loader import target")
+        _fail(all(path in by_path and ({"python_loading_control", "importable_module"} & set(by_path[path]["semantic_tags"])) for path in control["hooks"]), "loader hook target")
+    elf_loader_controls = closure["elf_loader_controls"]
+    _fail(
+        elf_loader_controls == sorted(
+            elf_loader_controls,
+            key=lambda row: (row["owner_path"].encode("utf-8"), row["kind"].encode("utf-8"), row["ordinal"]),
+        )
+        and all(control["kind"] in ("elf_interpreter", "elf_search") for control in elf_loader_controls),
+        "ELF control canonical order and kind",
+    )
+    for control in elf_loader_controls:
+        owner = by_path.get(control["owner_path"])
+        _fail(owner is not None and owner["content_kind"] in ("elf_executable", "elf_shared_object") and not (owner["mode"] & 0o222), "ELF control owner")
+        if control["kind"] == "elf_search":
+            _fail(control["resolved_image"] == "runtime-policy" and control["resolved_path"] in roots, "ELF search target")
+        else:
+            target = by_path.get(control["resolved_path"])
+            _fail(target is not None and target["image"] == control["resolved_image"] and target["content_kind"] in ("elf_executable", "elf_shared_object") and not (target["mode"] & 0o222), "ELF file target")
     lock_aliases = {(placement["image"], placement["path"]): placement for item in lock["inputs"] for placement in item["placements"] if placement["node_type"] == "symlink"}
     policy_aliases = {(image, row["path"]): row for row in policy["images"][image]["nodes"] if row["node_type"] == "symlink"}
     runtime_aliases = {row["path"]: row for row in runtime["entries"] if row["node_type"] == "symlink"}
@@ -258,18 +401,44 @@ def _validate_graph(docs: dict[str, bytes]) -> dict[str, object]:
     declaration_ids = {row["id"] for row in graph["declarations"]}
     graph_edges = [row for row in graph["edges"] if row["declaration_kind"] == "executable_graph"]
     _fail({row["declaration_ref"] for row in graph_edges} == declaration_ids and len(graph_edges) == len(declaration_ids), "declaration consumption")
+    for edge in graph["edges"]:
+        if edge["kind"] == "python_import":
+            _fail(edge["order_group"] in tuple("python-import:" + edge["from_id"] + ":" + phase for phase in ("controller_pre", "role_pre", "post_bootstrap")), "python import group")
+
+    directory_ids = {_directory(image, path) for path in roots}
+    consumed = set(graph["entrypoints"])
+    consumed.update(edge["from_id"] for edge in graph["edges"])
+    consumed.update(edge["to_id"] for edge in graph["edges"])
+    consumed.update(_file(by_path[row["path"]]["image"], row["path"]) for row in closure["cache_selectors"])
+    for control in graph["controls"]:
+        if control["kind"].startswith("python_") and "owner_id" in control:
+            consumed.add(control["owner_id"])
+            if "contributed_paths" in control:
+                consumed.update(_directory(image, path) for path in control["contributed_paths"])
+                consumed.update(_file(image, path) for path in control["imports"])
+                consumed.update(_file(image, path) for path in control["hooks"])
+        if control.get("path_kind") == "measured_directory":
+            consumed.add(_directory(image, control["path"]))
+        if control["kind"] in ("elf_interpreter", "elf_needed", "elf_search"):
+            consumed.add(control["resolved_id"])
+    _fail(all(node["id"] in consumed for node in graph["nodes"]), "node consumption")
+    if contract["execution_mode"] == "python_jit_triton":
+        _fail(jit_records and _expected_tmpfs(contract["execution_mode"])[-1] == ("/run/spp-jit", 1073741824, 0o700), "JIT tmpfs")
+        _fail(all(row["path"].startswith("/run/spp-jit/") or row["path"].startswith("/usr/lib/spp/jit-cache/") for row in graph["nodes"] if row["kind"] == "jit_output"), "JIT workspace")
+    else:
+        _fail(not jit_records and _expected_tmpfs(contract["execution_mode"]) == (("/run/spp-state", 1048576, 0o755),), "no-JIT tmpfs")
     return graph
 
 
 class ExecutableGraphOracleSelftest(unittest.TestCase):
     def test_real_predecessor_denominators_in_all_modes(self) -> None:
-        for kwargs in ({}, {"execution_mode": "python_jit_triton", "cache_policy": "ephemeral_rebuild"}, {"execution_mode": "python_jit_triton", "cache_policy": "measured_read_only"}):
-            docs, _ = build_v3_fixture(**kwargs)
+        for kwargs in ({}, {"execution_mode": "python_jit_triton", "cache_policy": "ephemeral_rebuild"}, {"execution_mode": "python_jit_triton", "cache_policy": "measured_read_only"}, {"execution_mode": "python_jit_triton", "cache_policy": "ephemeral_rebuild", "extra_jit_derivation": True}):
+            docs, _ = _build_v3_fixture(**kwargs)
             with self.subTest(kwargs=kwargs):
                 _validate_graph(docs)
 
     def test_independent_mutation_matrix(self) -> None:
-        docs, _ = build_v3_fixture(execution_mode="python_jit_triton", cache_policy="ephemeral_rebuild")
+        docs, _ = _build_v3_fixture(execution_mode="python_jit_triton", cache_policy="ephemeral_rebuild")
         for mutation in ("entrypoint", "alias", "control", "declaration", "edge", "coherent_relation"):
             with self.subTest(mutation=mutation):
                 changed = dict(docs)
@@ -302,24 +471,41 @@ class ExecutableGraphOracleSelftest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     _validate_graph(changed)
 
+    def test_jit_argv_requires_exact_measured_executables_and_no_extra_inputs(self) -> None:
+        docs, _ = _build_v3_fixture(execution_mode="python_jit_triton", cache_policy="ephemeral_rebuild")
+        for lane, mutation, replacement in (
+            ("compiler_argv", "executable", "/run/spp-jit-escape/unmeasured-compiler"),
+            ("loader_argv", "executable", "/run/spp-jit-escape/unmeasured-loader"),
+            ("compiler_argv", "extra_input", "/run/spp-jit-escape/owner-supplied-source.py"),
+            ("loader_argv", "extra_input", "/run/spp-jit-escape/owner-supplied-plugin.py"),
+        ):
+            changed = dict(docs)
+            contract = canonical_loads(changed["boot_contract_bytes"])
+            argv = contract["execution_closure"]["jit_derivations"][0]["argv_env"][lane]
+            if mutation == "executable":
+                argv[0] = replacement
+            else:
+                argv.insert(1, replacement)
+            changed["boot_contract_bytes"] = canonical_dumps(contract)
+            with self.subTest(argv_lane=lane, mutation=mutation):
+                with self.assertRaises(ValueError):
+                    _validate_graph(changed)
+
     def test_known_graph_digest(self) -> None:
-        docs, _ = build_v3_fixture(execution_mode="python_jit_triton", cache_policy="ephemeral_rebuild")
+        docs, _ = _build_v3_fixture(execution_mode="python_jit_triton", cache_policy="ephemeral_rebuild")
         graph = _validate_graph(docs)
-        self.assertEqual(_sha(canonical_dumps(graph)), "21fc504b072c008218a27d0b4decfae42ea9c84deb80aa0adf4febe4a59d43b0")
+        self.assertEqual(_sha(canonical_dumps(graph)), "590784b2031e830535a041bdcce3c4f9ed187ecdf7e4f5d4f2eb0d32912b3de5")
 
     def test_z_no_v3_production_module_import(self) -> None:
         tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
-        banned = {
-            "conf_proc_spp_boot_v3", "conf_proc_spp_boot_v3_semantics", "conf_proc_spp_boot_v3_tables",
-            "conf_proc_spp_boot_v3_wire", "conf_proc_spp_boot_v3_resource", "conf_proc_spp_boot_dispatch_v3",
-            "conf_proc_spp_boot_payload_v3", "conf_proc_spp_boot_payload_v3_inspect",
-        }
+        banned = _PRODUCTION_V3_MODULES | {"conf_proc_spp_boot_v3_fixture"}
         imported = {
             alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names
         } | {
             node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module is not None
         }
         self.assertFalse(imported & banned)
+        self.assertFalse(_PRODUCTION_V3_MODULES & set(sys.modules))
 
 
 if __name__ == "__main__":
