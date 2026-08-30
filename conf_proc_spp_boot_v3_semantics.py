@@ -11,7 +11,9 @@ parser products local to issuance and returns only frozen projections.
 from __future__ import annotations
 
 import hashlib
+import posixpath
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Final
 
@@ -28,7 +30,7 @@ EXECUTION_CLOSURE_V3_SCHEMA: Final = "conf-proc-spp-execution-closure/v3"
 _EXECUTION_CLOSURE_KEYS: Final = frozenset({
     "schema", "startup_kat", "bootstrap", "launch_rows", "import_roots",
     "native_loader_roots", "loader_controls", "eligible_files", "jit_derivations",
-    "expected_outputs", "cache_selectors",
+    "expected_outputs", "cache_selectors", "executable_graph",
 })
 _ROLE_ORDER: Final = (
     "attestation-broker", "inference", "asr", "gateway", "collector",
@@ -67,6 +69,34 @@ _SEMANTIC_TAGS: Final = frozenset({
     "python_loading_control", "configuration_no_code", "jit_cache",
 })
 _OUTPUT_NAME_RE: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+_GRAPH_SCHEMA_V3: Final = "sol-spp-executable-graph/v1"
+_GRAPH_SOURCE_SCHEMA_V3: Final = "sol-spp-executable-graph-source/v1"
+_GRAPH_KEYS_V3: Final = frozenset({
+    "schema", "alias_hop_limit", "entrypoints", "nodes", "aliases", "controls",
+    "declarations", "edges",
+})
+_GRAPH_NODE_KINDS_V3: Final = frozenset({
+    "measured_file", "measured_directory", "jit_derivation", "jit_output",
+})
+_GRAPH_STARTUP_KINDS_V3: Final = frozenset({
+    "python_meta_path", "python_path_hook", "python_importer_cache", "python_search_path",
+})
+_GRAPH_LOADING_KINDS_V3: Final = frozenset({
+    "python_pth", "python_namespace_package", "python_startup_hook",
+})
+_GRAPH_ELF_KINDS_V3: Final = frozenset({"elf_interpreter", "elf_search"})
+_GRAPH_DECLARATION_KINDS_V3: Final = frozenset({
+    "python_import", "elf_interpreter", "elf_needed", "elf_search", "dlopen", "jit_invoke",
+})
+_GRAPH_EDGE_KINDS_V3: Final = frozenset({
+    "python_script", "python_import", "elf_interpreter", "elf_needed", "elf_search", "dlopen",
+    "jit_invoke", "jit_compiler", "jit_loader", "jit_input", "jit_output",
+})
+_GRAPH_SOURCE_KINDS_V3: Final = frozenset({
+    "startup_receipt", "controller_cache_projection", "role_cache_projection",
+    "bootstrap_projection", "runtime_closure", "loader_control", "process_authority",
+    "jit_derivation",
+})
 
 
 def _require(condition: bool, code: str, message: str) -> None:
@@ -113,6 +143,7 @@ class ExecutionClosureV3:
     jit_derivations: tuple[FrozenJsonValueV3, ...]
     expected_outputs: tuple[FrozenJsonValueV3, ...]
     cache_selectors: tuple[FrozenJsonValueV3, ...]
+    executable_graph: FrozenJsonObjectV3
 
 
 def _path_under(path: str, roots: tuple[str, ...]) -> bool:
@@ -229,11 +260,17 @@ def parse_execution_closure_v3(raw: object) -> ExecutionClosureV3:
     _require(raw["import_roots"] == list(_PYTHON_ROOTS) and raw["native_loader_roots"] == list(_NATIVE_LOADER_ROOTS), CP_BOOT_V3_SCHEMA, "execution closure roots are invalid")
     arrays = ("loader_controls", "eligible_files", "jit_derivations", "expected_outputs", "cache_selectors")
     _require(all(type(raw[key]) is list for key in arrays), CP_BOOT_V3_SCHEMA, "execution closure collection is invalid")
+    graph = raw["executable_graph"]
+    _require(type(graph) is dict and set(graph) == _GRAPH_KEYS_V3, CP_BOOT_V3_SCHEMA, "executable graph fields are invalid")
+    _require(graph["schema"] == _GRAPH_SCHEMA_V3 and type(graph["alias_hop_limit"]) is int and graph["alias_hop_limit"] == 40, CP_BOOT_V3_SCHEMA, "executable graph schema is invalid")
+    _require(all(type(graph[key]) is list for key in ("entrypoints", "nodes", "aliases", "controls", "declarations", "edges")), CP_BOOT_V3_SCHEMA, "executable graph collections are invalid")
     frozen_bootstrap = _freeze_json(raw["bootstrap"])
     assert type(frozen_bootstrap) is FrozenJsonObjectV3
     frozen_rows = tuple(_freeze_json(item) for item in raw["launch_rows"])
     assert all(type(item) is FrozenJsonObjectV3 for item in frozen_rows)
-    return ExecutionClosureV3(raw["schema"], frozen_startup, frozen_bootstrap, controller_cache, role_cache, frozen_rows, tuple(raw["import_roots"]), tuple(raw["native_loader_roots"]), *[tuple(_freeze_json(item) for item in raw[key]) for key in arrays])
+    frozen_graph = _freeze_json(graph)
+    assert type(frozen_graph) is FrozenJsonObjectV3
+    return ExecutionClosureV3(raw["schema"], frozen_startup, frozen_bootstrap, controller_cache, role_cache, frozen_rows, tuple(raw["import_roots"]), tuple(raw["native_loader_roots"]), *[tuple(_freeze_json(item) for item in raw[key]) for key in arrays], frozen_graph)
 
 
 def validate_execution_mode_v3(execution_mode: object, cache_policy: object, closure: ExecutionClosureV3) -> None:
@@ -430,6 +467,167 @@ class CacheSelectorSnapshotV3:
 
 
 @dataclass(frozen=True)
+class ExecutableGraphMeasuredFileNodeSnapshotV3:
+    id: str
+    kind: str
+    image: str
+    path: str
+    sha256: str
+    size_bytes: int
+    mode: int
+    content_kind: str
+    semantic_tags: tuple[str, ...]
+    input_id: str
+
+
+@dataclass(frozen=True)
+class ExecutableGraphMeasuredDirectoryNodeSnapshotV3:
+    id: str
+    kind: str
+    image: str
+    path: str
+    mode: int
+    uid: int
+    gid: int
+
+
+@dataclass(frozen=True)
+class ExecutableGraphJitDerivationNodeSnapshotV3:
+    id: str
+    kind: str
+    derivation_sha256: str
+
+
+@dataclass(frozen=True)
+class ExecutableGraphJitOutputNodeSnapshotV3:
+    id: str
+    kind: str
+    derivation_sha256: str
+    output_name: str
+    path: str
+    sha256: str
+    size_bytes: int
+    mode: int
+
+
+@dataclass(frozen=True)
+class ExecutableGraphAliasRowV3:
+    image: str
+    path: str
+    target: str
+    resolved_id: str
+    hop_count: int
+    chain: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ExecutableGraphPythonLoaderRowV3:
+    loader: str
+    suffixes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ExecutableGraphPythonLoaderDetailsSnapshotV3:
+    finder: str
+    loaders: tuple[ExecutableGraphPythonLoaderRowV3, ...]
+
+
+@dataclass(frozen=True)
+class ExecutableGraphPythonStartupControlRowV3:
+    kind: str
+    phase: str
+    ordinal: int
+    identity: str | None
+    path: str | None
+    path_kind: str | None
+    finder: str | None
+    loader_details: ExecutableGraphPythonLoaderDetailsSnapshotV3 | None
+    declaration_kind: str
+    declaration_ref: str
+
+
+@dataclass(frozen=True)
+class ExecutableGraphPythonLoadingControlRowV3:
+    kind: str
+    phase: str
+    ordinal: int
+    owner_id: str
+    read_only: bool
+    contributed_paths: tuple[str, ...]
+    imports: tuple[str, ...]
+    hooks: tuple[str, ...]
+    declaration_kind: str
+    declaration_ref: str
+
+
+@dataclass(frozen=True)
+class ExecutableGraphElfControlValueV3:
+    requested_path: str
+    resolved_id: str
+    alias_chain: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ExecutableGraphElfControlRowV3:
+    kind: str
+    owner_id: str
+    ordinal: int
+    value: ExecutableGraphElfControlValueV3
+    declaration_kind: str
+    declaration_ref: str
+
+
+@dataclass(frozen=True)
+class ExecutableGraphSourceProjectionV3:
+    schema: str
+    source_kind: str
+    phase: str | None
+    kind: str
+    ordinal: int
+    payload: FrozenJsonValueV3
+
+
+@dataclass(frozen=True)
+class ExecutableGraphDeclarationRowV3:
+    id: str
+    kind: str
+    owner_id: str
+    order_group: str
+    ordinal: int
+    requested_path: str | None
+    target_id: str
+    alias_chain: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ExecutableGraphEdgeRowV3:
+    id: str
+    kind: str
+    from_id: str
+    to_id: str
+    order_group: str
+    ordinal: int
+    requested_path: str | None
+    resolved_id: str
+    alias_chain: tuple[str, ...]
+    declaration_kind: str
+    declaration_ref: str
+
+
+@dataclass(frozen=True)
+class ExecutableGraphSnapshotV3:
+    schema: str
+    alias_hop_limit: int
+    entrypoints: tuple[str, ...]
+    nodes: tuple[object, ...]
+    aliases: tuple[ExecutableGraphAliasRowV3, ...]
+    controls: tuple[object, ...]
+    declarations: tuple[ExecutableGraphDeclarationRowV3, ...]
+    edges: tuple[ExecutableGraphEdgeRowV3, ...]
+    source_projections: tuple[ExecutableGraphSourceProjectionV3, ...]
+
+
+@dataclass(frozen=True)
 class Predicate5SnapshotV3:
     execution_mode: str
     cache_policy: str
@@ -445,6 +643,7 @@ class Predicate5SnapshotV3:
     eligible_files: tuple[EligibleFileSnapshotV3, ...]
     jit_derivations: tuple[JitDerivationSnapshotV3, ...]
     cache_selectors: tuple[CacheSelectorSnapshotV3, ...]
+    executable_graph: ExecutableGraphSnapshotV3
 
 
 @dataclass(frozen=True)
@@ -756,6 +955,92 @@ def _frame_v3(value: bytes) -> bytes:
     return len(value).to_bytes(8, "big") + value
 
 
+def _graph_path_v3(value: object, message: str = "executable graph path is invalid") -> str:
+    _require(type(value) is str and unicodedata.normalize("NFC", value) == value and value.startswith("/"), CP_BOOT_V3_SCHEMA, message)
+    _require(not any(character in value for character in ("\x00", "\\")) and not any(ord(character) < 32 or ord(character) == 127 for character in value), CP_BOOT_V3_SCHEMA, message)
+    _require(value == "/" or (not value.endswith("/") and all(part not in ("", ".", "..") for part in value.split("/")[1:])), CP_BOOT_V3_SCHEMA, message)
+    return value
+
+
+def _graph_sha256_v3(value: object, message: str = "executable graph digest is invalid") -> str:
+    _require(type(value) is str and len(value) == 64 and all(character in "0123456789abcdef" for character in value), CP_BOOT_V3_SCHEMA, message)
+    return value
+
+
+def _graph_file_id_v3(image: str, path: str) -> str:
+    return f"file:{image}:{path}"
+
+
+def _graph_directory_id_v3(image: str, path: str) -> str:
+    return f"dir:{image}:{path}"
+
+
+def _graph_derivation_id_v3(derivation_sha256: str) -> str:
+    return "derivation:" + derivation_sha256
+
+
+def _graph_output_id_v3(derivation_sha256: str, output_name: str) -> str:
+    return f"jit:{derivation_sha256}:{output_name}"
+
+
+def _graph_source_projection_digest_v3(
+    *, source_kind: str, phase: str | None, kind: str, ordinal: int, payload: object,
+) -> str:
+    """Frame the acyclic source evidence named by executable-graph references."""
+
+    _require(source_kind in _GRAPH_SOURCE_KINDS_V3 and (phase is None or phase in ("controller_pre", "role_pre", "post_bootstrap")) and type(kind) is str and kind and type(ordinal) is int and ordinal >= 0, CP_BOOT_V3_SCHEMA, "executable graph source projection is invalid")
+    material = {
+        "schema": _GRAPH_SOURCE_SCHEMA_V3,
+        "source_kind": source_kind,
+        "phase": phase,
+        "kind": kind,
+        "ordinal": ordinal,
+        "payload": payload,
+    }
+    return _sha256(b"sol-spp-executable-graph-source/v1\0" + _frame_v3(boot.canonical_dumps(material)))
+
+
+def _graph_source_projection_v3(
+    *, source_kind: str, phase: str | None, kind: str, ordinal: int, payload: object,
+) -> ExecutableGraphSourceProjectionV3:
+    frozen = _freeze_json(payload)
+    return ExecutableGraphSourceProjectionV3(
+        _GRAPH_SOURCE_SCHEMA_V3, source_kind, phase, kind, ordinal, frozen,
+    )
+
+
+def _graph_source_ref_v3(value: ExecutableGraphSourceProjectionV3) -> str:
+    digest = _graph_source_projection_digest_v3(
+        source_kind=value.source_kind, phase=value.phase, kind=value.kind,
+        ordinal=value.ordinal, payload=_thaw_json(value.payload),
+    )
+    return f"source:{value.source_kind}:{digest}"
+
+
+def _graph_declaration_id_v3(
+    *, kind: str, owner_id: str, order_group: str, ordinal: int,
+    requested_path: str | None, target_id: str, alias_chain: tuple[str, ...],
+) -> str:
+    return _sha256(boot.canonical_dumps({
+        "kind": kind, "owner_id": owner_id, "order_group": order_group,
+        "ordinal": ordinal, "requested_path": requested_path, "target_id": target_id,
+        "alias_chain": list(alias_chain),
+    }))
+
+
+def _graph_edge_id_v3(
+    *, kind: str, from_id: str, to_id: str, order_group: str, ordinal: int,
+    requested_path: str | None, resolved_id: str, alias_chain: tuple[str, ...],
+    declaration_kind: str, declaration_ref: str,
+) -> str:
+    return _sha256(boot.canonical_dumps({
+        "kind": kind, "from_id": from_id, "to_id": to_id, "order_group": order_group,
+        "ordinal": ordinal, "requested_path": requested_path, "resolved_id": resolved_id,
+        "alias_chain": list(alias_chain), "declaration_kind": declaration_kind,
+        "declaration_ref": declaration_ref,
+    }))
+
+
 def _jit_identity_v3(value: object, name: str) -> dict:
     _require(type(value) is dict and set(value) == {"input_id", "image", "path", "sha256", "size_bytes", "mode"}, CP_BOOT_V3_SCHEMA, f"JIT {name} identity is invalid")
     _require(type(value["input_id"]) is str and type(value["image"]) is str and type(value["path"]) is str and value["path"].startswith("/") and type(value["sha256"]) is str and len(value["sha256"]) == 64 and type(value["size_bytes"]) is int and value["size_bytes"] >= 0 and type(value["mode"]) is int and 0 <= value["mode"] <= 0o7777, CP_BOOT_V3_SCHEMA, f"JIT {name} values are invalid")
@@ -948,6 +1233,483 @@ def _validate_loader_controls_v3(raw: list[object], eligible: tuple[EligibleFile
     return tuple(records)
 
 
+def _graph_plain_node_v3(value: object) -> object:
+    _require(type(value) is dict and type(value.get("kind")) is str and value["kind"] in _GRAPH_NODE_KINDS_V3, CP_BOOT_V3_SCHEMA, "executable graph node is invalid")
+    kind = value["kind"]
+    if kind == "measured_file":
+        keys = {"id", "kind", "image", "path", "sha256", "size_bytes", "mode", "content_kind", "semantic_tags", "input_id"}
+        _require(set(value) == keys and type(value["id"]) is str and type(value["image"]) is str and value["image"] and type(value["input_id"]) is str and value["input_id"] and type(value["size_bytes"]) is int and value["size_bytes"] >= 0 and type(value["mode"]) is int and 0 <= value["mode"] <= 0o7777 and value["content_kind"] in _CONTENT_KINDS, CP_BOOT_V3_SCHEMA, "measured-file graph node is invalid")
+        path = _graph_path_v3(value["path"])
+        digest = _graph_sha256_v3(value["sha256"])
+        tags = _require_sorted_unique_strings(value["semantic_tags"], CP_BOOT_V3_SCHEMA, "measured-file graph tags are invalid")
+        _require(set(tags) <= _SEMANTIC_TAGS and value["id"] == _graph_file_id_v3(value["image"], path), CP_BOOT_V3_SCHEMA, "measured-file graph identity is invalid")
+        return ExecutableGraphMeasuredFileNodeSnapshotV3(value["id"], kind, value["image"], path, digest, value["size_bytes"], value["mode"], value["content_kind"], tags, value["input_id"])
+    if kind == "measured_directory":
+        keys = {"id", "kind", "image", "path", "mode", "uid", "gid"}
+        _require(set(value) == keys and type(value["id"]) is str and type(value["image"]) is str and value["image"] and type(value["mode"]) is int and 0 <= value["mode"] <= 0o7777 and type(value["uid"]) is int and value["uid"] >= 0 and type(value["gid"]) is int and value["gid"] >= 0, CP_BOOT_V3_SCHEMA, "measured-directory graph node is invalid")
+        path = _graph_path_v3(value["path"])
+        _require(value["id"] == _graph_directory_id_v3(value["image"], path), CP_BOOT_V3_SCHEMA, "measured-directory graph identity is invalid")
+        return ExecutableGraphMeasuredDirectoryNodeSnapshotV3(value["id"], kind, value["image"], path, value["mode"], value["uid"], value["gid"])
+    if kind == "jit_derivation":
+        _require(set(value) == {"id", "kind", "derivation_sha256"} and type(value["id"]) is str, CP_BOOT_V3_SCHEMA, "JIT derivation graph node is invalid")
+        digest = _graph_sha256_v3(value["derivation_sha256"])
+        _require(value["id"] == _graph_derivation_id_v3(digest), CP_BOOT_V3_SCHEMA, "JIT derivation graph identity is invalid")
+        return ExecutableGraphJitDerivationNodeSnapshotV3(value["id"], kind, digest)
+    _require(set(value) == {"id", "kind", "derivation_sha256", "output_name", "path", "sha256", "size_bytes", "mode"} and type(value["id"]) is str and type(value["output_name"]) is str and _OUTPUT_NAME_RE.fullmatch(value["output_name"]) is not None and type(value["size_bytes"]) is int and value["size_bytes"] >= 0 and type(value["mode"]) is int and 0 <= value["mode"] <= 0o7777, CP_BOOT_V3_SCHEMA, "JIT output graph node is invalid")
+    digest = _graph_sha256_v3(value["derivation_sha256"])
+    path = _graph_path_v3(value["path"])
+    output_digest = _graph_sha256_v3(value["sha256"])
+    _require(value["id"] == _graph_output_id_v3(digest, value["output_name"]), CP_BOOT_V3_SCHEMA, "JIT output graph identity is invalid")
+    return ExecutableGraphJitOutputNodeSnapshotV3(value["id"], kind, digest, value["output_name"], path, output_digest, value["size_bytes"], value["mode"])
+
+
+def _graph_alias_rows_v3(
+    raw: object, parsed: ParsedPredecessorsV3, node_ids: dict[str, object],
+) -> tuple[ExecutableGraphAliasRowV3, ...]:
+    _require(type(raw) is list, CP_BOOT_V3_SCHEMA, "executable graph aliases are invalid")
+    lock_aliases: dict[tuple[str, str], object] = {}
+    for item in parsed.lock.inputs:
+        for placement in item.placements:
+            if placement.node_type == "symlink":
+                lock_aliases[(placement.image, placement.path)] = placement
+    policy_aliases = {
+        (image, node.path): node
+        for image, policy_image in parsed.policy.images.items()
+        for node in policy_image.nodes if node.node_type == "symlink"
+    }
+    closure_aliases = {entry["path"]: entry for entry in parsed.runtime_closure["entries"] if entry["node_type"] == "symlink"}
+    rows: list[ExecutableGraphAliasRowV3] = []
+    by_path: dict[tuple[str, str], ExecutableGraphAliasRowV3] = {}
+    for value in raw:
+        _require(type(value) is dict and set(value) == {"image", "path", "target", "resolved_id", "hop_count", "chain"} and type(value["image"]) is str and value["image"] and type(value["target"]) is str and value["target"] and type(value["resolved_id"]) is str and type(value["hop_count"]) is int and not isinstance(value["hop_count"], bool) and 1 <= value["hop_count"] <= 40 and type(value["chain"]) is list, CP_BOOT_V3_SCHEMA, "executable graph alias is invalid")
+        path = _graph_path_v3(value["path"], "executable graph alias path is invalid")
+        _require(unicodedata.normalize("NFC", value["target"]) == value["target"] and not any(character in value["target"] for character in ("\x00", "\\")) and not any(ord(character) < 32 or ord(character) == 127 for character in value["target"]), CP_BOOT_V3_SCHEMA, "executable graph alias target is invalid")
+        chain = tuple(_graph_path_v3(item, "executable graph alias chain is invalid") for item in value["chain"])
+        _require(chain and chain[0] == path and len(chain) == value["hop_count"] and len(set(chain)) == len(chain), CP_BOOT_V3_SCHEMA, "executable graph alias chain is invalid")
+        key = (value["image"], path)
+        _require(key not in by_path and key in lock_aliases and key in policy_aliases and path in closure_aliases, CP_BOOT_V3_BINDING, "executable graph alias predecessor is invalid")
+        placement = lock_aliases[key]
+        policy_node = policy_aliases[key]
+        closure = closure_aliases[path]
+        _require(placement.target == value["target"] == policy_node.target == closure["symlink_target"] and placement.mode == policy_node.mode == closure["mode"] and placement.uid == policy_node.uid == closure["uid"] and placement.gid == policy_node.gid == closure["gid"] and not (placement.mode & 0o222), CP_BOOT_V3_BINDING, "executable graph alias predecessor disagrees")
+        row = ExecutableGraphAliasRowV3(value["image"], path, value["target"], value["resolved_id"], value["hop_count"], chain)
+        rows.append(row)
+        by_path[key] = row
+    _require(tuple((row.image, row.path) for row in rows) == tuple(sorted((row.image, row.path) for row in rows)), CP_BOOT_V3_SCHEMA, "executable graph aliases are not canonical")
+    _require(set(by_path) == set(lock_aliases) == set(policy_aliases), CP_BOOT_V3_BINDING, "executable graph aliases do not close predecessor aliases")
+    for row in rows:
+        current = row.path
+        followed: list[str] = []
+        for hop in row.chain:
+            _require(hop == current, CP_BOOT_V3_BINDING, "executable graph alias chain literal path disagrees")
+            followed.append(hop)
+            alias = by_path.get((row.image, current))
+            _require(alias is not None, CP_BOOT_V3_BINDING, "executable graph alias chain is unlisted")
+            target = alias.target if alias.target.startswith("/") else posixpath.join(posixpath.dirname(current), alias.target)
+            current = posixpath.normpath(target)
+            _graph_path_v3(current, "executable graph alias target escapes")
+            if (row.image, current) not in by_path:
+                break
+        _require(tuple(followed) == row.chain and len(followed) == row.hop_count and (row.image, current) not in by_path, CP_BOOT_V3_BINDING, "executable graph alias chain is cyclic or incomplete")
+        terminal = node_ids.get(row.resolved_id)
+        _require(terminal is not None and getattr(terminal, "image", row.image) == row.image and getattr(terminal, "path", None) == current and not isinstance(terminal, ExecutableGraphJitOutputNodeSnapshotV3), CP_BOOT_V3_BINDING, "executable graph alias terminal is invalid")
+    return tuple(rows)
+
+
+def _graph_startup_control_values_v3(
+    closure: ExecutionClosureV3,
+) -> tuple[tuple[ExecutableGraphPythonStartupControlRowV3, ...], tuple[ExecutableGraphSourceProjectionV3, ...]]:
+    startup = _thaw_json(closure.startup_kat)
+    bootstrap = _thaw_json(closure.bootstrap)
+    assert type(startup) is dict and type(bootstrap) is dict
+    observation = startup["capture"]["observation"]
+    assert type(observation) is dict
+    values: list[ExecutableGraphPythonStartupControlRowV3] = []
+    sources: list[ExecutableGraphSourceProjectionV3] = []
+
+    def append_row(kind: str, phase: str, ordinal: int, payload: object, declaration_kind: str, *, identity: str | None = None, path: str | None = None, path_kind: str | None = None, finder: str | None = None, details: ExecutableGraphPythonLoaderDetailsSnapshotV3 | None = None) -> None:
+        source = _graph_source_projection_v3(source_kind=declaration_kind, phase=phase, kind=kind, ordinal=ordinal, payload=payload)
+        sources.append(source)
+        values.append(ExecutableGraphPythonStartupControlRowV3(kind, phase, ordinal, identity, path, path_kind, finder, details, declaration_kind, _graph_source_ref_v3(source)))
+
+    def loader_details(value: object) -> ExecutableGraphPythonLoaderDetailsSnapshotV3 | None:
+        if value is None:
+            return None
+        assert type(value) is dict
+        return ExecutableGraphPythonLoaderDetailsSnapshotV3(value["finder"], tuple(ExecutableGraphPythonLoaderRowV3(item["loader"], tuple(item["suffixes"])) for item in value["loaders"]))
+
+    for phase, cache_key, source_kind in (
+        ("controller_pre", "controller_pre_importer_cache", "controller_cache_projection"),
+        ("role_pre", "role_pre_importer_cache", "role_cache_projection"),
+    ):
+        for ordinal, path in enumerate(observation["path"]):
+            append_row("python_search_path", phase, ordinal, {"path": path}, "startup_receipt", path=path, path_kind="denied_zip" if path == "/usr/lib/python310.zip" else "measured_directory")
+        for ordinal, identity in enumerate(observation["meta_path"]):
+            append_row("python_meta_path", phase, ordinal, {"identity": identity}, "startup_receipt", identity=identity)
+        for ordinal, hook in enumerate(observation["path_hooks"]):
+            append_row("python_path_hook", phase, ordinal, hook, "startup_receipt", identity=hook["identity"], details=loader_details(hook["loader_details"]))
+        for ordinal, cache in enumerate(bootstrap[cache_key]):
+            path = cache["path"]
+            append_row("python_importer_cache", phase, ordinal, cache, source_kind, path=path, path_kind="denied_zip" if path == "/usr/lib/python310.zip" else ("measured_file" if cache["finder"] is None else "measured_directory"), finder=cache["finder"])
+    for ordinal, path in enumerate(bootstrap["post_path"]):
+        append_row("python_search_path", "post_bootstrap", ordinal, {"path": path}, "bootstrap_projection", path=path, path_kind="measured_directory")
+    for ordinal, identity in enumerate(bootstrap["post_meta_path"]):
+        append_row("python_meta_path", "post_bootstrap", ordinal, {"identity": identity}, "bootstrap_projection", identity=identity)
+    for ordinal, hook in enumerate(bootstrap["post_path_hooks"]):
+        append_row("python_path_hook", "post_bootstrap", ordinal, hook, "bootstrap_projection", identity=hook["identity"], details=loader_details(hook["loader_details"]))
+    for ordinal, cache in enumerate(bootstrap["post_importer_cache"]):
+        append_row("python_importer_cache", "post_bootstrap", ordinal, cache, "bootstrap_projection", path=cache["path"], path_kind="measured_file" if cache["finder"] is None else "measured_directory", finder=cache["finder"])
+    return tuple(values), tuple(sources)
+
+
+def _graph_startup_control_raw_v3(value: ExecutableGraphPythonStartupControlRowV3) -> dict[str, object]:
+    details = None if value.loader_details is None else {
+        "finder": value.loader_details.finder,
+        "loaders": [{"loader": row.loader, "suffixes": list(row.suffixes)} for row in value.loader_details.loaders],
+    }
+    return {"kind": value.kind, "phase": value.phase, "ordinal": value.ordinal, "identity": value.identity, "path": value.path, "path_kind": value.path_kind, "finder": value.finder, "loader_details": details, "declaration_kind": value.declaration_kind, "declaration_ref": value.declaration_ref}
+
+
+def _graph_loading_control_values_v3(
+    controls: tuple[LoaderControlSnapshotV3, ...], eligible_by_path: dict[str, EligibleFileSnapshotV3],
+) -> tuple[tuple[ExecutableGraphPythonLoadingControlRowV3, ...], tuple[ExecutableGraphSourceProjectionV3, ...]]:
+    rows: list[ExecutableGraphPythonLoadingControlRowV3] = []
+    sources: list[ExecutableGraphSourceProjectionV3] = []
+    for ordinal, control in enumerate(controls):
+        source = _graph_source_projection_v3(
+            source_kind="loader_control", phase=None, kind=control.kind, ordinal=ordinal,
+            payload={"path": control.path, "kind": control.kind, "read_only": control.read_only, "contributed_paths": list(control.contributed_paths), "imports": list(control.imports), "hooks": list(control.hooks)},
+        )
+        sources.append(source)
+        owner = eligible_by_path[control.path]
+        rows.append(ExecutableGraphPythonLoadingControlRowV3(
+            "python_" + control.kind, "runtime_startup", ordinal,
+            _graph_file_id_v3(owner.image, owner.path), control.read_only,
+            control.contributed_paths, control.imports, control.hooks,
+            "loader_control", _graph_source_ref_v3(source),
+        ))
+    return tuple(rows), tuple(sources)
+
+
+def _graph_loading_control_raw_v3(value: ExecutableGraphPythonLoadingControlRowV3) -> dict[str, object]:
+    return {"kind": value.kind, "phase": value.phase, "ordinal": value.ordinal, "owner_id": value.owner_id, "read_only": value.read_only, "contributed_paths": list(value.contributed_paths), "imports": list(value.imports), "hooks": list(value.hooks), "declaration_kind": value.declaration_kind, "declaration_ref": value.declaration_ref}
+
+
+def _graph_node_raw_v3(value: object) -> dict[str, object]:
+    if isinstance(value, ExecutableGraphMeasuredFileNodeSnapshotV3):
+        return {"id": value.id, "kind": value.kind, "image": value.image, "path": value.path, "sha256": value.sha256, "size_bytes": value.size_bytes, "mode": value.mode, "content_kind": value.content_kind, "semantic_tags": list(value.semantic_tags), "input_id": value.input_id}
+    if isinstance(value, ExecutableGraphMeasuredDirectoryNodeSnapshotV3):
+        return {"id": value.id, "kind": value.kind, "image": value.image, "path": value.path, "mode": value.mode, "uid": value.uid, "gid": value.gid}
+    if isinstance(value, ExecutableGraphJitDerivationNodeSnapshotV3):
+        return {"id": value.id, "kind": value.kind, "derivation_sha256": value.derivation_sha256}
+    assert isinstance(value, ExecutableGraphJitOutputNodeSnapshotV3)
+    return {"id": value.id, "kind": value.kind, "derivation_sha256": value.derivation_sha256, "output_name": value.output_name, "path": value.path, "sha256": value.sha256, "size_bytes": value.size_bytes, "mode": value.mode}
+
+
+def _graph_expected_nodes_v3(
+    parsed: ParsedPredecessorsV3, eligible: tuple[EligibleFileSnapshotV3, ...],
+    derivations: tuple[JitDerivationSnapshotV3, ...], selectors: tuple[CacheSelectorSnapshotV3, ...],
+) -> tuple[object, ...]:
+    required_tags = {
+        "launch_executable", "importable_module", "python_loading_control", "native_extension",
+        "dynamic_library", "compiler", "compiler_source", "model_code", "plugin", "jit_cache",
+    }
+    noncode_inputs = {
+        item.path for derivation in derivations for item in derivation.inputs
+        if item.kind in ("configuration", "model")
+    }
+    nodes: list[object] = []
+    for item in eligible:
+        if required_tags & set(item.semantic_tags) or item.path in noncode_inputs:
+            nodes.append(ExecutableGraphMeasuredFileNodeSnapshotV3(
+                _graph_file_id_v3(item.image, item.path), "measured_file", item.image, item.path,
+                item.sha256, item.size_bytes, item.mode, item.content_kind, item.semantic_tags, item.input_id,
+            ))
+    root_paths = set(_PYTHON_ROOTS + _NATIVE_LOADER_ROOTS)
+    for image, policy_image in parsed.policy.images.items():
+        for node in policy_image.nodes:
+            if node.node_type == "directory" and node.path in root_paths:
+                closure_matches = [entry for entry in parsed.runtime_closure["entries"] if entry["path"] == node.path]
+                _require(len(closure_matches) == 1, CP_BOOT_V3_BINDING, "executable graph directory closure identity is invalid")
+                closure = closure_matches[0]
+                _require(closure["node_type"] == "directory" and (node.mode, node.uid, node.gid) == (closure["mode"], closure["uid"], closure["gid"]) and not (node.mode & 0o222), CP_BOOT_V3_BINDING, "executable graph directory is not measured read-only")
+                nodes.append(ExecutableGraphMeasuredDirectoryNodeSnapshotV3(_graph_directory_id_v3(image, node.path), "measured_directory", image, node.path, node.mode, node.uid, node.gid))
+    selector_by_identity = {(selector.derivation_sha256, selector.output_name): selector for selector in selectors}
+    eligible_by_path = {item.path: item for item in eligible}
+    for derivation in derivations:
+        nodes.append(ExecutableGraphJitDerivationNodeSnapshotV3(_graph_derivation_id_v3(derivation.derivation_sha256), "jit_derivation", derivation.derivation_sha256))
+        selector = selector_by_identity.get((derivation.derivation_sha256, derivation.output_name))
+        output_path = selector.path if selector is not None else "/run/spp-jit/" + derivation.derivation_sha256 + "/" + derivation.output_name
+        if selector is not None:
+            cached = eligible_by_path.get(selector.path)
+            _require(cached is not None and (cached.sha256, cached.size_bytes, cached.mode) == (derivation.output_sha256, derivation.output_size_bytes, derivation.output_mode), CP_BOOT_V3_BINDING, "executable graph JIT output cache identity disagrees")
+        nodes.append(ExecutableGraphJitOutputNodeSnapshotV3(_graph_output_id_v3(derivation.derivation_sha256, derivation.output_name), "jit_output", derivation.derivation_sha256, derivation.output_name, output_path, derivation.output_sha256, derivation.output_size_bytes, derivation.output_mode))
+    return tuple(sorted(nodes, key=lambda item: item.id.encode("utf-8")))
+
+
+def _graph_script_edges_v3(
+    eligible_by_path: dict[str, EligibleFileSnapshotV3],
+) -> tuple[tuple[ExecutableGraphEdgeRowV3, ...], tuple[ExecutableGraphSourceProjectionV3, ...]]:
+    paths = (
+        tables.STAGE2_CONTROLLER_ROW_V3.source_path,
+        "/usr/lib/spp/conf_proc_spp_role_bootstrap.py",
+        *(row.source_path for row in tables.LAUNCH_ROLE_ROWS_V3),
+    )
+    interpreter = eligible_by_path["/usr/bin/python3.10"]
+    edges: list[ExecutableGraphEdgeRowV3] = []
+    sources: list[ExecutableGraphSourceProjectionV3] = []
+    for ordinal, path in enumerate(paths):
+        source = eligible_by_path[path]
+        projection = _graph_source_projection_v3(
+            source_kind="process_authority", phase=None, kind="python_script", ordinal=ordinal,
+            payload={"interpreter_path": interpreter.path, "source_input_id": source.input_id, "source_path": source.path, "source_sha256": source.sha256},
+        )
+        sources.append(projection)
+        source_ref = _graph_source_ref_v3(projection)
+        from_id = _graph_file_id_v3(interpreter.image, interpreter.path)
+        to_id = _graph_file_id_v3(source.image, source.path)
+        group = "python-script:" + source_ref
+        edges.append(ExecutableGraphEdgeRowV3(
+            _graph_edge_id_v3(kind="python_script", from_id=from_id, to_id=to_id, order_group=group, ordinal=0, requested_path=source.path, resolved_id=to_id, alias_chain=(), declaration_kind="process_authority", declaration_ref=source_ref),
+            "python_script", from_id, to_id, group, 0, source.path, to_id, (), "process_authority", source_ref,
+        ))
+    return tuple(edges), tuple(sources)
+
+
+def _graph_jit_edges_v3(
+    raw_derivations: list[object], derivations: tuple[JitDerivationSnapshotV3, ...],
+    eligible_by_path: dict[str, EligibleFileSnapshotV3], selectors: tuple[CacheSelectorSnapshotV3, ...],
+) -> tuple[tuple[ExecutableGraphEdgeRowV3, ...], tuple[ExecutableGraphSourceProjectionV3, ...]]:
+    edges: list[ExecutableGraphEdgeRowV3] = []
+    projections: list[ExecutableGraphSourceProjectionV3] = []
+    selectors_by_key = {(item.derivation_sha256, item.output_name): item for item in selectors}
+    for record, derivation in zip(raw_derivations, derivations, strict=True):
+        assert type(record) is dict
+        derivation_id = _graph_derivation_id_v3(derivation.derivation_sha256)
+
+        def add(kind: str, ordinal: int, payload: object, target_id: str, group: str) -> None:
+            projection = _graph_source_projection_v3(source_kind="jit_derivation", phase=None, kind=kind, ordinal=ordinal, payload=payload)
+            projections.append(projection)
+            reference = _graph_source_ref_v3(projection)
+            edges.append(ExecutableGraphEdgeRowV3(
+                _graph_edge_id_v3(kind=kind, from_id=derivation_id, to_id=target_id, order_group=group, ordinal=ordinal, requested_path=None, resolved_id=target_id, alias_chain=(), declaration_kind="jit_derivation", declaration_ref=reference),
+                kind, derivation_id, target_id, group, ordinal, None, target_id, (), "jit_derivation", reference,
+            ))
+
+        compiler = record["compiler"]
+        loader = record["loader"]
+        assert type(compiler) is dict and type(loader) is dict
+        add("jit_compiler", 0, compiler, _graph_file_id_v3(compiler["image"], compiler["path"]), "jit-compiler:" + derivation_id)
+        add("jit_loader", 0, loader, _graph_file_id_v3(loader["image"], loader["path"]), "jit-loader:" + derivation_id)
+        for ordinal, item in enumerate(record["inputs"]):
+            assert type(item) is dict
+            add("jit_input", ordinal, item, _graph_file_id_v3(item["image"], item["path"]), "jit-input:" + derivation_id)
+        output = record["output"]
+        assert type(output) is dict
+        output_id = _graph_output_id_v3(derivation.derivation_sha256, derivation.output_name)
+        add("jit_output", 0, output, output_id, "jit-output:" + derivation_id)
+        selector = selectors_by_key.get((derivation.derivation_sha256, derivation.output_name))
+        if selector is not None:
+            _require(selector.path in eligible_by_path, CP_BOOT_V3_BINDING, "JIT graph cache output is missing eligibility")
+    return tuple(edges), tuple(projections)
+
+
+def _graph_edge_raw_v3(value: ExecutableGraphEdgeRowV3) -> dict[str, object]:
+    return {"id": value.id, "kind": value.kind, "from_id": value.from_id, "to_id": value.to_id, "order_group": value.order_group, "ordinal": value.ordinal, "requested_path": value.requested_path, "resolved_id": value.resolved_id, "alias_chain": list(value.alias_chain), "declaration_kind": value.declaration_kind, "declaration_ref": value.declaration_ref}
+
+
+def _graph_declaration_raw_v3(value: ExecutableGraphDeclarationRowV3) -> dict[str, object]:
+    return {"id": value.id, "kind": value.kind, "owner_id": value.owner_id, "order_group": value.order_group, "ordinal": value.ordinal, "requested_path": value.requested_path, "target_id": value.target_id, "alias_chain": list(value.alias_chain)}
+
+
+def _graph_resolve_edge_v3(
+    *, requested_path: str | None, resolved_id: str, alias_chain: tuple[str, ...],
+    aliases: tuple[ExecutableGraphAliasRowV3, ...], nodes_by_id: dict[str, object],
+) -> None:
+    _require(resolved_id in nodes_by_id, CP_BOOT_V3_BINDING, "executable graph edge target is unknown")
+    if requested_path is None:
+        _require(not alias_chain, CP_BOOT_V3_SCHEMA, "derivation graph edge must not carry an alias")
+        return
+    path = _graph_path_v3(requested_path, "executable graph edge requested path is invalid")
+    if not alias_chain:
+        _require(getattr(nodes_by_id[resolved_id], "path", None) == path, CP_BOOT_V3_BINDING, "executable graph edge terminal path disagrees")
+        return
+    matching = [row for row in aliases if row.path == path]
+    _require(len(matching) == 1 and matching[0].chain == alias_chain and matching[0].resolved_id == resolved_id, CP_BOOT_V3_BINDING, "executable graph edge alias traversal disagrees")
+
+
+def _graph_parse_declarations_v3(raw: object) -> tuple[ExecutableGraphDeclarationRowV3, ...]:
+    _require(type(raw) is list, CP_BOOT_V3_SCHEMA, "executable graph declarations are invalid")
+    rows: list[ExecutableGraphDeclarationRowV3] = []
+    for value in raw:
+        _require(type(value) is dict and set(value) == {"id", "kind", "owner_id", "order_group", "ordinal", "requested_path", "target_id", "alias_chain"} and type(value["id"]) is str and type(value["kind"]) is str and value["kind"] in _GRAPH_DECLARATION_KINDS_V3 and type(value["owner_id"]) is str and type(value["order_group"]) is str and value["order_group"] and type(value["ordinal"]) is int and not isinstance(value["ordinal"], bool) and value["ordinal"] >= 0 and (value["requested_path"] is None or type(value["requested_path"]) is str) and type(value["target_id"]) is str and type(value["alias_chain"]) is list, CP_BOOT_V3_SCHEMA, "executable graph declaration is invalid")
+        requested = None if value["requested_path"] is None else _graph_path_v3(value["requested_path"], "executable graph declaration requested path is invalid")
+        chain = tuple(_graph_path_v3(item, "executable graph declaration alias chain is invalid") for item in value["alias_chain"])
+        _require(value["id"] == _graph_declaration_id_v3(kind=value["kind"], owner_id=value["owner_id"], order_group=value["order_group"], ordinal=value["ordinal"], requested_path=requested, target_id=value["target_id"], alias_chain=chain), CP_BOOT_V3_SCHEMA, "executable graph declaration digest is invalid")
+        rows.append(ExecutableGraphDeclarationRowV3(value["id"], value["kind"], value["owner_id"], value["order_group"], value["ordinal"], requested, value["target_id"], chain))
+    _require(tuple(row.id for row in rows) == tuple(sorted((row.id for row in rows), key=lambda item: item.encode("utf-8"))) and len({row.id for row in rows}) == len(rows), CP_BOOT_V3_SCHEMA, "executable graph declarations are not canonical")
+    return tuple(rows)
+
+
+def _graph_parse_edges_v3(raw: object) -> tuple[ExecutableGraphEdgeRowV3, ...]:
+    _require(type(raw) is list, CP_BOOT_V3_SCHEMA, "executable graph edges are invalid")
+    rows: list[ExecutableGraphEdgeRowV3] = []
+    for value in raw:
+        _require(type(value) is dict and set(value) == {"id", "kind", "from_id", "to_id", "order_group", "ordinal", "requested_path", "resolved_id", "alias_chain", "declaration_kind", "declaration_ref"} and type(value["id"]) is str and type(value["kind"]) is str and value["kind"] in _GRAPH_EDGE_KINDS_V3 and all(type(value[field]) is str and value[field] for field in ("from_id", "to_id", "order_group", "resolved_id", "declaration_kind", "declaration_ref")) and type(value["ordinal"]) is int and not isinstance(value["ordinal"], bool) and value["ordinal"] >= 0 and (value["requested_path"] is None or type(value["requested_path"]) is str) and type(value["alias_chain"]) is list, CP_BOOT_V3_SCHEMA, "executable graph edge is invalid")
+        requested = None if value["requested_path"] is None else _graph_path_v3(value["requested_path"], "executable graph edge requested path is invalid")
+        chain = tuple(_graph_path_v3(item, "executable graph edge alias chain is invalid") for item in value["alias_chain"])
+        _require(value["id"] == _graph_edge_id_v3(kind=value["kind"], from_id=value["from_id"], to_id=value["to_id"], order_group=value["order_group"], ordinal=value["ordinal"], requested_path=requested, resolved_id=value["resolved_id"], alias_chain=chain, declaration_kind=value["declaration_kind"], declaration_ref=value["declaration_ref"]), CP_BOOT_V3_SCHEMA, "executable graph edge digest is invalid")
+        rows.append(ExecutableGraphEdgeRowV3(value["id"], value["kind"], value["from_id"], value["to_id"], value["order_group"], value["ordinal"], requested, value["resolved_id"], chain, value["declaration_kind"], value["declaration_ref"]))
+    _require(tuple(row.id for row in rows) == tuple(sorted((row.id for row in rows), key=lambda item: item.encode("utf-8"))) and len({row.id for row in rows}) == len(rows), CP_BOOT_V3_SCHEMA, "executable graph edges are not canonical")
+    return tuple(rows)
+
+
+def _graph_check_ordinals_v3(rows: tuple[object, ...], *, fields: tuple[str, ...], message: str) -> None:
+    groups: dict[tuple[object, ...], list[int]] = {}
+    for row in rows:
+        groups.setdefault(tuple(getattr(row, field) for field in fields), []).append(getattr(row, "ordinal"))
+    _require(all(sorted(values) == list(range(len(values))) for values in groups.values()), CP_BOOT_V3_BINDING, message)
+
+
+def _graph_validate_declarative_edges_v3(
+    declarations: tuple[ExecutableGraphDeclarationRowV3, ...], edges: tuple[ExecutableGraphEdgeRowV3, ...],
+    nodes_by_id: dict[str, object], aliases: tuple[ExecutableGraphAliasRowV3, ...],
+    entrypoints: tuple[str, ...],
+) -> None:
+    declarations_by_id = {row.id: row for row in declarations}
+    graph_edges = [row for row in edges if row.declaration_kind == "executable_graph"]
+    _require(len(graph_edges) == len(declarations) and {row.declaration_ref for row in graph_edges} == set(declarations_by_id), CP_BOOT_V3_BINDING, "executable graph declarations and edges disagree")
+    for edge in graph_edges:
+        declaration = declarations_by_id[edge.declaration_ref]
+        _require((edge.kind, edge.from_id, edge.to_id, edge.order_group, edge.ordinal, edge.requested_path, edge.resolved_id, edge.alias_chain) == (declaration.kind, declaration.owner_id, declaration.target_id, declaration.order_group, declaration.ordinal, declaration.requested_path, declaration.target_id, declaration.alias_chain), CP_BOOT_V3_BINDING, "executable graph declaration and edge disagree")
+    _graph_check_ordinals_v3(declarations, fields=("order_group",), message="executable graph declaration ordinals are invalid")
+    _graph_check_ordinals_v3(edges, fields=("order_group",), message="executable graph edge ordinals are invalid")
+    for edge in edges:
+        _require(edge.from_id in nodes_by_id and edge.to_id in nodes_by_id and edge.resolved_id == edge.to_id and edge.from_id != edge.to_id, CP_BOOT_V3_BINDING, "executable graph edge endpoints are invalid")
+        _graph_resolve_edge_v3(requested_path=edge.requested_path, resolved_id=edge.resolved_id, alias_chain=edge.alias_chain, aliases=aliases, nodes_by_id=nodes_by_id)
+        source = nodes_by_id[edge.from_id]
+        target = nodes_by_id[edge.to_id]
+        if edge.kind == "python_import":
+            _require(edge.declaration_kind == "executable_graph" and edge.order_group.startswith("python-import:" + edge.from_id + ":") and edge.order_group.rsplit(":", 1)[1] in ("controller_pre", "role_pre", "post_bootstrap") and isinstance(source, ExecutableGraphMeasuredFileNodeSnapshotV3) and isinstance(target, ExecutableGraphMeasuredFileNodeSnapshotV3) and ("importable_module" in target.semantic_tags or "native_extension" in target.semantic_tags), CP_BOOT_V3_BINDING, "Python import graph edge is invalid")
+        elif edge.kind == "elf_interpreter":
+            _require(edge.declaration_kind == "executable_graph" and edge.order_group == "elf-interpreter:" + edge.from_id and isinstance(source, ExecutableGraphMeasuredFileNodeSnapshotV3) and isinstance(target, ExecutableGraphMeasuredFileNodeSnapshotV3) and target.content_kind in ("elf_executable", "elf_shared_object"), CP_BOOT_V3_BINDING, "ELF interpreter graph edge is invalid")
+        elif edge.kind == "elf_needed":
+            _require(edge.declaration_kind == "executable_graph" and edge.order_group == "elf-needed:" + edge.from_id and isinstance(source, ExecutableGraphMeasuredFileNodeSnapshotV3) and isinstance(target, ExecutableGraphMeasuredFileNodeSnapshotV3) and ("dynamic_library" in target.semantic_tags or "native_extension" in target.semantic_tags), CP_BOOT_V3_BINDING, "ELF needed graph edge is invalid")
+        elif edge.kind == "elf_search":
+            _require(edge.declaration_kind == "executable_graph" and edge.order_group == "elf-search:" + edge.from_id and isinstance(source, ExecutableGraphMeasuredFileNodeSnapshotV3) and isinstance(target, ExecutableGraphMeasuredDirectoryNodeSnapshotV3), CP_BOOT_V3_BINDING, "ELF search graph edge is invalid")
+        elif edge.kind == "dlopen":
+            _require(edge.declaration_kind == "executable_graph" and edge.order_group == "dlopen:" + edge.from_id and isinstance(source, ExecutableGraphMeasuredFileNodeSnapshotV3) and isinstance(target, ExecutableGraphMeasuredFileNodeSnapshotV3) and ("dynamic_library" in target.semantic_tags or "native_extension" in target.semantic_tags), CP_BOOT_V3_BINDING, "dlopen graph edge is invalid")
+        elif edge.kind == "jit_invoke":
+            _require(edge.declaration_kind == "executable_graph" and edge.order_group == "jit-invoke:" + edge.from_id and edge.from_id in entrypoints and isinstance(source, ExecutableGraphMeasuredFileNodeSnapshotV3) and isinstance(target, ExecutableGraphJitDerivationNodeSnapshotV3) and edge.requested_path is None and not edge.alias_chain, CP_BOOT_V3_BINDING, "JIT invocation graph edge is invalid")
+        elif edge.kind == "python_script":
+            _require(edge.declaration_kind == "process_authority", CP_BOOT_V3_BINDING, "Python script graph edge declaration is invalid")
+        else:
+            _require(edge.declaration_kind == "jit_derivation", CP_BOOT_V3_BINDING, "JIT graph edge declaration is invalid")
+
+
+def _executable_graph_snapshot_v3(
+    *, closure: ExecutionClosureV3, parsed: ParsedPredecessorsV3,
+    eligible: tuple[EligibleFileSnapshotV3, ...], controls: tuple[LoaderControlSnapshotV3, ...],
+    derivations: tuple[JitDerivationSnapshotV3, ...], selectors: tuple[CacheSelectorSnapshotV3, ...],
+    raw_derivations: list[object],
+) -> ExecutableGraphSnapshotV3:
+    """Parse and bind the graph carrier to the already-derived predicate-5 snapshots."""
+
+    raw = _thaw_json(closure.executable_graph)
+    _require(type(raw) is dict and set(raw) == _GRAPH_KEYS_V3 and raw["schema"] == _GRAPH_SCHEMA_V3 and type(raw["alias_hop_limit"]) is int and raw["alias_hop_limit"] == 40, CP_BOOT_V3_SCHEMA, "executable graph carrier is invalid")
+    _require(all(type(raw[key]) is list for key in ("entrypoints", "nodes", "aliases", "controls", "declarations", "edges")), CP_BOOT_V3_SCHEMA, "executable graph arrays are invalid")
+    eligible_by_path = {item.path: item for item in eligible}
+    expected_entry_paths = (
+        "/usr/bin/spp", "/usr/bin/python3.10", tables.STAGE2_CONTROLLER_ROW_V3.source_path,
+        "/usr/lib/spp/conf_proc_spp_role_bootstrap.py", *(row.source_path for row in tables.LAUNCH_ROLE_ROWS_V3),
+    )
+    expected_entrypoints = tuple(_graph_file_id_v3(eligible_by_path[path].image, path) for path in expected_entry_paths)
+    _require(type(raw["entrypoints"]) is list and tuple(raw["entrypoints"]) == expected_entrypoints and all(type(item) is str for item in raw["entrypoints"]), CP_BOOT_V3_BINDING, "executable graph entrypoints disagree")
+    expected_nodes = _graph_expected_nodes_v3(parsed, eligible, derivations, selectors)
+    nodes = tuple(_graph_plain_node_v3(value) for value in raw["nodes"])
+    _require(tuple(_graph_node_raw_v3(node) for node in nodes) == tuple(_graph_node_raw_v3(node) for node in expected_nodes), CP_BOOT_V3_BINDING, "executable graph node denominator disagrees")
+    nodes_by_id = {node.id: node for node in nodes}
+    _require(len(nodes_by_id) == len(nodes) and set(expected_entrypoints) <= set(nodes_by_id), CP_BOOT_V3_BINDING, "executable graph node identities are invalid")
+    aliases = _graph_alias_rows_v3(raw["aliases"], parsed, nodes_by_id)
+    startup_controls, startup_sources = _graph_startup_control_values_v3(closure)
+    loading_controls, loading_sources = _graph_loading_control_values_v3(controls, eligible_by_path)
+    expected_controls = tuple(_graph_startup_control_raw_v3(row) for row in startup_controls) + tuple(_graph_loading_control_raw_v3(row) for row in loading_controls)
+    _require(tuple(raw["controls"]) == expected_controls, CP_BOOT_V3_BINDING, "executable graph controls disagree with predecessor projections")
+    declarations = _graph_parse_declarations_v3(raw["declarations"])
+    edges = _graph_parse_edges_v3(raw["edges"])
+    script_edges, script_sources = _graph_script_edges_v3(eligible_by_path)
+    jit_edges, jit_sources = _graph_jit_edges_v3(raw_derivations, derivations, eligible_by_path, selectors)
+    source_edges = tuple((*script_edges, *jit_edges))
+    source_by_ref = {
+        _graph_source_ref_v3(value): value
+        for value in (*startup_sources, *loading_sources, *script_sources, *jit_sources)
+    }
+    _require(len(source_by_ref) == len((*startup_sources, *loading_sources, *script_sources, *jit_sources)), CP_BOOT_V3_BINDING, "executable graph source projections are ambiguous")
+    actual_source_edges = tuple(edge for edge in edges if edge.declaration_kind != "executable_graph")
+    _require(tuple(sorted((_graph_edge_raw_v3(edge) for edge in actual_source_edges), key=lambda value: value["id"].encode("utf-8"))) == tuple(sorted((_graph_edge_raw_v3(edge) for edge in source_edges), key=lambda value: value["id"].encode("utf-8"))), CP_BOOT_V3_BINDING, "executable graph source-backed edges disagree")
+    _require(all(edge.declaration_ref in source_by_ref for edge in actual_source_edges), CP_BOOT_V3_BINDING, "executable graph source reference is unknown")
+    _graph_validate_declarative_edges_v3(declarations, edges, nodes_by_id, aliases, expected_entrypoints)
+    for control in loading_controls:
+        _require(control.owner_id in nodes_by_id and all(path in eligible_by_path or any(isinstance(node, ExecutableGraphMeasuredDirectoryNodeSnapshotV3) and (node.path == path or path.startswith(node.path + "/")) for node in nodes) for path in (*control.contributed_paths, *control.imports, *control.hooks)), CP_BOOT_V3_BINDING, "executable graph loading-control target is unresolved")
+    consumed = set(expected_entrypoints)
+    consumed.update(edge.from_id for edge in edges)
+    consumed.update(edge.to_id for edge in edges)
+    consumed.update(control.owner_id for control in loading_controls)
+    for control in loading_controls:
+        for path in (*control.imports, *control.hooks):
+            if path in eligible_by_path:
+                file = eligible_by_path[path]
+                consumed.add(_graph_file_id_v3(file.image, file.path))
+    for control in startup_controls:
+        if control.path in eligible_by_path:
+            file = eligible_by_path[control.path]
+            consumed.add(_graph_file_id_v3(file.image, file.path))
+        for node in nodes:
+            if isinstance(node, ExecutableGraphMeasuredDirectoryNodeSnapshotV3) and node.path == control.path:
+                consumed.add(node.id)
+    for output in (node for node in nodes if isinstance(node, ExecutableGraphJitOutputNodeSnapshotV3)):
+        for file in (node for node in nodes if isinstance(node, ExecutableGraphMeasuredFileNodeSnapshotV3)):
+            if (file.path, file.sha256, file.size_bytes, file.mode) == (output.path, output.sha256, output.size_bytes, output.mode):
+                consumed.add(file.id)
+    _require(all(isinstance(node, ExecutableGraphMeasuredDirectoryNodeSnapshotV3) or node.id in consumed for node in nodes), CP_BOOT_V3_BINDING, "executable graph contains decorative node authority")
+    alias_uses = {chain[0] for edge in edges if edge.alias_chain for chain in (edge.alias_chain,)}
+    _require(alias_uses == {row.path for row in aliases}, CP_BOOT_V3_BINDING, "executable graph alias is decorative")
+    adjacency: dict[str, set[str]] = {}
+    for edge in edges:
+        adjacency.setdefault(edge.from_id, set()).add(edge.to_id)
+    interpreter_id = _graph_file_id_v3(eligible_by_path["/usr/bin/python3.10"].image, "/usr/bin/python3.10")
+    for control in loading_controls:
+        adjacency.setdefault(interpreter_id, set()).add(control.owner_id)
+        for path in (*control.imports, *control.hooks):
+            if path in eligible_by_path:
+                target = eligible_by_path[path]
+                adjacency.setdefault(control.owner_id, set()).add(_graph_file_id_v3(target.image, target.path))
+    for output in (node for node in nodes if isinstance(node, ExecutableGraphJitOutputNodeSnapshotV3)):
+        for file in (node for node in nodes if isinstance(node, ExecutableGraphMeasuredFileNodeSnapshotV3)):
+            if (file.path, file.sha256, file.size_bytes, file.mode) == (output.path, output.sha256, output.size_bytes, output.mode):
+                adjacency.setdefault(output.id, set()).add(file.id)
+    reachable = set(expected_entrypoints)
+    work = list(expected_entrypoints)
+    while work:
+        current = work.pop()
+        for target in adjacency.get(current, ()):
+            if target not in reachable:
+                reachable.add(target)
+                work.append(target)
+    for node in nodes:
+        if isinstance(node, ExecutableGraphMeasuredFileNodeSnapshotV3) and (node.content_kind in ("python_source", "python_bytecode", "elf_executable", "elf_shared_object")):
+            _require(node.id in reachable, CP_BOOT_V3_BINDING, "executable graph code node is unreachable")
+    for derivation in derivations:
+        derivation_id = _graph_derivation_id_v3(derivation.derivation_sha256)
+        expected_inputs = tuple(_graph_file_id_v3(item.image, item.path) for item in derivation.inputs)
+        actual_inputs = tuple(edge.to_id for edge in sorted((edge for edge in edges if edge.kind == "jit_input" and edge.from_id == derivation_id), key=lambda edge: edge.ordinal))
+        _require(actual_inputs == expected_inputs, CP_BOOT_V3_BINDING, "executable graph JIT input order disagrees")
+        invokes = [edge for edge in edges if edge.kind == "jit_invoke" and edge.to_id == derivation_id]
+        _require(len(invokes) == 1, CP_BOOT_V3_BINDING, "executable graph JIT invocation disagrees")
+    _require(not derivations or all(any(edge.kind == "jit_output" and edge.from_id == _graph_derivation_id_v3(item.derivation_sha256) for edge in edges) for item in derivations), CP_BOOT_V3_BINDING, "executable graph JIT output is missing")
+    return ExecutableGraphSnapshotV3(_GRAPH_SCHEMA_V3, 40, expected_entrypoints, nodes, aliases, tuple((*startup_controls, *loading_controls)), declarations, edges, tuple(source_by_ref[key] for key in sorted(source_by_ref)))
+
+
 def _predicate5_snapshot_v3(
     contract: "BootContractV3", parsed: ParsedPredecessorsV3,
     bootstrap_source: LaunchSourceProjectionV3,
@@ -987,7 +1749,11 @@ def _predicate5_snapshot_v3(
     if contract.execution_mode == "python_no_jit":
         _require(not ({"compiler", "compiler_source", "jit_cache"} & tags) and not raw_derivations and not raw_outputs and not raw_selectors, CP_BOOT_V3_BINDING, "no-JIT predicate admits compiler or cache authority")
         _require(not any(item.path == "/run/spp-jit" for item in eligible), CP_BOOT_V3_BINDING, "no-JIT predicate admits workspace")
-        return Predicate5SnapshotV3(contract.execution_mode, contract.cache_policy, closure.schema, _KAT_SHA256, _OBSERVER_SHA256, _PYTHON_ROOTS, _NATIVE_LOADER_ROOTS, bootstrap_source, closure.controller_bootstrap_cache, closure.role_bootstrap_cache, controls, eligible, (), ())
+        graph = _executable_graph_snapshot_v3(
+            closure=closure, parsed=parsed, eligible=eligible, controls=controls, derivations=(), selectors=(),
+            raw_derivations=raw_derivations,
+        )
+        return Predicate5SnapshotV3(contract.execution_mode, contract.cache_policy, closure.schema, _KAT_SHA256, _OBSERVER_SHA256, _PYTHON_ROOTS, _NATIVE_LOADER_ROOTS, bootstrap_source, closure.controller_bootstrap_cache, closure.role_bootstrap_cache, controls, eligible, (), (), graph)
     _require({"compiler", "compiler_source"} <= tags and raw_derivations and len(raw_derivations) == len(raw_outputs) and (len(raw_selectors) == len(raw_derivations) if contract.cache_policy == "measured_read_only" else not raw_selectors), CP_BOOT_V3_BINDING, "JIT predicate lacks compiler, source, outputs, or selectors")
     eligible_by_path = {item.path: item for item in eligible}
     snapshots: list[JitDerivationSnapshotV3] = []
@@ -1029,7 +1795,11 @@ def _predicate5_snapshot_v3(
         else:
             _require(selector_record is None and expected_path not in eligible_by_path, CP_BOOT_V3_BINDING, "ephemeral JIT admits a preexisting cache output")
         snapshots.append(JitDerivationSnapshotV3(digest, compiler["input_id"], compiler["sha256"], loader["input_id"], loader["sha256"], tuple(argv_env["compiler_argv"]), tuple(argv_env["loader_argv"]), tuple((item[0], item[1]) for item in argv_env["environment"]), tuple(typed), output["output_name"], output["relative_path"], output["sha256"], output["size_bytes"], output["mode"], record["cache_policy"]))
-    return Predicate5SnapshotV3(contract.execution_mode, contract.cache_policy, closure.schema, _KAT_SHA256, _OBSERVER_SHA256, _PYTHON_ROOTS, _NATIVE_LOADER_ROOTS, bootstrap_source, closure.controller_bootstrap_cache, closure.role_bootstrap_cache, controls, eligible, tuple(snapshots), tuple(selectors))
+    graph = _executable_graph_snapshot_v3(
+        closure=closure, parsed=parsed, eligible=eligible, controls=controls,
+        derivations=tuple(snapshots), selectors=tuple(selectors), raw_derivations=raw_derivations,
+    )
+    return Predicate5SnapshotV3(contract.execution_mode, contract.cache_policy, closure.schema, _KAT_SHA256, _OBSERVER_SHA256, _PYTHON_ROOTS, _NATIVE_LOADER_ROOTS, bootstrap_source, closure.controller_bootstrap_cache, closure.role_bootstrap_cache, controls, eligible, tuple(snapshots), tuple(selectors), graph)
 
 
 def validate_semantic_conjunction_v3(

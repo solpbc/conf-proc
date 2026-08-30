@@ -132,6 +132,21 @@ _INDEPENDENT_TYPE_TAGS = {
     boot_v3.semantics.JitInputSnapshotV3: "jit_input",
     boot_v3.semantics.JitDerivationSnapshotV3: "jit_derivation",
     boot_v3.semantics.CacheSelectorSnapshotV3: "cache_selector",
+    boot_v3.semantics.ExecutableGraphMeasuredFileNodeSnapshotV3: "graph_file",
+    boot_v3.semantics.ExecutableGraphMeasuredDirectoryNodeSnapshotV3: "graph_directory",
+    boot_v3.semantics.ExecutableGraphJitDerivationNodeSnapshotV3: "graph_derivation",
+    boot_v3.semantics.ExecutableGraphJitOutputNodeSnapshotV3: "graph_output",
+    boot_v3.semantics.ExecutableGraphAliasRowV3: "graph_alias",
+    boot_v3.semantics.ExecutableGraphPythonLoaderRowV3: "python_loader",
+    boot_v3.semantics.ExecutableGraphPythonLoaderDetailsSnapshotV3: "python_loader_details",
+    boot_v3.semantics.ExecutableGraphPythonStartupControlRowV3: "python_startup_control",
+    boot_v3.semantics.ExecutableGraphPythonLoadingControlRowV3: "python_loading_control",
+    boot_v3.semantics.ExecutableGraphElfControlValueV3: "elf_value",
+    boot_v3.semantics.ExecutableGraphElfControlRowV3: "elf_control",
+    boot_v3.semantics.ExecutableGraphSourceProjectionV3: "graph_source",
+    boot_v3.semantics.ExecutableGraphDeclarationRowV3: "graph_declaration",
+    boot_v3.semantics.ExecutableGraphEdgeRowV3: "graph_edge",
+    boot_v3.semantics.ExecutableGraphSnapshotV3: "executable_graph",
     boot_v3.Predicate5SnapshotV3: "predicate5",
     boot_v3.tables.ControlValueRuleV3: "control_rule",
     boot_v3.tables.ControlInventoryRowV3: "control_row",
@@ -203,7 +218,7 @@ class BootBindingIntegritySelftest(unittest.TestCase):
         independent = _independent_fingerprint(binding)
         self.assertEqual(
             independent.hex(),
-            "ea046629df5ea4833b6d4084aecc45c2900fa52d447316a637c127cb603d3f71",
+            "8288c823844ced6e4105388cc4cea4df54cbec137c87626225bf24c5cc61b135",
         )
         record = boot_v3._ISSUED_BOOT_BINDINGS_V3.records[id(binding)]
         self.assertEqual(record.fingerprint, independent)

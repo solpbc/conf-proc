@@ -41,6 +41,87 @@ def _parsed_contract(docs: dict[str, bytes]) -> object:
 
 
 class BootV3Predicate5Selftest(unittest.TestCase):
+    def test_executable_graph_shape_alias_and_relation_mutations_are_rejected(self) -> None:
+        docs, raw = _mutated_docs()
+        graph = raw["execution_closure"]["executable_graph"]
+        graph["alias_hop_limit"] = True
+        _commit_contract(docs, raw)
+        with self.assertRaisesRegex(ApplianceErrorV3, CP_BOOT_V3_SCHEMA):
+            _parsed_contract(docs)
+
+        docs, raw = _mutated_docs()
+        graph = raw["execution_closure"]["executable_graph"]
+        graph["controls"][0]["phase"] = "role_pre"
+        _commit_contract(docs, raw)
+        with self.assertRaisesRegex(ApplianceErrorV3, CP_BOOT_V3_BINDING):
+            boot.bind_boot_inputs_v3(contract=_parsed_contract(docs), **docs)
+
+        for mutation in ("hop_41", "dangling", "cycle", "cross_image"):
+            with self.subTest(alias_mutation=mutation):
+                docs, raw = _mutated_docs()
+                alias = raw["execution_closure"]["executable_graph"]["aliases"][0]
+                if mutation == "hop_41":
+                    alias["hop_count"] = 41
+                elif mutation == "dangling":
+                    alias["resolved_id"] = "file:runtime-policy:/missing"
+                elif mutation == "cycle":
+                    alias["chain"] = [alias["path"], alias["path"]]
+                    alias["hop_count"] = 2
+                else:
+                    alias["image"] = "models"
+                _commit_contract(docs, raw)
+                with self.assertRaisesRegex(ApplianceErrorV3, CP_BOOT_V3_SCHEMA if mutation in ("hop_41", "cycle") else CP_BOOT_V3_BINDING):
+                    boot.bind_boot_inputs_v3(contract=_parsed_contract(docs), **docs)
+
+    def test_executable_graph_every_edge_kind_rejects_reversal(self) -> None:
+        docs, raw = _mutated_docs()
+        graph = raw["execution_closure"]["executable_graph"]
+        kinds = {edge["kind"] for edge in graph["edges"]}
+        self.assertEqual(kinds, {
+            "python_script", "python_import", "elf_interpreter", "elf_needed", "elf_search",
+            "dlopen", "jit_invoke", "jit_compiler", "jit_loader", "jit_input", "jit_output",
+        })
+        for kind in sorted(kinds):
+            with self.subTest(kind=kind):
+                docs, raw = _mutated_docs()
+                graph = raw["execution_closure"]["executable_graph"]
+                edge = next(row for row in graph["edges"] if row["kind"] == kind)
+                edge["from_id"], edge["to_id"] = edge["to_id"], edge["from_id"]
+                edge["resolved_id"] = edge["to_id"]
+                edge["id"] = semantics._graph_edge_id_v3(
+                    kind=edge["kind"], from_id=edge["from_id"], to_id=edge["to_id"],
+                    order_group=edge["order_group"], ordinal=edge["ordinal"],
+                    requested_path=edge["requested_path"], resolved_id=edge["resolved_id"],
+                    alias_chain=tuple(edge["alias_chain"]), declaration_kind=edge["declaration_kind"],
+                    declaration_ref=edge["declaration_ref"],
+                )
+                graph["edges"].sort(key=lambda row: row["id"].encode("utf-8"))
+                _commit_contract(docs, raw)
+                with self.assertRaisesRegex(ApplianceErrorV3, CP_BOOT_V3_BINDING):
+                    boot.bind_boot_inputs_v3(contract=_parsed_contract(docs), **docs)
+
+    def test_executable_graph_declaration_and_node_denominators_are_closed(self) -> None:
+        docs, raw = _mutated_docs()
+        graph = raw["execution_closure"]["executable_graph"]
+        graph["declarations"][0]["owner_id"] = graph["declarations"][0]["target_id"]
+        declaration = graph["declarations"][0]
+        declaration["id"] = semantics._graph_declaration_id_v3(
+            kind=declaration["kind"], owner_id=declaration["owner_id"], order_group=declaration["order_group"],
+            ordinal=declaration["ordinal"], requested_path=declaration["requested_path"],
+            target_id=declaration["target_id"], alias_chain=tuple(declaration["alias_chain"]),
+        )
+        graph["declarations"].sort(key=lambda row: row["id"].encode("utf-8"))
+        _commit_contract(docs, raw)
+        with self.assertRaisesRegex(ApplianceErrorV3, CP_BOOT_V3_BINDING):
+            boot.bind_boot_inputs_v3(contract=_parsed_contract(docs), **docs)
+
+        docs, raw = _mutated_docs()
+        graph = raw["execution_closure"]["executable_graph"]
+        graph["nodes"].append(dict(graph["nodes"][0]))
+        _commit_contract(docs, raw)
+        with self.assertRaisesRegex(ApplianceErrorV3, CP_BOOT_V3_BINDING):
+            boot.bind_boot_inputs_v3(contract=_parsed_contract(docs), **docs)
+
     def test_closed_no_jit_and_two_jit_cache_modes_bind(self) -> None:
         for kwargs, expected_derivations in (
             ({}, 0),

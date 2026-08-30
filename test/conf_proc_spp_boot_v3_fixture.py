@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import posixpath
 import sys
 from pathlib import Path
 
@@ -57,6 +58,52 @@ _CONTROLLER_SOURCE = "/usr/lib/spp/conf_proc_spp_init.py"
 
 def _sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def _graph_file_id(image: str, path: str) -> str:
+    return f"file:{image}:{path}"
+
+
+def _graph_directory_id(image: str, path: str) -> str:
+    return f"dir:{image}:{path}"
+
+
+def _graph_derivation_id(digest: str) -> str:
+    return "derivation:" + digest
+
+
+def _graph_output_id(digest: str, output_name: str) -> str:
+    return f"jit:{digest}:{output_name}"
+
+
+def _frame(value: bytes) -> bytes:
+    return len(value).to_bytes(8, "big") + value
+
+
+def _source_ref(*, source_kind: str, phase: str | None, kind: str, ordinal: int, payload: object) -> str:
+    material = {
+        "schema": "sol-spp-executable-graph-source/v1", "source_kind": source_kind,
+        "phase": phase, "kind": kind, "ordinal": ordinal, "payload": payload,
+    }
+    return "source:" + source_kind + ":" + _sha256(
+        b"sol-spp-executable-graph-source/v1\0" + _frame(canonical_dumps(material)),
+    )
+
+
+def _declaration_id(*, kind: str, owner_id: str, order_group: str, ordinal: int, requested_path: str | None, target_id: str, alias_chain: list[str]) -> str:
+    return _sha256(canonical_dumps({
+        "kind": kind, "owner_id": owner_id, "order_group": order_group, "ordinal": ordinal,
+        "requested_path": requested_path, "target_id": target_id, "alias_chain": alias_chain,
+    }))
+
+
+def _edge_id(*, kind: str, from_id: str, to_id: str, order_group: str, ordinal: int, requested_path: str | None, resolved_id: str, alias_chain: list[str], declaration_kind: str, declaration_ref: str) -> str:
+    return _sha256(canonical_dumps({
+        "kind": kind, "from_id": from_id, "to_id": to_id, "order_group": order_group,
+        "ordinal": ordinal, "requested_path": requested_path, "resolved_id": resolved_id,
+        "alias_chain": alias_chain, "declaration_kind": declaration_kind,
+        "declaration_ref": declaration_ref,
+    }))
 
 
 def _startup_kat_v3() -> dict[str, object]:
@@ -129,6 +176,168 @@ def _eligible_records_v3(docs: dict[str, bytes]) -> list[dict[str, object]]:
     return records
 
 
+def _executable_graph_v3(
+    docs: dict[str, bytes], *, jit_record: dict[str, object] | None,
+    cache_policy: str, eligible: list[dict[str, object]], controls: list[dict[str, object]],
+) -> dict[str, object]:
+    """Build the fixture's declarative graph from its already-created predecessor rows."""
+
+    policy = canonical_loads(docs["policy_bytes"])
+    bootstrap = _bootstrap_v3()
+    observation = _startup_kat_v3()["capture"]["observation"]
+    assert type(observation) is dict
+    by_path = {item["path"]: item for item in eligible}
+    image = "runtime-policy"
+    file_id = lambda path: _graph_file_id(image, path)
+    directory_id = lambda path: _graph_directory_id(image, path)
+    entry_paths = (
+        "/usr/bin/spp", "/usr/bin/python3.10", _CONTROLLER_SOURCE, _BOOTSTRAP_SOURCE,
+        *(path for _, path in _ROLE_SOURCES),
+    )
+    entrypoints = [file_id(path) for path in entry_paths]
+    required_tags = {
+        "launch_executable", "importable_module", "python_loading_control", "native_extension",
+        "dynamic_library", "compiler", "compiler_source", "model_code", "plugin", "jit_cache",
+    }
+    noncode_paths: set[str] = set()
+    if jit_record is not None:
+        for row in jit_record["inputs"]:
+            assert type(row) is dict
+            if row["kind"] in ("configuration", "model"):
+                noncode_paths.add(row["path"])
+    nodes: list[dict[str, object]] = []
+    for row in eligible:
+        if required_tags & set(row["semantic_tags"]) or row["path"] in noncode_paths:
+            nodes.append({
+                "id": file_id(row["path"]), "kind": "measured_file", "image": row["image"],
+                "path": row["path"], "sha256": row["sha256"], "size_bytes": row["size_bytes"],
+                "mode": row["mode"], "content_kind": row["content_kind"],
+                "semantic_tags": row["semantic_tags"], "input_id": row["input_id"],
+            })
+    root_paths = {
+        "/usr/lib/python3.10", "/usr/lib/python3.10/lib-dynload", "/usr/lib/spp",
+        "/usr/lib/spp/vendor", "/usr/lib/spp/lib", "/usr/lib/x86_64-linux-gnu",
+    }
+    for row in policy["images"][image]["nodes"]:
+        if row["node_type"] == "directory" and row["path"] in root_paths:
+            nodes.append({"id": directory_id(row["path"]), "kind": "measured_directory", "image": image, "path": row["path"], "mode": row["mode"], "uid": row["uid"], "gid": row["gid"]})
+    derivation_digest: str | None = None
+    if jit_record is not None:
+        derivation_digest = jit_derivation_sha256_v3(jit_record)
+        output = jit_record["output"]
+        assert type(output) is dict
+        output_path = (
+            "/usr/lib/spp/jit-cache/" + derivation_digest + "/" + output["output_name"]
+            if cache_policy == "measured_read_only"
+            else "/run/spp-jit/" + derivation_digest + "/" + output["output_name"]
+        )
+        nodes.extend((
+            {"id": _graph_derivation_id(derivation_digest), "kind": "jit_derivation", "derivation_sha256": derivation_digest},
+            {"id": _graph_output_id(derivation_digest, output["output_name"]), "kind": "jit_output", "derivation_sha256": derivation_digest, "output_name": output["output_name"], "path": output_path, "sha256": output["sha256"], "size_bytes": output["size_bytes"], "mode": output["mode"]},
+        ))
+    nodes.sort(key=lambda row: row["id"].encode("utf-8"))
+
+    aliases: list[dict[str, object]] = []
+    for row in policy["images"][image]["nodes"]:
+        if row["node_type"] != "symlink":
+            continue
+        path = row["path"]
+        target = row["target"]
+        assert type(target) is str
+        terminal = posixpath.normpath(target if target.startswith("/") else posixpath.join(posixpath.dirname(path), target))
+        resolved_id = directory_id(terminal) if terminal in root_paths else file_id(terminal)
+        aliases.append({"image": image, "path": path, "target": target, "resolved_id": resolved_id, "hop_count": 1, "chain": [path]})
+    aliases.sort(key=lambda row: (row["image"], row["path"]))
+
+    graph_controls: list[dict[str, object]] = []
+
+    def add_startup(kind: str, phase: str, ordinal: int, payload: object, declaration_kind: str, *, identity: str | None = None, path: str | None = None, path_kind: str | None = None, finder: str | None = None, loader_details: object = None) -> None:
+        graph_controls.append({
+            "kind": kind, "phase": phase, "ordinal": ordinal, "identity": identity,
+            "path": path, "path_kind": path_kind, "finder": finder,
+            "loader_details": loader_details, "declaration_kind": declaration_kind,
+            "declaration_ref": _source_ref(source_kind=declaration_kind, phase=phase, kind=kind, ordinal=ordinal, payload=payload),
+        })
+
+    for phase, cache_key, source_kind in (
+        ("controller_pre", "controller_pre_importer_cache", "controller_cache_projection"),
+        ("role_pre", "role_pre_importer_cache", "role_cache_projection"),
+    ):
+        for ordinal, path in enumerate(observation["path"]):
+            add_startup("python_search_path", phase, ordinal, {"path": path}, "startup_receipt", path=path, path_kind="denied_zip" if path == "/usr/lib/python310.zip" else "measured_directory")
+        for ordinal, identity in enumerate(observation["meta_path"]):
+            add_startup("python_meta_path", phase, ordinal, {"identity": identity}, "startup_receipt", identity=identity)
+        for ordinal, hook in enumerate(observation["path_hooks"]):
+            add_startup("python_path_hook", phase, ordinal, hook, "startup_receipt", identity=hook["identity"], loader_details=hook["loader_details"])
+        for ordinal, cache in enumerate(bootstrap[cache_key]):
+            path = cache["path"]
+            add_startup("python_importer_cache", phase, ordinal, cache, source_kind, path=path, path_kind="denied_zip" if path == "/usr/lib/python310.zip" else ("measured_file" if cache["finder"] is None else "measured_directory"), finder=cache["finder"])
+    for ordinal, path in enumerate(bootstrap["post_path"]):
+        add_startup("python_search_path", "post_bootstrap", ordinal, {"path": path}, "bootstrap_projection", path=path, path_kind="measured_directory")
+    for ordinal, identity in enumerate(bootstrap["post_meta_path"]):
+        add_startup("python_meta_path", "post_bootstrap", ordinal, {"identity": identity}, "bootstrap_projection", identity=identity)
+    for ordinal, hook in enumerate(bootstrap["post_path_hooks"]):
+        add_startup("python_path_hook", "post_bootstrap", ordinal, hook, "bootstrap_projection", identity=hook["identity"], loader_details=hook["loader_details"])
+    for ordinal, cache in enumerate(bootstrap["post_importer_cache"]):
+        add_startup("python_importer_cache", "post_bootstrap", ordinal, cache, "bootstrap_projection", path=cache["path"], path_kind="measured_file" if cache["finder"] is None else "measured_directory", finder=cache["finder"])
+    for ordinal, control in enumerate(controls):
+        source_payload = {key: control[key] for key in ("path", "kind", "read_only", "contributed_paths", "imports", "hooks")}
+        graph_controls.append({
+            "kind": "python_" + control["kind"], "phase": "runtime_startup", "ordinal": ordinal,
+            "owner_id": file_id(control["path"]), "read_only": control["read_only"],
+            "contributed_paths": control["contributed_paths"], "imports": control["imports"], "hooks": control["hooks"],
+            "declaration_kind": "loader_control",
+            "declaration_ref": _source_ref(source_kind="loader_control", phase=None, kind=control["kind"], ordinal=ordinal, payload=source_payload),
+        })
+
+    declarations: list[dict[str, object]] = []
+    edges: list[dict[str, object]] = []
+
+    def add_source_edge(kind: str, from_id: str, to_id: str, order_group: str, ordinal: int, requested_path: str | None, payload: object, source_kind: str, alias_chain: list[str] | None = None, source_ordinal: int | None = None) -> None:
+        chain = [] if alias_chain is None else alias_chain
+        reference = _source_ref(source_kind=source_kind, phase=None, kind=kind, ordinal=ordinal if source_ordinal is None else source_ordinal, payload=payload)
+        edges.append({"id": _edge_id(kind=kind, from_id=from_id, to_id=to_id, order_group=order_group, ordinal=ordinal, requested_path=requested_path, resolved_id=to_id, alias_chain=chain, declaration_kind=source_kind, declaration_ref=reference), "kind": kind, "from_id": from_id, "to_id": to_id, "order_group": order_group, "ordinal": ordinal, "requested_path": requested_path, "resolved_id": to_id, "alias_chain": chain, "declaration_kind": source_kind, "declaration_ref": reference})
+
+    def add_declarative_edge(kind: str, owner_id: str, target_id: str, order_group: str, ordinal: int, requested_path: str | None, alias_chain: list[str] | None = None) -> None:
+        chain = [] if alias_chain is None else alias_chain
+        identifier = _declaration_id(kind=kind, owner_id=owner_id, order_group=order_group, ordinal=ordinal, requested_path=requested_path, target_id=target_id, alias_chain=chain)
+        declarations.append({"id": identifier, "kind": kind, "owner_id": owner_id, "order_group": order_group, "ordinal": ordinal, "requested_path": requested_path, "target_id": target_id, "alias_chain": chain})
+        edges.append({"id": _edge_id(kind=kind, from_id=owner_id, to_id=target_id, order_group=order_group, ordinal=ordinal, requested_path=requested_path, resolved_id=target_id, alias_chain=chain, declaration_kind="executable_graph", declaration_ref=identifier), "kind": kind, "from_id": owner_id, "to_id": target_id, "order_group": order_group, "ordinal": ordinal, "requested_path": requested_path, "resolved_id": target_id, "alias_chain": chain, "declaration_kind": "executable_graph", "declaration_ref": identifier})
+
+    interpreter = by_path["/usr/bin/python3.10"]
+    for ordinal, path in enumerate((_CONTROLLER_SOURCE, _BOOTSTRAP_SOURCE, *(path for _, path in _ROLE_SOURCES))):
+        source = by_path[path]
+        payload = {"interpreter_path": interpreter["path"], "source_input_id": source["input_id"], "source_path": source["path"], "source_sha256": source["sha256"]}
+        reference = _source_ref(source_kind="process_authority", phase=None, kind="python_script", ordinal=ordinal, payload=payload)
+        add_source_edge("python_script", file_id(interpreter["path"]), file_id(path), "python-script:" + reference, 0, path, payload, "process_authority", source_ordinal=ordinal)
+    alias_file = "/usr/lib/spp/conf_proc_spp_role_bootstrap_alias.py"
+    add_declarative_edge("python_import", file_id(_CONTROLLER_SOURCE), file_id(_BOOTSTRAP_SOURCE), "python-import:" + file_id(_CONTROLLER_SOURCE) + ":post_bootstrap", 0, alias_file, [alias_file])
+    alias_dir = "/lib/x86_64-linux-gnu"
+    add_declarative_edge("elf_search", file_id("/usr/bin/spp"), directory_id("/usr/lib/x86_64-linux-gnu"), "elf-search:" + file_id("/usr/bin/spp"), 0, alias_dir, [alias_dir])
+    if jit_record is not None:
+        assert derivation_digest is not None
+        derivation_id = _graph_derivation_id(derivation_digest)
+        output = jit_record["output"]
+        assert type(output) is dict
+        compiler_path = "/usr/lib/spp/bin/triton-compile"
+        add_declarative_edge("elf_interpreter", file_id(compiler_path), file_id("/usr/lib/x86_64-linux-gnu/ld-spp"), "elf-interpreter:" + file_id(compiler_path), 0, "/usr/lib/x86_64-linux-gnu/ld-spp")
+        add_declarative_edge("elf_needed", file_id(compiler_path), file_id("/usr/lib/spp/lib/libtriton.so"), "elf-needed:" + file_id(compiler_path), 0, "/usr/lib/spp/lib/libtriton.so")
+        add_declarative_edge("dlopen", file_id(compiler_path), file_id("/usr/lib/spp/lib/plugin.so"), "dlopen:" + file_id(compiler_path), 0, "/usr/lib/spp/lib/plugin.so")
+        add_declarative_edge("jit_invoke", file_id("/usr/lib/spp/conf_proc_spp_inference.py"), derivation_id, "jit-invoke:" + file_id("/usr/lib/spp/conf_proc_spp_inference.py"), 0, None)
+        compiler = jit_record["compiler"]
+        loader = jit_record["loader"]
+        assert type(compiler) is dict and type(loader) is dict
+        add_source_edge("jit_compiler", derivation_id, file_id(compiler["path"]), "jit-compiler:" + derivation_id, 0, None, compiler, "jit_derivation")
+        add_source_edge("jit_loader", derivation_id, file_id(loader["path"]), "jit-loader:" + derivation_id, 0, None, loader, "jit_derivation")
+        for ordinal, source in enumerate(jit_record["inputs"]):
+            assert type(source) is dict
+            add_source_edge("jit_input", derivation_id, file_id(source["path"]), "jit-input:" + derivation_id, ordinal, None, source, "jit_derivation")
+        add_source_edge("jit_output", derivation_id, _graph_output_id(derivation_digest, output["output_name"]), "jit-output:" + derivation_id, 0, None, output, "jit_derivation")
+    declarations.sort(key=lambda row: row["id"].encode("utf-8"))
+    edges.sort(key=lambda row: row["id"].encode("utf-8"))
+    return {"schema": "sol-spp-executable-graph/v1", "alias_hop_limit": 40, "entrypoints": entrypoints, "nodes": nodes, "aliases": aliases, "controls": graph_controls, "declarations": declarations, "edges": edges}
+
+
 def _closure_v3(docs: dict[str, bytes], *, execution_mode: str, cache_policy: str, jit_record: dict[str, object] | None = None) -> dict[str, object]:
     eligible = _eligible_records_v3(docs)
     controls: list[dict[str, object]] = []
@@ -155,6 +364,9 @@ def _closure_v3(docs: dict[str, bytes], *, execution_mode: str, cache_policy: st
         result["jit_derivations"] = [jit_record]
         result["expected_outputs"] = [{"derivation_sha256": digest, **output}]
         result["cache_selectors"] = ([{"derivation_sha256": digest, "output_name": output["output_name"], "path": "/usr/lib/spp/jit-cache/" + digest + "/" + output["output_name"]}] if cache_policy == "measured_read_only" else [])
+    result["executable_graph"] = _executable_graph_v3(
+        docs, jit_record=jit_record, cache_policy=cache_policy, eligible=eligible, controls=controls,
+    )
     return result
 
 
@@ -168,6 +380,32 @@ def refresh_v3_contract_bindings(docs: dict[str, bytes]) -> None:
     plan = canonical_loads(docs["module_plan_bytes"])
     plan["boot_contract_sha256"] = _sha256(docs["boot_contract_bytes"])
     docs["module_plan_bytes"] = canonical_dumps(plan)
+
+
+def _runtime_closure_entries(lock: dict[str, object]) -> list[dict[str, object]]:
+    entries: list[dict[str, object]] = []
+    for item in lock["inputs"]:
+        for placement in item["placements"]:
+            node_type = placement["node_type"]
+            is_file = node_type == "file"
+            entries.append({
+                "path": placement["path"], "node_type": node_type, "mode": placement["mode"],
+                "uid": placement["uid"], "gid": placement["gid"],
+                "size_bytes": item["size_bytes"] if is_file else 0,
+                "sha256": item["sha256"] if is_file else None,
+                "symlink_target": placement["target"], "hardlink_group": None,
+                "xattrs": [], "capabilities": [], "logical_role": item["role"],
+                "provenance": {"scheme": item["source_retrieval_scheme"], "identity": item["source_retrieval_identity"], "immutable_ref": item["source_retrieval_immutable_ref"]},
+                "root_lock_input_id": item["id"] if is_file else None,
+            })
+    return sorted(entries, key=lambda item: item["path"])
+
+
+def _set_runtime_closure(docs: dict[str, bytes], lock: dict[str, object]) -> None:
+    docs["runtime_closure_bytes"] = canonical_dumps({
+        "schema": "conf-proc-runtime-closure/v1", "status": "declared_unverified",
+        "entries": _runtime_closure_entries(lock),
+    })
 
 
 def build_v3_fixture(*, execution_mode: str = "python_no_jit", cache_policy: str = "absent") -> tuple[dict[str, bytes], object]:
@@ -205,6 +443,7 @@ def build_v3_fixture(*, execution_mode: str = "python_no_jit", cache_policy: str
             ("runtime-jit-model", b"model bytes", "/usr/lib/spp/models/model.bin", 0o444, "model"),
             ("runtime-jit-config", b"{}", "/usr/lib/spp/config/triton.json", 0o444, "config"),
             ("runtime-jit-native", b"native library", "/usr/lib/spp/lib/libtriton.so", 0o555, "executable"),
+            ("runtime-jit-elf-interpreter", b"SPP dynamic linker", "/usr/lib/x86_64-linux-gnu/ld-spp", 0o555, "executable"),
         ))
     for input_id, data, path, mode, content_class in service_inputs:
         placement = _V1._placement("runtime-policy", path, input_id)
@@ -213,6 +452,23 @@ def build_v3_fixture(*, execution_mode: str = "python_no_jit", cache_policy: str
         policy["images"]["runtime-policy"]["nodes"].append({
             "path": path, "node_type": "file", "mode": mode, "uid": 0, "gid": 0,
             "xattrs": [], "source_input_id": input_id, "target": None, "content_class": content_class,
+        })
+    for input_id, path, node_type, target in (
+        ("runtime-dir-python310", "/usr/lib/python3.10", "directory", None),
+        ("runtime-dir-python310-lib-dynload", "/usr/lib/python3.10/lib-dynload", "directory", None),
+        ("runtime-dir-spp", "/usr/lib/spp", "directory", None),
+        ("runtime-dir-spp-vendor", "/usr/lib/spp/vendor", "directory", None),
+        ("runtime-dir-spp-lib", "/usr/lib/spp/lib", "directory", None),
+        ("runtime-dir-usr-lib", "/usr/lib/x86_64-linux-gnu", "directory", None),
+        ("runtime-alias-role-bootstrap", "/usr/lib/spp/conf_proc_spp_role_bootstrap_alias.py", "symlink", "conf_proc_spp_role_bootstrap.py"),
+        ("runtime-alias-usr-merge", "/lib/x86_64-linux-gnu", "symlink", "/usr/lib/x86_64-linux-gnu"),
+    ):
+        placement = _V1._placement("runtime-policy", path, input_id)
+        placement.update({"node_type": node_type, "mode": 0o555, "source_input_id": None, "target": target})
+        lock["inputs"].append(_V1._record(input_id, "runtime_tree_input", ("fixture:" + input_id).encode("ascii"), [placement]))
+        policy["images"]["runtime-policy"]["nodes"].append({
+            "path": path, "node_type": node_type, "mode": 0o555, "uid": 0, "gid": 0,
+            "xattrs": [], "source_input_id": None, "target": target, "content_class": None,
         })
     lock["inputs"].sort(key=lambda item: item["id"])
 
@@ -242,21 +498,7 @@ def build_v3_fixture(*, execution_mode: str = "python_no_jit", cache_policy: str
     policy_input["source_retrieval_immutable_ref"] = "sha256:" + policy_input["sha256"]
     docs["root_lock_bytes"] = canonical_dumps(lock)
 
-    closure_entries = []
-    for item in lock["inputs"]:
-        for placement in item["placements"]:
-            closure_entries.append({
-                "path": placement["path"], "node_type": placement["node_type"], "mode": placement["mode"],
-                "uid": placement["uid"], "gid": placement["gid"], "size_bytes": item["size_bytes"],
-                "sha256": item["sha256"], "symlink_target": placement["target"], "hardlink_group": None,
-                "xattrs": [], "capabilities": [], "logical_role": item["role"],
-                "provenance": {"scheme": item["source_retrieval_scheme"], "identity": item["source_retrieval_identity"], "immutable_ref": item["source_retrieval_immutable_ref"]},
-                "root_lock_input_id": item["id"],
-            })
-    docs["runtime_closure_bytes"] = canonical_dumps({
-        "schema": "conf-proc-runtime-closure/v1", "status": "declared_unverified",
-        "entries": sorted(closure_entries, key=lambda item: item["path"]),
-    })
+    _set_runtime_closure(docs, lock)
     images = tuple(
         _V1.ProvenanceV2ImageRecord(
             image_id, item["squashfs_sha256"], item["squashfs_size_bytes"],
@@ -314,11 +556,7 @@ def build_v3_fixture(*, execution_mode: str = "python_no_jit", cache_policy: str
             policy_input["size_bytes"] = len(docs["policy_bytes"])
             policy_input["source_retrieval_immutable_ref"] = "sha256:" + policy_input["sha256"]
             docs["root_lock_bytes"] = canonical_dumps(lock)
-            closure_entries = []
-            for item in lock["inputs"]:
-                for placement in item["placements"]:
-                    closure_entries.append({"path": placement["path"], "node_type": placement["node_type"], "mode": placement["mode"], "uid": placement["uid"], "gid": placement["gid"], "size_bytes": item["size_bytes"], "sha256": item["sha256"], "symlink_target": placement["target"], "hardlink_group": None, "xattrs": [], "capabilities": [], "logical_role": item["role"], "provenance": {"scheme": item["source_retrieval_scheme"], "identity": item["source_retrieval_identity"], "immutable_ref": item["source_retrieval_immutable_ref"]}, "root_lock_input_id": item["id"]})
-            docs["runtime_closure_bytes"] = canonical_dumps({"schema": "conf-proc-runtime-closure/v1", "status": "declared_unverified", "entries": sorted(closure_entries, key=lambda item: item["path"])})
+            _set_runtime_closure(docs, lock)
             docs["accepted_manifest_bytes"] = _V1.produce_provenance_v2(root_lock_bytes=docs["root_lock_bytes"], runtime_closure_bytes=docs["runtime_closure_bytes"], verity_rules_bytes=docs["verity_rules_bytes"], tcb_identity_bytes=docs["tcb_identity_bytes"], builder_source_bytes=docs["builder_source_bytes"], policy_bytes=docs["policy_bytes"], images=images, module_observations=modules, firmware_observations=firmware).manifest_bytes
     contract = {
         "schema": BOOT_CONTRACT_V3_SCHEMA,
