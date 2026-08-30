@@ -63,6 +63,24 @@ class BootV3Predicate5Selftest(unittest.TestCase):
             _parsed_contract(docs)
 
         docs, raw = _mutated_docs(execution_mode="python_no_jit", cache_policy="absent")
+        raw["execution_closure"]["bootstrap"]["pre_path_hooks"] = list(reversed(raw["execution_closure"]["bootstrap"]["pre_path_hooks"]))
+        with self.assertRaisesRegex(ApplianceErrorV3, CP_BOOT_V3_SCHEMA):
+            _commit_contract(docs, raw)
+            _parsed_contract(docs)
+
+        docs, raw = _mutated_docs(execution_mode="python_no_jit", cache_policy="absent")
+        raw["execution_closure"]["bootstrap"]["pre_path_hooks"] = []
+        with self.assertRaisesRegex(ApplianceErrorV3, CP_BOOT_V3_SCHEMA):
+            _commit_contract(docs, raw)
+            _parsed_contract(docs)
+
+        docs, raw = _mutated_docs(execution_mode="python_no_jit", cache_policy="absent")
+        raw["execution_closure"]["startup_kat"]["capture"]["argv"].remove("-S")
+        with self.assertRaisesRegex(ApplianceErrorV3, CP_BOOT_V3_SCHEMA):
+            _commit_contract(docs, raw)
+            _parsed_contract(docs)
+
+        docs, raw = _mutated_docs(execution_mode="python_no_jit", cache_policy="absent")
         raw["execution_closure"]["startup_kat"]["binary"]["sha256"] = "0" * 64
         with self.assertRaisesRegex(ApplianceErrorV3, CP_BOOT_V3_SCHEMA):
             _commit_contract(docs, raw)
@@ -77,6 +95,13 @@ class BootV3Predicate5Selftest(unittest.TestCase):
 
         docs, raw = _mutated_docs()
         raw["execution_closure"]["loader_controls"][0]["contributed_paths"] = ["/outside"]
+        _commit_contract(docs, raw)
+        contract = _parsed_contract(docs)
+        with self.assertRaisesRegex(ApplianceErrorV3, CP_BOOT_V3_BINDING):
+            boot.bind_boot_inputs_v3(contract=contract, **docs)
+
+        docs, raw = _mutated_docs()
+        raw["execution_closure"]["loader_controls"][0]["read_only"] = False
         _commit_contract(docs, raw)
         contract = _parsed_contract(docs)
         with self.assertRaisesRegex(ApplianceErrorV3, CP_BOOT_V3_BINDING):
@@ -101,6 +126,22 @@ class BootV3Predicate5Selftest(unittest.TestCase):
             boot.bind_boot_inputs_v3(contract=contract, **docs)
 
         docs, raw = _mutated_docs(execution_mode="python_no_jit", cache_policy="absent")
+        entries = {entry["path"]: entry for entry in raw["execution_closure"]["eligible_files"]}
+        entries["/usr/lib/spp/conf_proc_spp_inference.py"]["semantic_tags"].remove("launch_executable")
+        _commit_contract(docs, raw)
+        contract = _parsed_contract(docs)
+        with self.assertRaisesRegex(ApplianceErrorV3, CP_BOOT_V3_BINDING):
+            boot.bind_boot_inputs_v3(contract=contract, **docs)
+
+        docs, raw = _mutated_docs(execution_mode="python_no_jit", cache_policy="absent")
+        entries = {entry["path"]: entry for entry in raw["execution_closure"]["eligible_files"]}
+        entries["/usr/lib/spp/conf_proc_spp_role_bootstrap.py"]["semantic_tags"].remove("importable_module")
+        _commit_contract(docs, raw)
+        contract = _parsed_contract(docs)
+        with self.assertRaisesRegex(ApplianceErrorV3, CP_BOOT_V3_BINDING):
+            boot.bind_boot_inputs_v3(contract=contract, **docs)
+
+        docs, raw = _mutated_docs(execution_mode="python_no_jit", cache_policy="absent")
         raw["execution_closure"]["eligible_files"][0]["semantic_tags"].append("compiler")
         raw["execution_closure"]["eligible_files"][0]["semantic_tags"].sort()
         _commit_contract(docs, raw)
@@ -119,8 +160,23 @@ class BootV3Predicate5Selftest(unittest.TestCase):
         with self.assertRaisesRegex(ApplianceErrorV3, CP_BOOT_V3_SCHEMA):
             boot.bind_boot_inputs_v3(contract=contract, **docs)
 
+        docs, raw = _mutated_docs()
+        raw["execution_closure"]["jit_derivations"][0]["output"]["sha256"] = "0" * 64
+        _commit_contract(docs, raw)
+        contract = _parsed_contract(docs)
+        with self.assertRaisesRegex(ApplianceErrorV3, CP_BOOT_V3_SCHEMA):
+            boot.bind_boot_inputs_v3(contract=contract, **docs)
+
         docs, raw = _mutated_docs(execution_mode="python_jit_triton", cache_policy="measured_read_only")
         raw["execution_closure"]["cache_selectors"][0]["path"] = "/usr/lib/spp/jit-cache/not-derived/kernel.so"
+        _commit_contract(docs, raw)
+        contract = _parsed_contract(docs)
+        with self.assertRaisesRegex(ApplianceErrorV3, CP_BOOT_V3_SCHEMA):
+            boot.bind_boot_inputs_v3(contract=contract, **docs)
+
+        docs, raw = _mutated_docs()
+        raw["execution_closure"]["jit_derivations"][0]["output"]["output_name"] = "\u00e9.so"
+        raw["execution_closure"]["jit_derivations"][0]["output"]["relative_path"] = "\u00e9.so"
         _commit_contract(docs, raw)
         contract = _parsed_contract(docs)
         with self.assertRaisesRegex(ApplianceErrorV3, CP_BOOT_V3_SCHEMA):

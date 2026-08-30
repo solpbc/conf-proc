@@ -126,7 +126,7 @@ def _validate_startup_kat_v3(value: object) -> None:
     _require(observation["flags"] == {"dont_write_bytecode": 1, "ignore_environment": 1, "isolated": 1, "no_site": 1, "no_user_site": 1}, CP_BOOT_V3_SCHEMA, "startup KAT flags are invalid")
 
 
-def _validate_bootstrap_v3(value: object, rows: object) -> None:
+def _validate_bootstrap_v3(value: object, rows: object, startup_kat: object) -> None:
     required = {"source_path", "controller_entry", "role_map", "flags", "pre_path", "pre_meta_path", "pre_path_hooks", "pre_importer_cache", "denied_zip", "post_path", "post_meta_path", "post_path_hooks", "post_importer_cache"}
     _require(type(value) is dict and set(value) == required, CP_BOOT_V3_SCHEMA, "execution closure bootstrap fields are invalid")
     _require(value["source_path"] == "/usr/lib/spp/conf_proc_spp_role_bootstrap.py" and value["controller_entry"] == "/usr/lib/spp/conf_proc_spp_init.py", CP_BOOT_V3_SCHEMA, "execution closure bootstrap entries are invalid")
@@ -134,7 +134,19 @@ def _validate_bootstrap_v3(value: object, rows: object) -> None:
     _require(value["pre_path"] == ["/usr/lib/python310.zip", "/usr/lib/python3.10", "/usr/lib/python3.10/lib-dynload"] and value["denied_zip"] == "/usr/lib/python310.zip", CP_BOOT_V3_SCHEMA, "bootstrap pre-path is invalid")
     _require(value["post_path"] == list(_PYTHON_ROOTS) and value["post_importer_cache"] == [], CP_BOOT_V3_SCHEMA, "bootstrap post-path/cache is invalid")
     _require(value["pre_meta_path"] == ["_frozen_importlib.BuiltinImporter", "_frozen_importlib.FrozenImporter", "_frozen_importlib_external.PathFinder"] and value["post_meta_path"] == value["pre_meta_path"], CP_BOOT_V3_SCHEMA, "bootstrap meta path is invalid")
-    _require(type(value["pre_path_hooks"]) is list and type(value["post_path_hooks"]) is list and value["post_path_hooks"] == [value["pre_path_hooks"][1]], CP_BOOT_V3_SCHEMA, "bootstrap path hooks are invalid")
+    _require(type(startup_kat) is dict, CP_BOOT_V3_SCHEMA, "startup KAT is invalid")
+    capture = startup_kat.get("capture")
+    observation = capture.get("observation") if type(capture) is dict else None
+    expected_hooks = observation.get("path_hooks") if type(observation) is dict else None
+    _require(type(expected_hooks) is list and len(expected_hooks) == 2, CP_BOOT_V3_SCHEMA, "startup KAT path hooks are invalid")
+    _require(
+        type(value["pre_path_hooks"]) is list
+        and type(value["post_path_hooks"]) is list
+        and value["pre_path_hooks"] == expected_hooks
+        and value["post_path_hooks"] == [expected_hooks[1]],
+        CP_BOOT_V3_SCHEMA,
+        "bootstrap path hooks are invalid",
+    )
     _require(type(value["pre_importer_cache"]) is list and len(value["pre_importer_cache"]) == 4, CP_BOOT_V3_SCHEMA, "bootstrap importer cache is invalid")
     expected_cache = [
         {"path": "/usr/lib/python3.10", "finder": "_frozen_importlib_external.FileFinder"},
@@ -155,7 +167,7 @@ def parse_execution_closure_v3(raw: object) -> ExecutionClosureV3:
     _require(type(raw) is dict and set(raw) == _EXECUTION_CLOSURE_KEYS, CP_BOOT_V3_SCHEMA, "execution closure fields are invalid")
     _require(raw["schema"] == EXECUTION_CLOSURE_V3_SCHEMA, CP_BOOT_V3_SCHEMA, "execution closure schema is invalid")
     _validate_startup_kat_v3(raw["startup_kat"])
-    _validate_bootstrap_v3(raw["bootstrap"], raw["launch_rows"])
+    _validate_bootstrap_v3(raw["bootstrap"], raw["launch_rows"], raw["startup_kat"])
     _require(raw["import_roots"] == list(_PYTHON_ROOTS) and raw["native_loader_roots"] == list(_NATIVE_LOADER_ROOTS), CP_BOOT_V3_SCHEMA, "execution closure roots are invalid")
     arrays = ("loader_controls", "eligible_files", "jit_derivations", "expected_outputs", "cache_selectors")
     _require(all(type(raw[key]) is list for key in arrays), CP_BOOT_V3_SCHEMA, "execution closure collection is invalid")
@@ -285,6 +297,7 @@ class LaunchProjectionV3:
 @dataclass(frozen=True)
 class Stage2ControllerSnapshotV3:
     authority: tables.Stage2ControllerRowV3
+    source: LaunchSourceProjectionV3
     interpreter_source_input_id: str
     interpreter_sha256: str
     interpreter_size_bytes: int
@@ -359,6 +372,7 @@ class Predicate5SnapshotV3:
     observer_sha256: str
     import_roots: tuple[str, ...]
     native_loader_roots: tuple[str, ...]
+    bootstrap_source: LaunchSourceProjectionV3
     loader_controls: tuple[LoaderControlSnapshotV3, ...]
     eligible_files: tuple[EligibleFileSnapshotV3, ...]
     jit_derivations: tuple[JitDerivationSnapshotV3, ...]
@@ -451,43 +465,45 @@ def _launch_require(condition: bool, message: str) -> None:
     _require(condition, CP_BOOT_V3_LAUNCH_SUPERVISION, message)
 
 
-def _launch_source_projection_v3(parsed: ParsedPredecessorsV3, row: tables.LaunchRoleRowV3) -> LaunchSourceProjectionV3:
-    """Join one service source across lock, policy, manifest and runtime closure."""
+def _runtime_source_projection_v3(
+    parsed: ParsedPredecessorsV3, *, path: str, label: str,
+) -> LaunchSourceProjectionV3:
+    """Join one executable source across lock, policy, manifest and runtime closure."""
 
     lock_matches = [
         (item, placement)
         for item in parsed.lock.inputs
         for placement in item.placements
-        if placement.path == row.source_path and placement.node_type == "file"
+        if placement.path == path and placement.node_type == "file"
     ]
-    _launch_require(len(lock_matches) == 1, f"{row.role} source placement is not unique")
+    _launch_require(len(lock_matches) == 1, f"{label} source placement is not unique")
     lock_input, placement = lock_matches[0]
-    _launch_require(lock_input.role == "runtime_tree_input", f"{row.role} source is not a runtime_tree_input")
-    _launch_require(placement.source_input_id == lock_input.id, f"{row.role} lock source identity disagrees")
-    policy_nodes = [node for node in parsed.policy.images["runtime-policy"].nodes if node.path == row.source_path]
-    _launch_require(len(policy_nodes) == 1, f"{row.role} runtime policy source is not unique")
+    _launch_require(lock_input.role == "runtime_tree_input", f"{label} source is not a runtime_tree_input")
+    _launch_require(placement.source_input_id == lock_input.id, f"{label} lock source identity disagrees")
+    policy_nodes = [node for node in parsed.policy.images["runtime-policy"].nodes if node.path == path]
+    _launch_require(len(policy_nodes) == 1, f"{label} runtime policy source is not unique")
     policy_node = policy_nodes[0]
     _launch_require(
         policy_node.node_type == "file"
         and policy_node.source_input_id == lock_input.id
         and policy_node.mode == placement.mode
         and policy_node.content_class == "executable",
-        f"{row.role} runtime policy source disagrees",
+        f"{label} runtime policy source disagrees",
     )
-    manifest_entries = [item for item in parsed.manifest.raw["inventory"]["runtime-policy"] if item["path"] == row.source_path]
-    _launch_require(len(manifest_entries) == 1, f"{row.role} manifest source is not unique")
+    manifest_entries = [item for item in parsed.manifest.raw["inventory"]["runtime-policy"] if item["path"] == path]
+    _launch_require(len(manifest_entries) == 1, f"{label} manifest source is not unique")
     manifest_entry = manifest_entries[0]
     _launch_require(
         manifest_entry == {
-            "path": row.source_path, "node_type": "file", "mode": placement.mode,
+            "path": path, "node_type": "file", "mode": placement.mode,
             "uid": placement.uid, "gid": placement.gid, "xattrs": list(placement.xattrs),
             "sha256": lock_input.sha256, "size_bytes": lock_input.size_bytes,
             "symlink_target": None, "source_input_id": lock_input.id,
         },
-        f"{row.role} manifest source disagrees",
+        f"{label} manifest source disagrees",
     )
-    closure_entries = [item for item in parsed.runtime_closure["entries"] if item["path"] == row.source_path]
-    _launch_require(len(closure_entries) == 1, f"{row.role} runtime closure source is not unique")
+    closure_entries = [item for item in parsed.runtime_closure["entries"] if item["path"] == path]
+    _launch_require(len(closure_entries) == 1, f"{label} runtime closure source is not unique")
     closure = closure_entries[0]
     _launch_require(
         closure["node_type"] == "file"
@@ -496,12 +512,18 @@ def _launch_source_projection_v3(parsed: ParsedPredecessorsV3, row: tables.Launc
         and closure["sha256"] == lock_input.sha256
         and closure["size_bytes"] == lock_input.size_bytes
         and closure["mode"] == placement.mode,
-        f"{row.role} runtime closure source disagrees",
+        f"{label} runtime closure source disagrees",
     )
     return LaunchSourceProjectionV3(
-        lock_input.id, placement.image, row.source_path, lock_input.sha256,
+        lock_input.id, placement.image, path, lock_input.sha256,
         lock_input.size_bytes, placement.mode, policy_node.content_class, closure["logical_role"],
     )
+
+
+def _launch_source_projection_v3(
+    parsed: ParsedPredecessorsV3, row: tables.LaunchRoleRowV3,
+) -> LaunchSourceProjectionV3:
+    return _runtime_source_projection_v3(parsed, path=row.source_path, label=row.role)
 
 
 def _locked_interpreter_v3(parsed: ParsedPredecessorsV3) -> tuple[object, object]:
@@ -526,7 +548,7 @@ def _launch_projection_v3(parsed: ParsedPredecessorsV3) -> tuple[LaunchProjectio
     _launch_require(len(conf_sources) == 1, "runtime closure must retain exactly one distinct conf_proc_source")
     by_id = {node.id: node for node in parsed.policy.process_nodes}
     interpreter_input, interpreter_placement = _locked_interpreter_v3(parsed)
-    for source, row in zip(sources, tables.LAUNCH_ROLE_ROWS_V3, strict=True):
+    for row in tables.LAUNCH_ROLE_ROWS_V3:
         node = by_id.get(row.role)
         _launch_require(node is not None, f"{row.role} process node is missing")
         _launch_require(
@@ -549,10 +571,13 @@ def _launch_projection_v3(parsed: ParsedPredecessorsV3) -> tuple[LaunchProjectio
             f"{row.role} capability policy disagrees",
         )
     controller = tables.STAGE2_CONTROLLER_ROW_V3
+    controller_source = _runtime_source_projection_v3(
+        parsed, path=controller.source_path, label="stage2 controller",
+    )
     _launch_require(controller.interpreter_path == "/usr/bin/python3.10" and controller.argv[:5] == ("/usr/bin/python3.10", "-I", "-B", "-S", "/usr/lib/spp/conf_proc_spp_init.py"), "stage2 controller interpreter authority disagrees")
     return (
         LaunchProjectionV3(tuple(RoleLaunchSnapshotV3(row, source) for row, source in zip(tables.LAUNCH_ROLE_ROWS_V3, sources, strict=True))),
-        Stage2ControllerSnapshotV3(controller, interpreter_input.id, interpreter_input.sha256, interpreter_input.size_bytes, interpreter_placement.mode),
+        Stage2ControllerSnapshotV3(controller, controller_source, interpreter_input.id, interpreter_input.sha256, interpreter_input.size_bytes, interpreter_placement.mode),
     )
 
 
@@ -605,7 +630,89 @@ def jit_derivation_sha256_v3(record: object) -> str:
     return _sha256(material)
 
 
-def _eligible_source_v3(parsed: ParsedPredecessorsV3, entry: dict) -> EligibleFileSnapshotV3:
+def _jit_tag_expectations_v3(raw_derivations: list[object]) -> dict[str, set[str]]:
+    """Derive the concrete tag roles named by the typed JIT records."""
+
+    expected: dict[str, set[str]] = {}
+
+    def add(identity: object, *tags: str) -> None:
+        if type(identity) is dict and type(identity.get("path")) is str:
+            expected.setdefault(identity["path"], set()).update(tags)
+
+    for record in raw_derivations:
+        if type(record) is not dict:
+            continue
+        add(record.get("compiler"), "compiler", "launch_executable")
+        add(record.get("loader"), "launch_executable")
+        inputs = record.get("inputs")
+        if type(inputs) is not list:
+            continue
+        for item in inputs:
+            if type(item) is not dict:
+                continue
+            kind = item.get("kind")
+            if kind == "source":
+                add(item, "compiler_source")
+            elif kind == "configuration":
+                add(item, "configuration_no_code")
+            elif kind == "model":
+                add(item, "model_code" if str(item.get("path", "")).endswith(".py") else "model_data_no_code")
+            elif kind == "native_library":
+                add(item, "dynamic_library", "native_extension")
+    return expected
+
+
+def _expected_eligible_tags_v3(
+    parsed: ParsedPredecessorsV3, path: str, jit_tags: dict[str, set[str]],
+) -> set[str]:
+    """Return the complete tag set for the concrete authority paths this lode models."""
+
+    tags = set(jit_tags.get(path, ()))
+    launch_paths = {
+        *(row.source_path for row in tables.LAUNCH_ROLE_ROWS_V3),
+        "/usr/lib/spp/conf_proc_spp_role_bootstrap.py",
+        tables.STAGE2_CONTROLLER_ROW_V3.source_path,
+        *(edge.origin_path for edge in parsed.policy.process_edges),
+        *(node.path for node in parsed.policy.process_nodes),
+    }
+    runtime_nodes = [node for node in parsed.policy.images["runtime-policy"].nodes if node.path == path and node.node_type == "file"]
+    if path in launch_paths or (not path.endswith(".so") and any(node.content_class == "executable" for node in runtime_nodes)):
+        tags.add("launch_executable")
+    if _path_under(path, _PYTHON_ROOTS) and path.endswith(".py"):
+        tags.add("importable_module")
+    if path.endswith(".pth"):
+        tags.add("python_loading_control")
+    if path.endswith("sitecustomize.py"):
+        tags.update(("importable_module", "python_loading_control"))
+    if path.endswith(".so"):
+        tags.update(("native_extension", "dynamic_library"))
+    if path.endswith("plugin.so"):
+        tags.add("plugin")
+    if path.startswith("/usr/lib/spp/jit-cache/"):
+        tags.add("jit_cache")
+    return tags
+
+
+def _expected_content_kind_v3(
+    parsed: ParsedPredecessorsV3, path: str, tags: set[str],
+) -> str | None:
+    if path.endswith(".py"):
+        return "python_source"
+    if path.endswith(".pyc"):
+        return "python_bytecode"
+    if path.endswith(".so"):
+        return "elf_shared_object"
+    if path.endswith(".pth") or {"configuration_no_code", "model_data_no_code"} & tags:
+        return "data"
+    runtime_nodes = [node for node in parsed.policy.images["runtime-policy"].nodes if node.path == path and node.node_type == "file"]
+    if any(node.content_class == "executable" for node in runtime_nodes):
+        return "elf_executable"
+    return None
+
+
+def _eligible_source_v3(
+    parsed: ParsedPredecessorsV3, entry: dict, expected_tags: set[str],
+) -> EligibleFileSnapshotV3:
     required = {"input_id", "image", "path", "sha256", "size_bytes", "mode", "content_kind", "semantic_tags"}
     _require(type(entry) is dict and set(entry) == required, CP_BOOT_V3_SCHEMA, "eligible-file fields are invalid")
     _require(type(entry["path"]) is str and entry["path"].startswith("/") and type(entry["input_id"]) is str and type(entry["image"]) is str and type(entry["sha256"]) is str and len(entry["sha256"]) == 64 and type(entry["size_bytes"]) is int and entry["size_bytes"] >= 0 and type(entry["mode"]) is int and 0 <= entry["mode"] <= 0o7777 and entry["content_kind"] in _CONTENT_KINDS, CP_BOOT_V3_SCHEMA, "eligible-file value is invalid")
@@ -622,6 +729,9 @@ def _eligible_source_v3(parsed: ParsedPredecessorsV3, entry: dict) -> EligibleFi
     _require(lock_input.id == entry["input_id"] and placement.image == entry["image"] and lock_input.sha256 == entry["sha256"] and lock_input.size_bytes == entry["size_bytes"] and placement.mode == entry["mode"] and node.node_type == "file" and node.source_input_id == lock_input.id and node.mode == placement.mode and manifest["sha256"] == lock_input.sha256 and manifest["size_bytes"] == lock_input.size_bytes and manifest["mode"] == placement.mode and manifest["source_input_id"] == lock_input.id and closure["sha256"] == lock_input.sha256 and closure["size_bytes"] == lock_input.size_bytes and closure["mode"] == placement.mode and closure["root_lock_input_id"] == lock_input.id, CP_BOOT_V3_BINDING, "eligible file predecessor identities disagree")
     kind = entry["content_kind"]
     path = entry["path"]
+    _require(set(tags) == expected_tags, CP_BOOT_V3_BINDING, "eligible semantic tags disagree with executable authority")
+    expected_kind = _expected_content_kind_v3(parsed, path, expected_tags)
+    _require(expected_kind is None or kind == expected_kind, CP_BOOT_V3_BINDING, "eligible content kind disagrees with executable authority")
     _require(not (entry["mode"] & 0o222) or kind == "data", CP_BOOT_V3_BINDING, "writable executable eligibility is forbidden")
     if path.endswith(".py"):
         _require(kind == "python_source", CP_BOOT_V3_BINDING, "Python source content kind disagrees")
@@ -658,14 +768,27 @@ def _validate_loader_controls_v3(raw: list[object], eligible: tuple[EligibleFile
         hooks = _require_sorted_unique_strings(value["hooks"], CP_BOOT_V3_SCHEMA, "loader-control hooks are invalid")
         file = by_path.get(value["path"])
         _require(file is not None and value["read_only"] and not (file.mode & 0o222) and "python_loading_control" in file.semantic_tags, CP_BOOT_V3_BINDING, "loader-control file is not measured read-only authority")
-        _require(all(_path_under(path, _PYTHON_ROOTS + _NATIVE_LOADER_ROOTS) for path in (*paths, *imports, *hooks)), CP_BOOT_V3_BINDING, "loader-control contribution escapes closed roots")
+        contributions = (*paths, *imports, *hooks)
+        _require(all(_path_under(path, _PYTHON_ROOTS + _NATIVE_LOADER_ROOTS) for path in contributions), CP_BOOT_V3_BINDING, "loader-control contribution escapes closed roots")
+        _require(
+            all(
+                path in by_path or any(item.path.startswith(path + "/") for item in eligible)
+                for path in contributions
+            ),
+            CP_BOOT_V3_BINDING,
+            "loader-control contribution is not measured authority",
+        )
         records.append(LoaderControlSnapshotV3(value["path"], value["kind"], value["read_only"], paths, imports, hooks))
     control_paths = {item.path for item in records}
+    _require(len(control_paths) == len(records), CP_BOOT_V3_BINDING, "loader controls are duplicated")
     _require({item.path for item in eligible if "python_loading_control" in item.semantic_tags} == control_paths, CP_BOOT_V3_BINDING, "loading-control eligibility and controls disagree")
     return tuple(records)
 
 
-def _predicate5_snapshot_v3(contract: "BootContractV3", parsed: ParsedPredecessorsV3) -> Predicate5SnapshotV3:
+def _predicate5_snapshot_v3(
+    contract: "BootContractV3", parsed: ParsedPredecessorsV3,
+    bootstrap_source: LaunchSourceProjectionV3,
+) -> Predicate5SnapshotV3:
     closure = contract.execution_closure
     raw_eligible = _thaw_json(closure.eligible_files)
     raw_controls = _thaw_json(closure.loader_controls)
@@ -673,18 +796,35 @@ def _predicate5_snapshot_v3(contract: "BootContractV3", parsed: ParsedPredecesso
     raw_outputs = _thaw_json(closure.expected_outputs)
     raw_selectors = _thaw_json(closure.cache_selectors)
     assert type(raw_eligible) is list and type(raw_controls) is list and type(raw_derivations) is list and type(raw_outputs) is list and type(raw_selectors) is list
-    eligible = tuple(_eligible_source_v3(parsed, value) for value in raw_eligible)
+    jit_tags = _jit_tag_expectations_v3(raw_derivations)
+    eligible = tuple(
+        _eligible_source_v3(parsed, value, _expected_eligible_tags_v3(parsed, value.get("path", ""), jit_tags))
+        for value in raw_eligible
+        if type(value) is dict
+    )
+    _require(len(eligible) == len(raw_eligible), CP_BOOT_V3_SCHEMA, "eligible-file record is invalid")
     _require(tuple(item.path for item in eligible) == tuple(sorted(item.path for item in eligible)) and len({item.path for item in eligible}) == len(eligible), CP_BOOT_V3_SCHEMA, "eligible files must be sorted and unique")
     expected_paths = {node.path for node in parsed.policy.images["runtime-policy"].nodes if node.node_type == "file" and node.content_class == "executable"}
     expected_paths.update(edge.origin_path for edge in parsed.policy.process_edges if edge.kind in ("script_interpreter", "elf_interpreter", "dynamic_load"))
     expected_paths.update(entry["path"] for entry in parsed.runtime_closure["entries"] if entry["node_type"] == "file" and _path_under(entry["path"], _PYTHON_ROOTS + _NATIVE_LOADER_ROOTS))
+    expected_paths.update(row.source_path for row in tables.LAUNCH_ROLE_ROWS_V3)
+    expected_paths.update((bootstrap_source.path, tables.STAGE2_CONTROLLER_ROW_V3.source_path))
+    for record in raw_derivations:
+        if type(record) is not dict:
+            continue
+        for identity in (record.get("compiler"), record.get("loader")):
+            if type(identity) is dict and type(identity.get("path")) is str:
+                expected_paths.add(identity["path"])
+        inputs = record.get("inputs")
+        if type(inputs) is list:
+            expected_paths.update(item["path"] for item in inputs if type(item) is dict and type(item.get("path")) is str)
     _require({item.path for item in eligible} == expected_paths, CP_BOOT_V3_BINDING, "eligible-file denominator disagrees with predecessor closure")
     controls = _validate_loader_controls_v3(raw_controls, eligible)
     tags = {tag for item in eligible for tag in item.semantic_tags}
     if contract.execution_mode == "python_no_jit":
         _require(not ({"compiler", "compiler_source", "jit_cache"} & tags) and not raw_derivations and not raw_outputs and not raw_selectors, CP_BOOT_V3_BINDING, "no-JIT predicate admits compiler or cache authority")
         _require(not any(item.path == "/run/spp-jit" for item in eligible), CP_BOOT_V3_BINDING, "no-JIT predicate admits workspace")
-        return Predicate5SnapshotV3(contract.execution_mode, contract.cache_policy, closure.schema, _KAT_SHA256, _OBSERVER_SHA256, _PYTHON_ROOTS, _NATIVE_LOADER_ROOTS, controls, eligible, (), ())
+        return Predicate5SnapshotV3(contract.execution_mode, contract.cache_policy, closure.schema, _KAT_SHA256, _OBSERVER_SHA256, _PYTHON_ROOTS, _NATIVE_LOADER_ROOTS, bootstrap_source, controls, eligible, (), ())
     _require({"compiler", "compiler_source"} <= tags and raw_derivations and len(raw_derivations) == len(raw_outputs) and (len(raw_selectors) == len(raw_derivations) if contract.cache_policy == "measured_read_only" else not raw_selectors), CP_BOOT_V3_BINDING, "JIT predicate lacks compiler, source, outputs, or selectors")
     eligible_by_path = {item.path: item for item in eligible}
     snapshots: list[JitDerivationSnapshotV3] = []
@@ -726,7 +866,7 @@ def _predicate5_snapshot_v3(contract: "BootContractV3", parsed: ParsedPredecesso
         else:
             _require(selector_record is None and expected_path not in eligible_by_path, CP_BOOT_V3_BINDING, "ephemeral JIT admits a preexisting cache output")
         snapshots.append(JitDerivationSnapshotV3(digest, compiler["input_id"], compiler["sha256"], loader["input_id"], loader["sha256"], tuple(argv_env["compiler_argv"]), tuple(argv_env["loader_argv"]), tuple((item[0], item[1]) for item in argv_env["environment"]), tuple(typed), output["output_name"], output["relative_path"], output["sha256"], output["size_bytes"], output["mode"], record["cache_policy"]))
-    return Predicate5SnapshotV3(contract.execution_mode, contract.cache_policy, closure.schema, _KAT_SHA256, _OBSERVER_SHA256, _PYTHON_ROOTS, _NATIVE_LOADER_ROOTS, controls, eligible, tuple(snapshots), tuple(selectors))
+    return Predicate5SnapshotV3(contract.execution_mode, contract.cache_policy, closure.schema, _KAT_SHA256, _OBSERVER_SHA256, _PYTHON_ROOTS, _NATIVE_LOADER_ROOTS, bootstrap_source, controls, eligible, tuple(snapshots), tuple(selectors))
 
 
 def validate_semantic_conjunction_v3(
@@ -797,7 +937,12 @@ def validate_semantic_conjunction_v3(
             tuple((item.name, item.support.value) for item in parsed.kernel_feature_contract.mutable_controls),
         )
         launch_projection, stage2_controller = _launch_projection_v3(parsed)
-        predicate5 = _predicate5_snapshot_v3(contract, parsed)
+        bootstrap_source = _runtime_source_projection_v3(
+            parsed,
+            path="/usr/lib/spp/conf_proc_spp_role_bootstrap.py",
+            label="role bootstrap",
+        )
+        predicate5 = _predicate5_snapshot_v3(contract, parsed, bootstrap_source)
         return SemanticSnapshotsV3(
             digests, storage, kernel,
             ModuleAuthoritySnapshotV3(parsed.module_plan.boot_contract_sha256, module_entries),

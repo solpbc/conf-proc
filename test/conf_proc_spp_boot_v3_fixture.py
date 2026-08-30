@@ -51,6 +51,8 @@ _ROLE_SOURCES = (
     ("gateway", "/usr/lib/spp/ratls_gateway.py"),
     ("collector", "/usr/lib/spp/ratls_collector.py"),
 )
+_BOOTSTRAP_SOURCE = "/usr/lib/spp/conf_proc_spp_role_bootstrap.py"
+_CONTROLLER_SOURCE = "/usr/lib/spp/conf_proc_spp_init.py"
 
 
 def _sha256(value: bytes) -> str:
@@ -82,7 +84,7 @@ def _bootstrap_v3() -> dict[str, object]:
     }
 
 
-def _eligible_records_v3(docs: dict[str, bytes], *, jit: bool) -> list[dict[str, object]]:
+def _eligible_records_v3(docs: dict[str, bytes]) -> list[dict[str, object]]:
     lock = canonical_loads(docs["root_lock_bytes"])
     policy = canonical_loads(docs["policy_bytes"])
     closure = canonical_loads(docs["runtime_closure_bytes"])
@@ -94,7 +96,7 @@ def _eligible_records_v3(docs: dict[str, bytes], *, jit: bool) -> list[dict[str,
     paths = {node["path"] for node in policy["images"]["runtime-policy"]["nodes"] if node["node_type"] == "file" and node["content_class"] == "executable"}
     paths.update(edge["origin_path"] for edge in policy["process_edges"] if edge["kind"] in ("script_interpreter", "elf_interpreter", "dynamic_load"))
     paths.update(entry["path"] for entry in closure["entries"] if entry["node_type"] == "file" and (entry["path"].startswith("/usr/lib/python3.10/") or entry["path"].startswith("/usr/lib/spp/") or entry["path"].startswith("/usr/lib/spp") or entry["path"].startswith("/lib/x86_64-linux-gnu/") or entry["path"].startswith("/usr/lib/x86_64-linux-gnu/")))
-    role_paths = {path for _, path in _ROLE_SOURCES}
+    role_paths = {path for _, path in _ROLE_SOURCES} | {_BOOTSTRAP_SOURCE, _CONTROLLER_SOURCE}
     records: list[dict[str, object]] = []
     for path in sorted(paths):
         item, placement = lock_paths[path]
@@ -127,7 +129,7 @@ def _eligible_records_v3(docs: dict[str, bytes], *, jit: bool) -> list[dict[str,
 
 
 def _closure_v3(docs: dict[str, bytes], *, execution_mode: str, cache_policy: str, jit_record: dict[str, object] | None = None) -> dict[str, object]:
-    eligible = _eligible_records_v3(docs, jit=jit_record is not None)
+    eligible = _eligible_records_v3(docs)
     controls: list[dict[str, object]] = []
     if jit_record is not None:
         controls = [
@@ -187,6 +189,10 @@ def build_v3_fixture(*, execution_mode: str = "python_no_jit", cache_policy: str
     for row in tables.LAUNCH_ROLE_ROWS_V3:
         input_id = "runtime-role-" + row.role
         service_inputs.append((input_id, ("stage2-service-source:" + row.role).encode("ascii"), row.source_path, 0o444, "executable"))
+    service_inputs.extend((
+        ("runtime-role-bootstrap", b"stage2-role-bootstrap-source", _BOOTSTRAP_SOURCE, 0o444, "executable"),
+        ("runtime-stage2-controller", b"stage2-controller-source", _CONTROLLER_SOURCE, 0o444, "executable"),
+    ))
     service_inputs.append(("runtime-python310", b"stage2-target-python310", "/usr/bin/python3.10", 0o555, "executable"))
     if execution_mode == "python_jit_triton":
         service_inputs.extend((
@@ -267,7 +273,7 @@ def build_v3_fixture(*, execution_mode: str = "python_no_jit", cache_policy: str
     ).manifest_bytes
     jit_record: dict[str, object] | None = None
     if execution_mode == "python_jit_triton":
-        records = {item["path"]: item for item in _eligible_records_v3(docs, jit=True)}
+        records = {item["path"]: item for item in _eligible_records_v3(docs)}
         typed_paths = (
             ("source", "/usr/lib/spp/vendor/triton_kernel.py"),
             ("configuration", "/usr/lib/spp/config/triton.json"),
