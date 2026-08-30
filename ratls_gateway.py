@@ -40,6 +40,7 @@ import select
 import shlex
 import socket
 import socketserver
+import ssl
 import subprocess
 import threading
 import urllib.error
@@ -107,7 +108,40 @@ class EntitlementRejectedError(RuntimeError):
 
 
 class EntitlementUnavailableError(RuntimeError):
-    """The portal could not make an authoritative entitlement decision."""
+    """The portal could not make an authoritative entitlement decision.
+
+    `detail` is one of a fixed, content-free set of tokens splitting what used to
+    be a single `authorizer_unavailable` log reason into which leg of the
+    gateway -> portal call failed: `status` (the portal answered with an
+    unexpected HTTP status), `timeout` (the call exceeded
+    --entitlement-timeout), `dns` (name resolution failed), `tls` (the TLS
+    handshake to the portal failed), or `connect` (any other network-level
+    failure -- refused, reset, unreachable). Added 2026-08-30 (`cto-41`) after
+    three engine-health pages (08-07, 08-24, 08-30) where one code covered five
+    different failure shapes and cost real diagnosis time each time.
+    """
+
+    def __init__(self, message: str, detail: str) -> None:
+        super().__init__(message)
+        self.detail = detail
+
+
+def _classify_portal_network_error(exc: BaseException) -> str:
+    """Map a urlopen-raised network failure to a fixed, content-free token.
+
+    `urllib.request` wraps every connection-level OSError (DNS, connect, TLS,
+    timeout) in a `URLError`, with the original exception on `.reason` -- so the
+    real type has to be read off that attribute, not off `exc` itself, or every
+    case here would fall through to the generic bucket.
+    """
+    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    if isinstance(reason, TimeoutError):
+        return "timeout"
+    if isinstance(reason, socket.gaierror):
+        return "dns"
+    if isinstance(reason, ssl.SSLError):
+        return "tls"
+    return "connect"
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -160,17 +194,21 @@ class PortalEntitlementAuthorizer:
             with self.opener.open(request, timeout=self.timeout) as response:
                 if response.status != 204:
                     raise EntitlementUnavailableError(
-                        "portal returned an invalid authorization response"
+                        "portal returned an invalid authorization response", detail="status"
                     )
         except urllib.error.HTTPError as exc:
             try:
                 if exc.code in {401, 403}:
                     raise EntitlementRejectedError("portal rejected entitlement") from None
-                raise EntitlementUnavailableError("portal authorization failed") from None
+                raise EntitlementUnavailableError(
+                    "portal authorization failed", detail="status"
+                ) from None
             finally:
                 exc.close()
-        except (OSError, urllib.error.URLError, TimeoutError):
-            raise EntitlementUnavailableError("portal authorization unavailable") from None
+        except (OSError, urllib.error.URLError, TimeoutError) as exc:
+            raise EntitlementUnavailableError(
+                "portal authorization unavailable", detail=_classify_portal_network_error(exc)
+            ) from None
 
 
 def _b64(value: bytes) -> str:
@@ -656,8 +694,11 @@ def _http_relay(
             LOG.warning("event=entitlement_rejected reason=invalid_or_inactive")
             _send_entitlement_error(client, 401)
             return
-        except EntitlementUnavailableError:
-            LOG.warning("event=entitlement_rejected reason=authorizer_unavailable")
+        except EntitlementUnavailableError as exc:
+            LOG.warning(
+                "event=entitlement_rejected reason=authorizer_unavailable detail=%s",
+                exc.detail,
+            )
             _send_entitlement_error(client, 503)
             return
         assert device_id is not None

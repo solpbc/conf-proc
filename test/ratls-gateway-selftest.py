@@ -5,16 +5,19 @@
 
 from __future__ import annotations
 
+import io
 import json
 import hashlib
 import http.server
 import os
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
 import threading
 import unittest
+import urllib.error
 from pathlib import Path
 
 from cryptography import x509
@@ -39,6 +42,9 @@ from ratls_gateway import (  # noqa: E402
     MAX_AUDIO_BODY_BYTES,
     CollectorError,
     CommandCollector,
+    EntitlementRejectedError,
+    EntitlementUnavailableError,
+    PortalEntitlementAuthorizer,
 )
 from spp_health import HEALTH_PROBE_ENTITLEMENT, admit_gateway, probe_gateway  # noqa: E402
 
@@ -268,6 +274,85 @@ def admitted_connection(
     assert b"200 OK" in proof_head
     ExporterProof.from_der(proof_body)
     return connection, raw
+
+
+class _FakeAuthorizeResponse:
+    """A context-manager stand-in for `http.client.HTTPResponse` carrying only
+    the one field `authorize()` reads."""
+
+    def __init__(self, status: int) -> None:
+        self.status = status
+
+    def __enter__(self) -> "_FakeAuthorizeResponse":
+        return self
+
+    def __exit__(self, *exc_info: object) -> bool:
+        return False
+
+
+class PortalEntitlementAuthorizerDetailTest(unittest.TestCase):
+    """Unit coverage for the `authorizer_unavailable` detail split (cto-41):
+    every branch of `PortalEntitlementAuthorizer.authorize()` that used to
+    collapse into one reason must tag a distinct, fixed `.detail` token."""
+
+    def setUp(self) -> None:
+        secret_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(secret_dir.cleanup)
+        secret_file = Path(secret_dir.name) / "secret"
+        secret_file.write_text("test-engine-secret\n", encoding="utf-8")
+        self.authorizer = PortalEntitlementAuthorizer(
+            "https://portal.example/internal/spp/authorize", secret_file, timeout=5
+        )
+
+    def _stub_open(self, effect) -> None:
+        self.authorizer.opener.open = lambda *_a, **_k: effect()  # type: ignore[method-assign]
+
+    def _assert_detail(self, exc_to_raise: BaseException, expected_detail: str) -> None:
+        def _raise() -> None:
+            raise exc_to_raise
+
+        self._stub_open(_raise)
+        with self.assertRaises(EntitlementUnavailableError) as ctx:
+            self.authorizer.authorize("cred")
+        self.assertEqual(ctx.exception.detail, expected_detail)
+
+    def test_bare_timeout_classifies_as_timeout(self) -> None:
+        self._assert_detail(TimeoutError("timed out"), "timeout")
+
+    def test_wrapped_timeout_classifies_as_timeout(self) -> None:
+        self._assert_detail(urllib.error.URLError(TimeoutError("timed out")), "timeout")
+
+    def test_dns_failure_classifies_as_dns(self) -> None:
+        self._assert_detail(
+            urllib.error.URLError(socket.gaierror(socket.EAI_NONAME, "Name not known")),
+            "dns",
+        )
+
+    def test_tls_failure_classifies_as_tls(self) -> None:
+        self._assert_detail(urllib.error.URLError(ssl.SSLError("handshake failure")), "tls")
+
+    def test_connection_refused_classifies_as_connect(self) -> None:
+        self._assert_detail(urllib.error.URLError(ConnectionRefusedError("refused")), "connect")
+
+    def test_unexpected_success_status_classifies_as_status(self) -> None:
+        self._stub_open(lambda: _FakeAuthorizeResponse(200))
+        with self.assertRaises(EntitlementUnavailableError) as ctx:
+            self.authorizer.authorize("cred")
+        self.assertEqual(ctx.exception.detail, "status")
+
+    def test_http_error_outside_401_403_classifies_as_status(self) -> None:
+        self._assert_detail(
+            urllib.error.HTTPError("https://portal.example", 500, "err", {}, io.BytesIO(b"")),
+            "status",
+        )
+
+    def test_401_still_raises_rejected_not_unavailable(self) -> None:
+        def _raise() -> None:
+            raise urllib.error.HTTPError("https://portal.example", 401, "err", {}, io.BytesIO(b""))
+
+        self._stub_open(_raise)
+        with self.assertRaises(EntitlementRejectedError):
+            self.authorizer.authorize("cred")
 
 
 class RatlsGatewayTest(unittest.TestCase):
