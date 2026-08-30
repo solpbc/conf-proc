@@ -83,6 +83,7 @@ DORMANT_MODULES = frozenset(
         "conf_proc_spp_boot_v3_tables",
         "conf_proc_spp_boot_v3_wire",
         "conf_proc_spp_boot_v3_resource",
+        "conf_proc_spp_init",
     }
 )
 DORMANT_INSPECTOR_MODULES = frozenset(
@@ -126,7 +127,32 @@ PROHIBITED_RUNTIME_CALLS = DYNAMIC_LOAD_CALLS | SUBPROCESS_CALLS | frozenset(
 _MAPPING_PLACEHOLDER = re.compile(r"%\(([^)]+)\)s")
 _STATIC_FORMAT_PREFIX = "<static-format>:"
 _STATIC_FORMAT_MAP_PREFIX = "<static-format-map>:"
+_STATIC_SEQUENCE_PREFIX = "<static-sequence>:"
 PATH_ACCESS_METHODS = frozenset({"joinpath", "open", "read_bytes", "read_text"})
+
+
+class _StaticSequenceFrame(str):
+    """Out-of-band ordered sequence value that source literals cannot forge."""
+
+    def __new__(cls, parts: tuple[str, ...]) -> _StaticSequenceFrame:
+        encoded = _STATIC_SEQUENCE_PREFIX + "".join(f"{len(part)}:{part}" for part in parts)
+        value = str.__new__(cls, encoded)
+        value.parts = parts
+        return value
+
+    def __eq__(self, other: object) -> bool:
+        return type(other) is _StaticSequenceFrame and self.parts == other.parts
+
+    def __hash__(self) -> int:
+        return hash((_StaticSequenceFrame, self.parts))
+
+
+def _encode_static_sequence(parts: tuple[str, ...]) -> str:
+    return _StaticSequenceFrame(parts)
+
+
+def _decode_static_sequence(value: str) -> tuple[str, ...] | None:
+    return value.parts if type(value) is _StaticSequenceFrame else None
 
 
 def _candidate_files() -> list[Path]:
@@ -334,10 +360,26 @@ def _static_strings(
     if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
         element_values = [_static_strings(element, constants, aliases, mappings) for element in node.elts]
         values = {value for choices in element_values for value in choices}
-        concatenations = {""}
+        # A flat literal string sequence can later be consumed through a bound
+        # ``separator.join(parts)`` name, so retain its possible concatenation.
+        # Nested containers are members, not strings accepted by ``join``;
+        # multiplying their member alternatives is both semantically false and
+        # unbounded (for example, a tuple containing an allowlist of pairs).
+        if (
+            any(isinstance(element, (ast.List, ast.Tuple, ast.Set, ast.Dict)) for element in node.elts)
+            or any(
+                _decode_static_sequence(value) is not None
+                for choices in element_values
+                for value in choices
+            )
+        ):
+            return frozenset(value for value in values if _decode_static_sequence(value) is None)
+        combinations: set[tuple[str, ...]] = {()}
         for choices in element_values:
-            concatenations = {prefix + choice for prefix in concatenations for choice in choices}
-        return frozenset(values | concatenations)
+            combinations = {prefix + (choice,) for prefix in combinations for choice in choices}
+        concatenations = {"".join(parts) for parts in combinations}
+        sequence_frames = {_encode_static_sequence(parts) for parts in combinations}
+        return frozenset(values | concatenations | sequence_frames)
     if isinstance(node, ast.Dict):
         parts: set[str] = set()
         for item in [*node.keys, *node.values]:
@@ -367,7 +409,18 @@ def _static_strings(
                 combinations = {prefix + (choice,) for prefix in combinations for choice in choices}
             return frozenset(separator.join(parts) for separator in separators for parts in combinations)
         bound_parts = _static_strings(node.args[0], constants, aliases, mappings)
-        return frozenset(separator.join((parts,)) for separator in separators for parts in bound_parts)
+        bound_sequences = {
+            decoded
+            for value in bound_parts
+            if (decoded := _decode_static_sequence(value)) is not None
+        }
+        if bound_sequences:
+            return frozenset(
+                separator.join(parts)
+                for separator in separators
+                for parts in bound_sequences
+            )
+        return frozenset(separator.join(parts) for separator in separators for parts in bound_parts)
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get" and node.args:
         keys = _static_strings(node.args[0], constants, aliases, mappings)
         values = {
@@ -820,6 +873,7 @@ class ProvenanceIndependenceTests(unittest.TestCase):
                     "conf_proc_spp_boot_v3_tables",
                     "conf_proc_spp_boot_v3_wire",
                     "conf_proc_spp_boot_v3_resource",
+                    "conf_proc_spp_init",
                 }
             ),
         )
@@ -869,6 +923,75 @@ class ProvenanceIndependenceTests(unittest.TestCase):
         )
         for source in hostile_sources:
             self.assertTrue(_violations("conf_proc_provenance_v2.py", source), source)
+
+    def test_nested_literal_members_do_not_form_false_cartesian_concatenations(self) -> None:
+        pairs = tuple((f"SIG{index}", f"CODE{index}") for index in range(19))
+        source = "pairs = " + repr(pairs) + "\n"
+        tree = ast.parse(source)
+        aliases, constants, mappings = _analysis_context(tree)
+        self.assertEqual(mappings, {})
+        self.assertEqual(
+            constants["pairs"],
+            frozenset(
+                value
+                for left, right in pairs
+                for value in (left, right, left + right)
+            ),
+        )
+        split_target = ast.parse(
+            "parts = ('conf_proc_inspect_', 'provenance')\n"
+            "target = ''.join(parts)\n"
+        )
+        split_aliases, split_constants, split_mappings = _analysis_context(split_target)
+        self.assertIn("conf_proc_inspect_provenance", split_constants["target"])
+        self.assertTrue(
+            _computed_references(
+                split_target,
+                split_constants,
+                split_aliases,
+                SEALED_NAMES,
+                split_mappings,
+            )
+        )
+        for sequence_literal in (
+            "('conf', 'proc', 'inspect', 'provenance')",
+            "['conf', 'proc', 'inspect', 'provenance']",
+        ):
+            named_join = (
+                "import importlib\n"
+                f"parts = {sequence_literal}\n"
+                "target = '_'.join(parts)\n"
+                "importlib.import_module(target)\n"
+            )
+            self.assertTrue(
+                _violations("synthetic-policy-test.py", named_join),
+                named_join,
+            )
+        spoofed_frame = (
+            "import importlib\n"
+            "parts = ('<static-sequence>:18:conf_proc_inspect_', 'provenance')\n"
+            "target = ''.join(parts)\n"
+            "importlib.import_module(target)\n"
+        )
+        self.assertTrue(
+            _violations("synthetic-policy-test.py", spoofed_frame),
+            spoofed_frame,
+        )
+        named_nested = ast.parse(
+            "left = ('SIG0', 'CODE0')\n"
+            "right = ('SIG1', 'CODE1')\n"
+            "pairs = (left, right)\n"
+        )
+        nested_aliases, nested_constants, nested_mappings = _analysis_context(named_nested)
+        self.assertEqual(nested_aliases, {})
+        self.assertEqual(nested_mappings, {})
+        self.assertEqual(
+            nested_constants["pairs"],
+            frozenset({
+                "SIG0", "CODE0", "SIG0CODE0",
+                "SIG1", "CODE1", "SIG1CODE1",
+            }),
+        )
 
     def test_exemption_allowlists_are_exact_and_present(self) -> None:
         self.assertEqual(

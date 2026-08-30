@@ -242,6 +242,18 @@ _BINDING_TYPE_TAGS_V3: Final = MappingProxyType({
     tables.ReadinessProtocolRowV3: "readiness",
     tables.LaunchRoleRowV3: "launch_role",
     tables.Stage2FdRowV3: "stage2_fd",
+    tables.Stage2Pid1IdentityRowV3: "stage2_pid1_identity",
+    tables.Stage2TaskLocalStateV3: "stage2_task_local_state",
+    tables.Stage2ThreadCensusRowV3: "stage2_thread_census",
+    tables.Stage2CapabilityPhaseRowV3: "stage2_capability_phase",
+    tables.Stage2ExecFdAuthorityRowV3: "stage2_exec_fd_authority",
+    tables.Stage2FdCensusEntryV3: "stage2_fd_census_entry",
+    tables.Stage2FdCensusRowV3: "stage2_fd_census",
+    tables.Stage2SignalReapRowV3: "stage2_signal_reap",
+    tables.Stage2SignalOutcomeRowV3: "stage2_signal_outcome",
+    tables.ControllerTerminalEpochV3: "controller_terminal_epoch",
+    tables.Stage2LogicalTraceAuthorityRowV3: "stage2_logical_trace",
+    tables.Stage2Pid1AuthorityV3: "stage2_pid1_authority",
     tables.Stage2ControllerRowV3: "stage2_row",
 })
 _BINDING_MATERIAL_BYTE_FIELDS_V3: Final = frozenset({

@@ -430,7 +430,13 @@ def _set_runtime_closure(docs: dict[str, bytes], lock: dict[str, object]) -> Non
     })
 
 
-def build_v3_fixture(*, execution_mode: str = "python_no_jit", cache_policy: str = "absent", extra_jit_derivation: bool = False) -> tuple[dict[str, bytes], object]:
+def build_v3_fixture(
+    *,
+    execution_mode: str = "python_no_jit",
+    cache_policy: str = "absent",
+    extra_jit_derivation: bool = False,
+    controller_source_bytes: bytes | None = None,
+) -> tuple[dict[str, bytes], object]:
     """Build the final contract first, then its one-way-bound module plan."""
 
     docs = _V1.build_compact_fixture()
@@ -454,7 +460,17 @@ def build_v3_fixture(*, execution_mode: str = "python_no_jit", cache_policy: str
         service_inputs.append((input_id, ("stage2-service-source:" + row.role).encode("ascii"), row.source_path, 0o444, "executable"))
     service_inputs.extend((
         ("runtime-role-bootstrap", b"stage2-role-bootstrap-source", _BOOTSTRAP_SOURCE, 0o444, "executable"),
-        ("runtime-stage2-controller", b"stage2-controller-source", _CONTROLLER_SOURCE, 0o444, "executable"),
+        (
+            "runtime-stage2-controller",
+            (
+                (ROOT / "conf_proc_spp_init.py").read_bytes()
+                if controller_source_bytes is None
+                else controller_source_bytes
+            ),
+            _CONTROLLER_SOURCE,
+            0o444,
+            "executable",
+        ),
     ))
     service_inputs.append(("runtime-python310", b"stage2-target-python310", "/usr/bin/python3.10", 0o555, "executable"))
     if execution_mode == "python_jit_triton":

@@ -45,12 +45,13 @@ _PINS = (
     ("conf_proc_spp_boot.py", 147664, "c1dfba4c4ca71cf64ab8ecef12440950edab88f6ef3e2fb73791fc1f900076a6"),
     ("conf_proc_spp_boot_payload.py", 44257, "8fcacd797e7727708d0dcbebbea632db8e8779c08120fa5d5b6e1773bf1eb11d"),
     ("conf_proc_spp_boot_payload_inspect.py", 16879, "cd990a62d73315d93f4f9e45c58c1529beb63a12409ffcfc8c384d8caa0f32d2"),
+    ("conf_proc_spp_init.py", 4604, "32b7c8f5b6772f52433adcca11051ad1e883bb59aa4f7c66116e43a379bd1dd3"),
     ("conf_proc_spp_reasons_v3.py", 3215, "4ca5821dd0edca148bffa312fd6d9208083fa5f6e22345e61c5284d3cbbcdf75"),
-    ("conf_proc_spp_boot_v3_tables.py", 37125, "0c50b6a46acd5152d63757956cba65f699c58e1a1566807448f5779e28787824"),
+    ("conf_proc_spp_boot_v3_tables.py", 58972, "b1151dabfb3596b02ad1584f5066bad4094c9b34b758c27608173af77e64a927"),
     ("conf_proc_spp_boot_v3_wire.py", 41779, "00c03278031280dd572bf221be2075ab741e36b378af8a7fd2c874560b840e90"),
     ("conf_proc_spp_boot_v3_resource.py", 25792, "b172f2dd4dbe70e295e4dbdd0ebe066c7e247e8d2183db22b15ac48f5afc57de"),
-    ("conf_proc_spp_boot_v3.py", 90009, "0253d0c995fb2609668ac5909db7652940d7bf11c31daaa96b148b4fd87b2bae"),
-    ("conf_proc_spp_boot_v3_semantics.py", 127970, "573e613c082557952c47041dbe1e88ca5473e97b781f78038d2c983cf9cc96a9"),
+    ("conf_proc_spp_boot_v3.py", 90749, "a189338f7d8ecd84dd1f2686163211f25a8555635ec8aa6df486e3ca36709fe6"),
+    ("conf_proc_spp_boot_v3_semantics.py", 128500, "09572aa6d76e83ee4117ed1f10c7bc32397397014abb34d55812c8f8ebd3cd85"),
     ("conf_proc_spp_boot_dispatch_v3.py", 1141, "83a0652bff152a7e9e96e4f5daa0bde0278092d012d0b8fbf8832a39f23fa139"),
 )
 _SOURCE_ROWS_V3 = (
@@ -69,6 +70,7 @@ _SOURCE_ROWS_V3 = (
     ("/usr/lib/spp/conf_proc_spp_boot_v3_semantics.py", "engine", 0o444),
     ("/usr/lib/spp/conf_proc_spp_boot_v3_tables.py", "support", 0o444),
     ("/usr/lib/spp/conf_proc_spp_boot_v3_wire.py", "support", 0o444),
+    ("/usr/lib/spp/conf_proc_spp_init.py", "engine", 0o444),
     ("/usr/lib/spp/conf_proc_spp_reasons_v3.py", "support", 0o444),
 )
 _EXPECTED_LOCAL_IMPORTS_V3 = {
@@ -87,6 +89,7 @@ _EXPECTED_LOCAL_IMPORTS_V3 = {
     "conf_proc_spp_boot_v3_resource": frozenset({"conf_proc_spp_boot", "conf_proc_spp_boot_v3", "conf_proc_spp_boot_v3_tables", "conf_proc_spp_boot_v3_wire", "conf_proc_spp_reasons_v3"}),
     "conf_proc_spp_boot_v3_tables": frozenset({"conf_proc_spp_boot"}),
     "conf_proc_spp_boot_v3_wire": frozenset({"conf_proc_json", "conf_proc_spp_boot_v3_tables", "conf_proc_spp_reasons_v3"}),
+    "conf_proc_spp_init": frozenset(),
     "conf_proc_spp_reasons_v3": frozenset(),
 }
 _PLAN_SCHEMA_V3 = "conf-proc-spp-boot-payload-plan/v3"
@@ -246,9 +249,9 @@ class BootPayloadV3IndependentSelftest(unittest.TestCase):
             )
 
     def test_pinned_base_and_inline_authority_literals(self) -> None:
-        self.assertEqual(len(_PINS), 18)
-        self.assertEqual(len(_SOURCE_ROWS_V3), 16)
-        self.assertEqual(len(_EXPECTED_LOCAL_IMPORTS_V3), 16)
+        self.assertEqual(len(_PINS), 19)
+        self.assertEqual(len(_SOURCE_ROWS_V3), 17)
+        self.assertEqual(len(_EXPECTED_LOCAL_IMPORTS_V3), 17)
         self.assertEqual((_PLAN_SCHEMA_V3, _PACKAGE_SCHEMA_V3), ("conf-proc-spp-boot-payload-plan/v3", "conf-proc-spp-boot-payload-package/v3"))
         self.assertEqual(len(_AUTHORITY_FIELDS_V3), 13)
 
@@ -258,7 +261,7 @@ class BootPayloadV3IndependentSelftest(unittest.TestCase):
             cpio_bytes=self.cpio, package_bytes=self.package, output_path=str(self.output_path),
         )
         self.assertEqual(result.state, "artifact_consistent")
-        self.assertEqual(len(_cpio_layouts(self.cpio)[0]), 29)
+        self.assertEqual(len(_cpio_layouts(self.cpio)[0]), 30)
         self.assertNotIn("conf_proc_spp_boot_payload_v3", sys.modules)
 
     def test_raw_cpio_and_package_mutations(self) -> None:

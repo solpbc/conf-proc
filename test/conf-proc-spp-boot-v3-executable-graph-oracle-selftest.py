@@ -494,7 +494,7 @@ class ExecutableGraphOracleSelftest(unittest.TestCase):
     def test_known_graph_digest(self) -> None:
         docs, _ = _build_v3_fixture(execution_mode="python_jit_triton", cache_policy="ephemeral_rebuild")
         graph = _validate_graph(docs)
-        self.assertEqual(_sha(canonical_dumps(graph)), "590784b2031e830535a041bdcce3c4f9ed187ecdf7e4f5d4f2eb0d32912b3de5")
+        self.assertEqual(_sha(canonical_dumps(graph)), "093ee4c487f5b3173d40524421aeb3ee3163e4e5841ba04badbce99d97644dda")
 
     def test_z_no_v3_production_module_import(self) -> None:
         tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))

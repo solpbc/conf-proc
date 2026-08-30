@@ -156,6 +156,18 @@ _INDEPENDENT_TYPE_TAGS = {
     boot_v3.tables.ReadinessProtocolRowV3: "readiness",
     boot_v3.tables.LaunchRoleRowV3: "launch_role",
     boot_v3.tables.Stage2FdRowV3: "stage2_fd",
+    boot_v3.tables.Stage2Pid1IdentityRowV3: "stage2_pid1_identity",
+    boot_v3.tables.Stage2TaskLocalStateV3: "stage2_task_local_state",
+    boot_v3.tables.Stage2ThreadCensusRowV3: "stage2_thread_census",
+    boot_v3.tables.Stage2CapabilityPhaseRowV3: "stage2_capability_phase",
+    boot_v3.tables.Stage2ExecFdAuthorityRowV3: "stage2_exec_fd_authority",
+    boot_v3.tables.Stage2FdCensusEntryV3: "stage2_fd_census_entry",
+    boot_v3.tables.Stage2FdCensusRowV3: "stage2_fd_census",
+    boot_v3.tables.Stage2SignalReapRowV3: "stage2_signal_reap",
+    boot_v3.tables.Stage2SignalOutcomeRowV3: "stage2_signal_outcome",
+    boot_v3.tables.ControllerTerminalEpochV3: "controller_terminal_epoch",
+    boot_v3.tables.Stage2LogicalTraceAuthorityRowV3: "stage2_logical_trace",
+    boot_v3.tables.Stage2Pid1AuthorityV3: "stage2_pid1_authority",
     boot_v3.tables.Stage2ControllerRowV3: "stage2_row",
 }
 
@@ -219,7 +231,7 @@ class BootBindingIntegritySelftest(unittest.TestCase):
         independent = _independent_fingerprint(binding)
         self.assertEqual(
             independent.hex(),
-            "931d14f0835803e79ab6005139dec568b891fdd43529644b0eb6f2e575f9501b",
+            "f75d82f71f562cf88a9e0e8f1f7561c6ab69b1e883d36d8e305f7655514c97cf",
         )
         record = boot_v3._ISSUED_BOOT_BINDINGS_V3.records[id(binding)]
         self.assertEqual(record.fingerprint, independent)
@@ -1360,7 +1372,7 @@ class BootBindingIntegritySelftest(unittest.TestCase):
             object.__setattr__(binding, field.name, original)
             self.assertFalse(is_issued_boot_binding_v3(binding))
 
-        for nested_type in nested_types:
+        for nested_type in sorted(nested_types, key=lambda item: item.__name__):
             binding = _binding()
             snapshot = next(
                 value
@@ -1369,11 +1381,18 @@ class BootBindingIntegritySelftest(unittest.TestCase):
             )
             field = fields(snapshot)[0]
             original = getattr(snapshot, field.name)
-            object.__setattr__(snapshot, field.name, None if original is not None else "changed")
-            with self.subTest(snapshot=type(snapshot).__name__, field=field.name):
-                self.assertFalse(is_issued_boot_binding_v3(binding))
-            object.__setattr__(snapshot, field.name, original)
+            try:
+                object.__setattr__(
+                    snapshot, field.name,
+                    None if original is not None else "changed",
+                )
+                with self.subTest(snapshot=type(snapshot).__name__, field=field.name):
+                    self.assertFalse(is_issued_boot_binding_v3(binding))
+            finally:
+                object.__setattr__(snapshot, field.name, original)
+            self.assertEqual(getattr(snapshot, field.name), original)
             self.assertFalse(is_issued_boot_binding_v3(binding))
+        self.assertTrue(is_issued_boot_binding_v3(_binding()))
 
     def test_forged_types_and_nested_field_tampering_reject(self) -> None:
         binding = _binding()
@@ -1408,17 +1427,21 @@ class BootBindingIntegritySelftest(unittest.TestCase):
             for value in _walk_non_primitives(prototype)
             if is_dataclass(value) and value is not prototype
         }
-        for nested_type in nested_types:
+        for nested_type in sorted(nested_types, key=lambda item: item.__name__):
             binding = _binding()
             snapshot = next(
                 value
                 for value in _walk_non_primitives(binding)
                 if type(value) is nested_type
             )
-            object.__setattr__(snapshot, "unexpected_field", "forged")
-            with self.subTest(nested=nested_type.__name__, mutation="extra"):
-                self.assertFalse(is_issued_boot_binding_v3(binding))
-            object.__delattr__(snapshot, "unexpected_field")
+            try:
+                object.__setattr__(snapshot, "unexpected_field", "forged")
+                with self.subTest(nested=nested_type.__name__, mutation="extra"):
+                    self.assertFalse(is_issued_boot_binding_v3(binding))
+            finally:
+                if hasattr(snapshot, "unexpected_field"):
+                    object.__delattr__(snapshot, "unexpected_field")
+            self.assertFalse(hasattr(snapshot, "unexpected_field"))
             self.assertFalse(is_issued_boot_binding_v3(binding))
 
             binding = _binding()
@@ -1429,11 +1452,17 @@ class BootBindingIntegritySelftest(unittest.TestCase):
             )
             declared = fields(snapshot)[0]
             value = getattr(snapshot, declared.name)
-            object.__delattr__(snapshot, declared.name)
-            with self.subTest(nested=nested_type.__name__, mutation="deleted"):
-                self.assertFalse(is_issued_boot_binding_v3(binding))
-            object.__setattr__(snapshot, declared.name, value)
+            try:
+                object.__delattr__(snapshot, declared.name)
+                with self.subTest(nested=nested_type.__name__, mutation="deleted"):
+                    self.assertFalse(is_issued_boot_binding_v3(binding))
+            finally:
+                if not hasattr(snapshot, declared.name):
+                    object.__setattr__(snapshot, declared.name, value)
+            self.assertEqual(getattr(snapshot, declared.name), value)
             self.assertFalse(is_issued_boot_binding_v3(binding))
+
+        self.assertTrue(is_issued_boot_binding_v3(_binding()))
 
         binding = _binding()
         snapshot = binding.process_authority

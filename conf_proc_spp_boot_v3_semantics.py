@@ -934,7 +934,20 @@ def _launch_projection_v3(
     controller_source = _runtime_source_projection_v3(
         parsed, path=controller.source_path, label="stage2 controller",
     )
-    _launch_require(controller.interpreter_path == "/usr/bin/python3.10" and controller.argv[:5] == ("/usr/bin/python3.10", "-I", "-B", "-S", "/usr/lib/spp/conf_proc_spp_init.py"), "stage2 controller interpreter authority disagrees")
+    _launch_require(
+        controller.source_size_bytes == controller_source.size_bytes
+        and controller.source_sha256 == controller_source.sha256
+        and controller.interpreter_path == "/usr/bin/python3.10"
+        and controller.argv == (
+            "python3.10", "-I", "-B", "-S",
+            "/usr/lib/spp/conf_proc_spp_init.py", "--stage2",
+            "--handoff-fd=3", "--device-monitor-fd=4", "--broker-tpm-fd=5",
+        )
+        and controller.pid1_authority.identity.source_path == controller.source_path
+        and controller.pid1_authority.identity.interpreter_path == controller.interpreter_path
+        and controller.pid1_authority.identity.argv == controller.argv,
+        "stage2 controller interpreter authority disagrees",
+    )
     exec_source = _runtime_source_projection_v3(
         parsed, path="/usr/bin/spp", label="stage2 executable",
         expected_role="final_systemd_stub",

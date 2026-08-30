@@ -257,6 +257,16 @@ class BootV3LaunchAuthoritySelftest(unittest.TestCase):
             self.binding.stage2_controller.source.path,
             "/usr/lib/spp/conf_proc_spp_init.py",
         )
+        self.assertEqual(
+            (
+                self.binding.stage2_controller.source.size_bytes,
+                self.binding.stage2_controller.source.sha256,
+            ),
+            (
+                4604,
+                "32b7c8f5b6772f52433adcca11051ad1e883bb59aa4f7c66116e43a379bd1dd3",
+            ),
+        )
         parsed = self._parsed()
         object.__setattr__(parsed.lock, "inputs", tuple(item for item in parsed.lock.inputs if item.id != "runtime-stage2-controller"))
         with self.assertRaisesRegex(ApplianceErrorV3, CP_BOOT_V3_LAUNCH_SUPERVISION):
@@ -294,6 +304,15 @@ class BootV3LaunchAuthoritySelftest(unittest.TestCase):
         service["logical_role"] = "conf_proc_source"
         with self.assertRaisesRegex(ApplianceErrorV3, CP_BOOT_V3_LAUNCH_SUPERVISION):
             semantics._launch_projection_v3(parsed)
+
+    def test_controller_source_bytes_must_match_packaged_authority(self) -> None:
+        docs, contract = build_v3_fixture(
+            controller_source_bytes=b"stage2-controller-source",
+        )
+        with self.assertRaisesRegex(
+            ApplianceErrorV3, CP_BOOT_V3_LAUNCH_SUPERVISION,
+        ):
+            boot.bind_boot_inputs_v3(contract=contract, **docs)
 
     def test_gateway_and_controller_literal_agreements_are_measured(self) -> None:
         parsed = self._parsed()
@@ -345,13 +364,18 @@ class BootV3LaunchAuthoritySelftest(unittest.TestCase):
 
     def test_controller_fd5_and_readiness_literals_are_measured(self) -> None:
         controller = tables.STAGE2_CONTROLLER_ROW_V3
-        self.assertEqual(tuple(row.fd for row in controller.exec_fd_census), (0, 1, 2, 3, 4, 5))
+        self.assertEqual(tuple(row.fd for row in controller.exec_fd_census), (0, 1, 2, 3, 4, 5, 6))
         self.assertIn("bounded_broker_TPM_transfer", controller.exec_fd_census[5].purpose)
         self.assertIn("close_pid1_copy_prove_absence", controller.exec_fd_census[5].stage2_action)
+        self.assertEqual(controller.exec_fd_census[6].purpose, "predicate5_trace")
+        self.assertIn("unissuable", controller.exec_fd_census[6].stage2_action)
         self.assertEqual(controller.entitlement_dns[0], ("hostname", "services.solstone.app"))
         self.assertEqual(controller.entitlement_dns[1], ("resolver", "168.63.129.16:53"))
         self.assertIn("CAP_SYS_BOOT", controller.initial_capabilities)
+        self.assertIn("CAP_SETPCAP", controller.initial_capabilities)
+        self.assertIn("CAP_SYS_PTRACE", controller.initial_capabilities)
         self.assertNotIn("CAP_NET_BIND_SERVICE", controller.steady_capabilities)
+        self.assertNotIn("CAP_SETPCAP", controller.steady_capabilities)
         for row in tables.LAUNCH_ROLE_ROWS_V3[:3]:
             readiness = row.readiness
             assert readiness is not None

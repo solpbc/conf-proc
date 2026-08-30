@@ -41,6 +41,7 @@ SOURCE_ARCHIVE_PATHS_V3 = (
     "/usr/lib/spp/conf_proc_spp_boot_v3_semantics.py",
     "/usr/lib/spp/conf_proc_spp_boot_v3_tables.py",
     "/usr/lib/spp/conf_proc_spp_boot_v3_wire.py",
+    "/usr/lib/spp/conf_proc_spp_init.py",
     "/usr/lib/spp/conf_proc_spp_reasons_v3.py",
 )
 _INPUT_NAMES = (

@@ -11,7 +11,7 @@ import shutil
 import sys
 import tempfile
 import unittest
-from dataclasses import asdict, fields
+from dataclasses import asdict, fields, replace
 from pathlib import Path
 
 
@@ -78,7 +78,7 @@ class BootPayloadV3Selftest(unittest.TestCase):
         cpio = (output / "spp-boot-payload.cpio").read_bytes()
         package = (output / "spp-boot-payload.package.json").read_bytes()
         self.assertEqual(result.state, "built_unqualified")
-        self.assertEqual(len(payload._parse_newc(cpio)), 29)
+        self.assertEqual(len(payload._parse_newc(cpio)), 30)
         self.assertEqual(hashlib.sha256(cpio).hexdigest(), result.cpio_sha256)
         self.assertEqual(hashlib.sha256(package).hexdigest(), result.package_sha256)
         inspected = independent.inspect_boot_payload_v3(
@@ -91,6 +91,57 @@ class BootPayloadV3Selftest(unittest.TestCase):
         self.assertEqual(inspected.state, "artifact_consistent")
         self.assertEqual(inspected.cpio_sha256, result.cpio_sha256)
         self.assertEqual(self._compile(), result)
+
+    def test_controller_source_binding_is_exact_in_builder_and_inspector(self) -> None:
+        source = self.binding.stage2_controller.source
+        authority = self.binding.stage2_controller.authority
+        self.assertEqual(
+            (source.path, source.size_bytes, source.sha256),
+            (
+                "/usr/lib/spp/conf_proc_spp_init.py",
+                4604,
+                "32b7c8f5b6772f52433adcca11051ad1e883bb59aa4f7c66116e43a379bd1dd3",
+            ),
+        )
+        mutations = (
+            replace(
+                self.binding,
+                stage2_controller=replace(
+                    self.binding.stage2_controller,
+                    source=replace(source, size_bytes=24),
+                ),
+            ),
+            replace(
+                self.binding,
+                stage2_controller=replace(
+                    self.binding.stage2_controller,
+                    source=replace(
+                        source,
+                        sha256="a3fa88fc3ba0faa1a42d12702d4603960a3f88226c957970f5f5731d0ac69b3f",
+                    ),
+                ),
+            ),
+            replace(
+                self.binding,
+                stage2_controller=replace(
+                    self.binding.stage2_controller,
+                    authority=replace(authority, source_size_bytes=24),
+                ),
+            ),
+            replace(
+                self.binding,
+                stage2_controller=replace(
+                    self.binding.stage2_controller,
+                    authority=replace(authority, source_sha256="0" * 64),
+                ),
+            ),
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                with self.assertRaises(ApplianceErrorV3):
+                    payload._validate_controller_source_binding(mutation)
+                with self.assertRaises(ApplianceErrorV3):
+                    independent._validate_controller_source_binding(mutation)
 
     def test_issued_authority_and_plan_rejections(self) -> None:
         with self.assertRaisesRegex(ApplianceErrorV3, CP_SPP_PAYLOAD_V3_AUTHORITY):

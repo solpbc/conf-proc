@@ -373,8 +373,200 @@ class Stage2FdRowV3:
 
 
 @dataclass(frozen=True)
+class Stage2Pid1IdentityRowV3:
+    row_id: str
+    source_path: str
+    interpreter_path: str
+    argv: tuple[str, ...]
+    environment: tuple[tuple[str, str], ...]
+    pid: int
+    ppid: int
+    uid: int
+    gid: int
+    supplementary_groups: tuple[int, ...]
+    cwd: str
+    root: str
+    proc_self_exe_identity: str
+    argv0_identity: str
+    signal_reap_row_id: str
+
+
+@dataclass(frozen=True)
+class Stage2TaskLocalStateV3:
+    view: str
+    pid: int
+    tid: int
+    tgid: int
+    generation: str
+    effective: tuple[str, ...]
+    permitted: tuple[str, ...]
+    inheritable: tuple[str, ...]
+    ambient: tuple[str, ...]
+    bounding: tuple[str, ...]
+    signal_blocked: tuple[str, ...]
+    signal_ignored: tuple[str, ...]
+    signal_caught: tuple[str, ...]
+    signal_pending: tuple[str, ...]
+    shared_pending: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class Stage2ThreadCensusRowV3:
+    row_id: str
+    event_anchor: str
+    proc_task_entries: tuple[str, ...]
+    task_pid: int
+    task_tgid: int
+    process_state: Stage2TaskLocalStateV3
+    task_state: Stage2TaskLocalStateV3
+
+
+@dataclass(frozen=True)
+class Stage2CapabilityPhaseRowV3:
+    row_id: str
+    event_anchor: str
+    effective: tuple[str, ...]
+    permitted: tuple[str, ...]
+    inheritable: tuple[str, ...]
+    ambient: tuple[str, ...]
+    bounding: tuple[str, ...]
+    securebits: int
+
+
+@dataclass(frozen=True)
+class Stage2ExecFdAuthorityRowV3:
+    fd: int
+    role: str
+    object_identity: str
+    creation_flags: tuple[str, ...]
+    status_flags: tuple[str, ...]
+    descriptor_flag_rule: str
+    owner: str
+    stage2_action: str
+    terminal_owner: str
+    issuable: bool
+    mechanism: str | None
+    protocol: str | None
+    multicast_groups: tuple[str, ...] | None
+    queue_capacity: int | None
+    credentials: str | None
+    loss_counter: str | None
+    receive_capability: str | None
+    fdinfo_expectation: str | None
+
+
+@dataclass(frozen=True)
+class Stage2FdCensusEntryV3:
+    fd: int
+    role: str
+    owner: str
+    descriptor_flags: tuple[str, ...]
+    status_flags: tuple[str, ...]
+    object_identity: str
+    generation: str
+    logical_only: bool
+
+
+@dataclass(frozen=True)
+class Stage2FdCensusRowV3:
+    row_id: str
+    event_anchor: str
+    entries: tuple[Stage2FdCensusEntryV3, ...]
+    total: int
+    logical_only_roles: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class Stage2SignalReapRowV3:
+    row_id: str
+    mask_install_operation: str
+    mask_install_cardinality: int
+    mask_install_phase: str
+    blocked_signals: tuple[str, ...]
+    ignored_signals: tuple[str, ...]
+    caught_signals: tuple[str, ...]
+    sigchld_disposition: str
+    sigchld_flags: tuple[str, ...]
+    forbidden_sigchld_flags: tuple[str, ...]
+    other_catchable_disposition: str
+    signalfd_flags: tuple[str, ...]
+    signalfd_mask: tuple[str, ...]
+    waiter_owner: str
+    epoll_owner: str
+    forbidden_consumers: tuple[str, ...]
+    waitid_selector: str
+    waitid_flags: tuple[str, ...]
+    waitid_empty_outcomes: tuple[str, ...]
+    signalfd_drain_terminal: str
+    signalfd_record_rule: str
+    signalfd_code_allowlist: tuple[str, ...]
+    signalfd_invalid_rule: str
+    stop_continue_rule: str
+    reap_schedule_rule: str
+    reap_identity_rule: str
+    proc_closure_rule: str
+    child_reset_requirements: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class Stage2SignalOutcomeRowV3:
+    signal: str
+    member: str
+    epoch_binding: str
+    transition: str
+
+
+@dataclass(frozen=True)
+class ControllerTerminalEpochV3:
+    row_id: str
+    triggers: tuple[str, ...]
+    atomic_owner: str
+    actions: tuple[str, ...]
+    duplicate_rule: str
+    epoll_batch_order: str
+    completion_compare_rule: str
+    collector_exception_rule: str
+
+
+@dataclass(frozen=True)
+class Stage2LogicalTraceAuthorityRowV3:
+    row_id: str
+    intended_fd: int
+    package_selected: bool
+    issuable: bool
+    mechanism: str | None
+    protocol: str | None
+    multicast_groups: tuple[str, ...] | None
+    queue_capacity: int | None
+    credentials: str | None
+    loss_counter: str | None
+    receive_capability: str | None
+    fdinfo_expectation: str | None
+
+
+@dataclass(frozen=True)
+class Stage2Pid1AuthorityV3:
+    identity: Stage2Pid1IdentityRowV3
+    thread_censuses: tuple[Stage2ThreadCensusRowV3, ...]
+    child_fork_leaf: str
+    forbidden_thread_creators: tuple[str, ...]
+    interval_trace_requirement: str
+    capability_phases: tuple[Stage2CapabilityPhaseRowV3, ...]
+    capability_drop_sequence: tuple[str, ...]
+    exec_fds: tuple[Stage2ExecFdAuthorityRowV3, ...]
+    stdio_ofd_distinctness_checks: tuple[str, ...]
+    fd_censuses: tuple[Stage2FdCensusRowV3, ...]
+    signal_reap: Stage2SignalReapRowV3
+    signal_outcomes: tuple[Stage2SignalOutcomeRowV3, ...]
+    terminal_transition: ControllerTerminalEpochV3
+    logical_trace: Stage2LogicalTraceAuthorityRowV3
+
+
+@dataclass(frozen=True)
 class Stage2ControllerRowV3:
     source_path: str
+    source_size_bytes: int
+    source_sha256: str
     interpreter_path: str
     argv: tuple[str, ...]
     environment: tuple[tuple[str, str], ...]
@@ -391,6 +583,7 @@ class Stage2ControllerRowV3:
     entitlement_ledger_states: tuple[str, ...]
     initial_capabilities: tuple[str, ...]
     steady_capabilities: tuple[str, ...]
+    pid1_authority: Stage2Pid1AuthorityV3
 
 
 _FIXED_ROLE_ENVIRONMENT_V3: Final = (
@@ -497,20 +690,403 @@ LAUNCH_ROLE_ROWS_V3: Final = (
 )
 
 
+_STAGE2_PID1_ARGV_V3: Final = (
+    "python3.10", "-I", "-B", "-S", "/usr/lib/spp/conf_proc_spp_init.py",
+    "--stage2", "--handoff-fd=3", "--device-monitor-fd=4",
+    "--broker-tpm-fd=5",
+)
+_STAGE2_INITIAL_CAPABILITIES_V3: Final = (
+    "CAP_KILL", "CAP_NET_ADMIN", "CAP_NET_BIND_SERVICE", "CAP_SETGID",
+    "CAP_SETPCAP", "CAP_SETUID", "CAP_SYS_BOOT", "CAP_SYS_PTRACE",
+)
+_STAGE2_STEADY_CAPABILITIES_V3: Final = (
+    "CAP_KILL", "CAP_NET_ADMIN", "CAP_SETGID", "CAP_SETUID", "CAP_SYS_BOOT",
+    "CAP_SYS_PTRACE",
+)
+_STAGE2_SIGNAL_MASK_V3: Final = (
+    "SIGCHLD", "SIGTERM", "SIGINT", "SIGHUP", "SIGQUIT",
+)
+
+
+def _stage2_pid1_state_v3(
+    view: str,
+    capabilities: tuple[str, ...],
+    blocked: tuple[str, ...],
+    ignored: tuple[str, ...],
+) -> Stage2TaskLocalStateV3:
+    return Stage2TaskLocalStateV3(
+        view, 1, 1, 1, "controller_generation_1:start_time_boot_pid1",
+        capabilities, capabilities, (), (), capabilities, blocked, ignored, (),
+        (), (),
+    )
+
+
+_STAGE2_PID1_PREMASK_PROCESS_STATE_V3: Final = _stage2_pid1_state_v3(
+    "process:/proc/1/status", _STAGE2_INITIAL_CAPABILITIES_V3, (), (),
+)
+_STAGE2_PID1_PREMASK_TASK_STATE_V3: Final = _stage2_pid1_state_v3(
+    "task:/proc/1/task/1/status", _STAGE2_INITIAL_CAPABILITIES_V3, (), (),
+)
+_STAGE2_PID1_INITIAL_PROCESS_STATE_V3: Final = _stage2_pid1_state_v3(
+    "process:/proc/1/status", _STAGE2_INITIAL_CAPABILITIES_V3,
+    _STAGE2_SIGNAL_MASK_V3, ("SIGPIPE",),
+)
+_STAGE2_PID1_INITIAL_TASK_STATE_V3: Final = _stage2_pid1_state_v3(
+    "task:/proc/1/task/1/status", _STAGE2_INITIAL_CAPABILITIES_V3,
+    _STAGE2_SIGNAL_MASK_V3, ("SIGPIPE",),
+)
+_STAGE2_PID1_STEADY_PROCESS_STATE_V3: Final = _stage2_pid1_state_v3(
+    "process:/proc/1/status", _STAGE2_STEADY_CAPABILITIES_V3,
+    _STAGE2_SIGNAL_MASK_V3, ("SIGPIPE",),
+)
+_STAGE2_PID1_STEADY_TASK_STATE_V3: Final = _stage2_pid1_state_v3(
+    "task:/proc/1/task/1/status", _STAGE2_STEADY_CAPABILITIES_V3,
+    _STAGE2_SIGNAL_MASK_V3, ("SIGPIPE",),
+)
+
+_STAGE2_EXEC_FD_AUTHORITY_ROWS_V3: Final = (
+    Stage2ExecFdAuthorityRowV3(
+        0, "stdin", "/dev/null_char_1:3", ("O_RDONLY",), ("O_RDONLY",),
+        "non_CLOEXEC", "stage2_pid1", "retain_standard", "stage2_pid1", True,
+        "separate_open", "character_device", (), None, "root_pid1", None,
+        None, "exact_device_inode_owner_flags",
+    ),
+    Stage2ExecFdAuthorityRowV3(
+        1, "stdout_evidence", "/dev/console_char_5:1",
+        ("O_WRONLY", "O_NOCTTY", "O_NONBLOCK"),
+        ("O_WRONLY", "O_NONBLOCK"), "non_CLOEXEC", "stage2_pid1",
+        "framed_evidence_only", "stage2_pid1", True, "separate_open",
+        "character_device", (), None, "root_pid1", None, None,
+        "exact_device_inode_owner_flags",
+    ),
+    Stage2ExecFdAuthorityRowV3(
+        2, "stderr_diagnostic", "/dev/console_char_5:1",
+        ("O_WRONLY", "O_NOCTTY", "O_NONBLOCK"),
+        ("O_WRONLY", "O_NONBLOCK"), "non_CLOEXEC", "stage2_pid1",
+        "one_line_diagnostics_only", "stage2_pid1", True, "separate_open",
+        "character_device", (), None, "root_pid1", None, None,
+        "exact_device_inode_owner_flags",
+    ),
+    Stage2ExecFdAuthorityRowV3(
+        3, "handoff", "anonymous_sealed_spp-handoff-v3_memfd",
+        ("MFD_CLOEXEC", "MFD_ALLOW_SEALING"), ("O_RDWR",),
+        "clear_readback_before_exec_restore_readback_after_exec", "stage1",
+        "consume_once_close_and_prove_original_inode_absence", "closed", True,
+        "sealed_memfd", "one_use_handoff", (), 1048, "stage1_then_stage2", None,
+        None, "exact_memfd_name_size_seals_offset_inode_flags",
+    ),
+    Stage2ExecFdAuthorityRowV3(
+        4, "device_monitor", "sealed_uevent_device_monitor",
+        ("SOCK_RAW", "SOCK_NONBLOCK", "SOCK_CLOEXEC"),
+        ("O_RDWR", "O_NONBLOCK"),
+        "clear_readback_before_exec_restore_readback_after_exec", "stage1",
+        "retain_sealed_monitor", "stage2_pid1", True, "sealed_monitor",
+        "NETLINK_KOBJECT_UEVENT", (), None, "kernel_sender_only",
+        "sequence_and_overflow_closed", "CAP_NET_ADMIN",
+        "exact_socket_inode_owner_flags_registration",
+    ),
+    Stage2ExecFdAuthorityRowV3(
+        5, "broker_tpm", "/dev/tpmrm0_resource_manager_transfer",
+        ("O_RDWR", "O_CLOEXEC"), ("O_RDWR",),
+        "clear_readback_before_exec_restore_readback_after_exec", "stage1",
+        "transfer_once_to_broker_fd4_close_pid1_copy_prove_absence",
+        "attestation_broker", True, "tpm_resource_manager", "bounded_transfer",
+        (), None, "sealed_registration", None, None,
+        "exact_device_inode_owner_flags_registration",
+    ),
+    Stage2ExecFdAuthorityRowV3(
+        6, "predicate5_trace", "package_selected_logical_trace_role", (), (),
+        "clear_readback_before_exec_restore_readback_after_exec_after_binding",
+        "stage1", "unissuable_until_exact_target_binding", "stage2_pid1", False,
+        None, None, None, None, None, None, None, None,
+    ),
+)
+
+_STAGE2_FD_CENSUS_STANDARD_V3: Final = (
+    Stage2FdCensusEntryV3(
+        0, "stdin", "stage2_pid1", ("FD_CLOEXEC_absent",), ("O_RDONLY",),
+        "/dev/null_char_1:3", "boot_generation_1", False,
+    ),
+    Stage2FdCensusEntryV3(
+        1, "stdout_evidence", "stage2_pid1", ("FD_CLOEXEC_absent",),
+        ("O_WRONLY", "O_NONBLOCK"), "/dev/console_char_5:1:stdout_separate_ofd",
+        "boot_generation_1", False,
+    ),
+    Stage2FdCensusEntryV3(
+        2, "stderr_diagnostic", "stage2_pid1", ("FD_CLOEXEC_absent",),
+        ("O_WRONLY", "O_NONBLOCK"), "/dev/console_char_5:1:stderr_separate_ofd",
+        "boot_generation_1", False,
+    ),
+    Stage2FdCensusEntryV3(
+        4, "device_monitor", "stage2_pid1", ("FD_CLOEXEC",),
+        ("O_RDWR", "O_NONBLOCK"), "sealed_uevent_device_monitor",
+        "boot_generation_1:device_monitor", False,
+    ),
+)
+_STAGE2_FD_CENSUS_BROKER_TPM_V3: Final = Stage2FdCensusEntryV3(
+    5, "broker_tpm", "stage2_pid1", ("FD_CLOEXEC",), ("O_RDWR",),
+    "/dev/tpmrm0_resource_manager_transfer", "boot_generation_1:tpm_registration",
+    False,
+)
+_STAGE2_FD_CENSUS_TRACE_V3: Final = Stage2FdCensusEntryV3(
+    6, "predicate5_trace", "stage2_pid1", (), (),
+    "package_selected_logical_trace_role",
+    "logical_generation_0:exact_target_binding_pending", True,
+)
+_STAGE2_FD_CENSUS_SUPERVISOR_V3: Final = (
+    Stage2FdCensusEntryV3(
+        7, "signalfd", "stage2_pid1", ("FD_CLOEXEC",),
+        ("O_RDWR", "O_NONBLOCK"),
+        "anon_inode:signalfd:SIGCHLD,SIGTERM,SIGINT,SIGHUP,SIGQUIT",
+        "controller_generation_1", False,
+    ),
+    Stage2FdCensusEntryV3(
+        8, "timerfd", "stage2_pid1", ("FD_CLOEXEC",),
+        ("O_RDWR", "O_NONBLOCK"), "anon_inode:timerfd:CLOCK_MONOTONIC:5s",
+        "controller_generation_1", False,
+    ),
+    Stage2FdCensusEntryV3(
+        9, "epoll", "stage2_pid1", ("FD_CLOEXEC",), ("O_RDWR",),
+        "anon_inode:eventpoll:sole_pid1_owner", "controller_generation_1", False,
+    ),
+)
+_STAGE2_FD_CENSUS_SERVING_V3: Final = (
+    Stage2FdCensusEntryV3(
+        10, "listener", "stage2_pid1", ("FD_CLOEXEC",),
+        ("O_RDWR", "O_NONBLOCK"),
+        "AF_INET:SOCK_STREAM:0.0.0.0:9443:backlog8",
+        "controller_generation_1", False,
+    ),
+    Stage2FdCensusEntryV3(
+        11, "gateway_control", "stage2_pid1", ("FD_CLOEXEC",),
+        ("O_RDWR", "O_NONBLOCK"),
+        "AF_UNIX:SOCK_SEQPACKET:SO_PASSCRED:gateway_control_parent",
+        "gateway_generation_1", False,
+    ),
+    Stage2FdCensusEntryV3(
+        12, "readiness_broker", "stage2_pid1", ("FD_CLOEXEC",),
+        ("O_RDWR", "O_NONBLOCK"),
+        "AF_UNIX:SOCK_SEQPACKET:SO_PASSCRED:readiness_broker_parent",
+        "attestation_broker_generation_1", False,
+    ),
+    Stage2FdCensusEntryV3(
+        13, "readiness_inference", "stage2_pid1", ("FD_CLOEXEC",),
+        ("O_RDWR", "O_NONBLOCK"),
+        "AF_UNIX:SOCK_SEQPACKET:SO_PASSCRED:readiness_inference_parent",
+        "inference_generation_1", False,
+    ),
+    Stage2FdCensusEntryV3(
+        14, "readiness_asr", "stage2_pid1", ("FD_CLOEXEC",),
+        ("O_RDWR", "O_NONBLOCK"),
+        "AF_UNIX:SOCK_SEQPACKET:SO_PASSCRED:readiness_asr_parent",
+        "asr_generation_1", False,
+    ),
+    Stage2FdCensusEntryV3(
+        15, "drain_broker_stdout", "stage2_pid1", ("FD_CLOEXEC",),
+        ("O_RDONLY", "O_NONBLOCK"), "pipe:attestation_broker:stdout:read_end",
+        "attestation_broker_generation_1", False,
+    ),
+    Stage2FdCensusEntryV3(
+        16, "drain_broker_stderr", "stage2_pid1", ("FD_CLOEXEC",),
+        ("O_RDONLY", "O_NONBLOCK"), "pipe:attestation_broker:stderr:read_end",
+        "attestation_broker_generation_1", False,
+    ),
+    Stage2FdCensusEntryV3(
+        17, "drain_inference_stdout", "stage2_pid1", ("FD_CLOEXEC",),
+        ("O_RDONLY", "O_NONBLOCK"), "pipe:inference:stdout:read_end",
+        "inference_generation_1", False,
+    ),
+    Stage2FdCensusEntryV3(
+        18, "drain_inference_stderr", "stage2_pid1", ("FD_CLOEXEC",),
+        ("O_RDONLY", "O_NONBLOCK"), "pipe:inference:stderr:read_end",
+        "inference_generation_1", False,
+    ),
+    Stage2FdCensusEntryV3(
+        19, "drain_asr_stdout", "stage2_pid1", ("FD_CLOEXEC",),
+        ("O_RDONLY", "O_NONBLOCK"), "pipe:asr:stdout:read_end",
+        "asr_generation_1", False,
+    ),
+    Stage2FdCensusEntryV3(
+        20, "drain_asr_stderr", "stage2_pid1", ("FD_CLOEXEC",),
+        ("O_RDONLY", "O_NONBLOCK"), "pipe:asr:stderr:read_end",
+        "asr_generation_1", False,
+    ),
+    Stage2FdCensusEntryV3(
+        21, "drain_gateway_stdout", "stage2_pid1", ("FD_CLOEXEC",),
+        ("O_RDONLY", "O_NONBLOCK"), "pipe:gateway:stdout:read_end",
+        "gateway_generation_1", False,
+    ),
+    Stage2FdCensusEntryV3(
+        22, "drain_gateway_stderr", "stage2_pid1", ("FD_CLOEXEC",),
+        ("O_RDONLY", "O_NONBLOCK"), "pipe:gateway:stderr:read_end",
+        "gateway_generation_1", False,
+    ),
+)
+
+_STAGE2_FD_CENSUS_ROWS_V3: Final = (
+    Stage2FdCensusRowV3(
+        "post_admission", "after_typed_admission_readback",
+        (*_STAGE2_FD_CENSUS_STANDARD_V3, _STAGE2_FD_CENSUS_BROKER_TPM_V3,
+         _STAGE2_FD_CENSUS_TRACE_V3),
+        6, ("predicate5_trace",),
+    ),
+    Stage2FdCensusRowV3(
+        "prelaunch", "after_signal_fd_supervisor_before_first_child_fork",
+        (*_STAGE2_FD_CENSUS_STANDARD_V3, _STAGE2_FD_CENSUS_BROKER_TPM_V3,
+         _STAGE2_FD_CENSUS_TRACE_V3, *_STAGE2_FD_CENSUS_SUPERVISOR_V3),
+        9, ("predicate5_trace",),
+    ),
+    Stage2FdCensusRowV3(
+        "steady_serving", "immediately_before_serving_authority_admission",
+        (*_STAGE2_FD_CENSUS_STANDARD_V3, _STAGE2_FD_CENSUS_TRACE_V3,
+         *_STAGE2_FD_CENSUS_SUPERVISOR_V3, *_STAGE2_FD_CENSUS_SERVING_V3),
+        21, ("predicate5_trace",),
+    ),
+)
+
+_STAGE2_SIGNAL_REAP_ROW_V3: Final = Stage2SignalReapRowV3(
+    "pid1_signal_reap", "rt_sigprocmask:SIG_BLOCK:exact_mask", 1,
+    "before_any_thread_or_child", _STAGE2_SIGNAL_MASK_V3,
+    ("SIGPIPE",), (), "SIG_DFL",
+    ("SA_NOCLDSTOP",), ("SA_NOCLDWAIT",),
+    "SIG_DFL_no_behavior_changing_flags", ("SFD_NONBLOCK", "SFD_CLOEXEC"),
+    _STAGE2_SIGNAL_MASK_V3, "stage2_pid1", "sole_pid1_epoll",
+    ("async_handler", "second_signalfd", "sigwait", "sigwaitinfo",
+     "sigtimedwait", "waitpid", "second_waitid", "other_SIGCHLD_consumer"),
+    "P_ALL:0", ("WEXITED", "WNOHANG"),
+    ("success_si_pid_zero_with_live_children", "error_ECHILD_with_no_children"),
+    "fixed_records_until_EAGAIN", "full_signalfd_siginfo_record_per_read",
+    ("SIGCHLD:CLD_EXITED", "SIGCHLD:CLD_KILLED", "SIGCHLD:CLD_DUMPED",
+     "SIGTERM:SI_USER", "SIGTERM:SI_QUEUE", "SIGTERM:SI_TKILL",
+     "SIGTERM:SI_KERNEL", "SIGINT:SI_USER", "SIGINT:SI_QUEUE",
+     "SIGINT:SI_TKILL", "SIGINT:SI_KERNEL", "SIGHUP:SI_USER",
+     "SIGHUP:SI_QUEUE", "SIGHUP:SI_TKILL", "SIGHUP:SI_KERNEL",
+     "SIGQUIT:SI_USER", "SIGQUIT:SI_QUEUE", "SIGQUIT:SI_TKILL",
+     "SIGQUIT:SI_KERNEL"),
+    "short_unknown_or_mismatched_record_is_global_failure",
+    "stop_or_continue_ssi_code_is_global_failure",
+    "after_each_exit_SIGCHLD_and_immediately_before_each_blocking_epoll_wait",
+    "nonzero_si_pid_consumed_once_matches_supervised_pid_start_time_role_generation",
+    "after_each_complete_drain_exact_child_task_census_matches_empty_outcome_and_has_no_zombie",
+    ("single_threaded_before_credentials_maps_exec", "close_inherited_signal_timer_epoll",
+     "close_every_non_map_fd", "reset_SIGPIPE_and_all_catchable_to_SIG_DFL",
+     "blocked_mask_empty", "pending_sets_empty", "install_only_exact_launch_fd_map"),
+)
+
+STAGE2_PID1_AUTHORITY_V3: Final = Stage2Pid1AuthorityV3(
+    Stage2Pid1IdentityRowV3(
+        "stage2_pid1", "/usr/lib/spp/conf_proc_spp_init.py",
+        "/usr/bin/python3.10", _STAGE2_PID1_ARGV_V3, _FIXED_ROLE_ENVIRONMENT_V3,
+        1, 0, 0, 0, (), "/", "/", "separate:/usr/bin/python3.10",
+        "python3.10", "pid1_signal_reap",
+    ),
+    (
+        Stage2ThreadCensusRowV3(
+            "signal_setup", "immediately_before_signal_mask_first_install",
+            ("1",), 1, 1, _STAGE2_PID1_PREMASK_PROCESS_STATE_V3,
+            _STAGE2_PID1_PREMASK_TASK_STATE_V3,
+        ),
+        Stage2ThreadCensusRowV3(
+            "capability_drop", "after_final_capability_drop_readback",
+            ("1",), 1, 1, _STAGE2_PID1_STEADY_PROCESS_STATE_V3,
+            _STAGE2_PID1_STEADY_TASK_STATE_V3,
+        ),
+        Stage2ThreadCensusRowV3(
+            "launch", "immediately_before_first_child_fork",
+            ("1",), 1, 1, _STAGE2_PID1_INITIAL_PROCESS_STATE_V3,
+            _STAGE2_PID1_INITIAL_TASK_STATE_V3,
+        ),
+        Stage2ThreadCensusRowV3(
+            "serving", "immediately_before_serving_authority_admission",
+            ("1",), 1, 1, _STAGE2_PID1_STEADY_PROCESS_STATE_V3,
+            _STAGE2_PID1_STEADY_TASK_STATE_V3,
+        ),
+    ),
+    "stage2_spawn_child_v3:fork",
+    ("_thread", "threading", "pthread", "clone3", "clone:CLONE_THREAD"),
+    "exact_target_continuous_clone_event_trace_stage2_entry_through_serving",
+    (
+        Stage2CapabilityPhaseRowV3(
+            "stage2_admitted", "after_typed_admission_readback",
+            _STAGE2_INITIAL_CAPABILITIES_V3, _STAGE2_INITIAL_CAPABILITIES_V3,
+            (), (), _STAGE2_INITIAL_CAPABILITIES_V3, 0,
+        ),
+        Stage2CapabilityPhaseRowV3(
+            "launch_supervision_ready",
+            "after_signal_fd_supervisor_immediately_before_first_fork",
+            _STAGE2_INITIAL_CAPABILITIES_V3, _STAGE2_INITIAL_CAPABILITIES_V3,
+            (), (), _STAGE2_INITIAL_CAPABILITIES_V3, 0,
+        ),
+        Stage2CapabilityPhaseRowV3(
+            "serving_steady",
+            "after_DHCP_socket_identity_absence_and_ordered_drop_readback",
+            _STAGE2_STEADY_CAPABILITIES_V3, _STAGE2_STEADY_CAPABILITIES_V3,
+            (), (), _STAGE2_STEADY_CAPABILITIES_V3, 0,
+        ),
+    ),
+    ("require_original_DHCP_socket_identity_absent",
+     "remove_CAP_NET_BIND_SERVICE_effective_permitted",
+     "PR_CAPBSET_DROP_CAP_NET_BIND_SERVICE", "PR_CAPBSET_DROP_CAP_SETPCAP",
+     "remove_CAP_SETPCAP_effective_permitted",
+     "readback_all_capability_surfaces_and_prove_both_non_regainable"),
+    _STAGE2_EXEC_FD_AUTHORITY_ROWS_V3,
+    ("kcmp:0:1=positive", "kcmp:0:2=positive", "kcmp:1:2=positive"),
+    _STAGE2_FD_CENSUS_ROWS_V3,
+    _STAGE2_SIGNAL_REAP_ROW_V3,
+    (
+        Stage2SignalOutcomeRowV3(
+            "SIGTERM", "shutdown_sigterm", "current_controller_epoch",
+            "global_fail_stop",
+        ),
+        Stage2SignalOutcomeRowV3(
+            "SIGINT", "shutdown_sigint", "current_controller_epoch",
+            "global_fail_stop",
+        ),
+        Stage2SignalOutcomeRowV3(
+            "SIGHUP", "shutdown_sighup", "current_controller_epoch",
+            "global_fail_stop",
+        ),
+        Stage2SignalOutcomeRowV3(
+            "SIGQUIT", "shutdown_sigquit", "current_controller_epoch",
+            "global_fail_stop",
+        ),
+    ),
+    ControllerTerminalEpochV3(
+        "controller_terminal_epoch",
+        ("shutdown_signal_outcome", "unknown_child_exit", "long_lived_role_exit"),
+        "stage2_pid1_sole_event_loop_state",
+        ("latch_terminal", "increment_nonzero_controller_epoch_once",
+         "invalidate_prior_epoch_readiness_candidates_and_completions",
+         "close_serving_issuance"),
+        "duplicate_or_mixed_shutdown_observes_existing_terminal_epoch_only",
+        "signalfd_drain_and_child_reap_before_any_readiness_record",
+        "same_live_epoch_and_terminal_false_compare_and_set",
+        "only_current_authorized_collector_identity_status_enters_typed_finish_or_abort",
+    ),
+    Stage2LogicalTraceAuthorityRowV3(
+        "predicate5_trace", 6, True, False, None, None, None, None, None, None,
+        None, None,
+    ),
+)
+
+
 STAGE2_CONTROLLER_ROW_V3: Final = Stage2ControllerRowV3(
-    "/usr/lib/spp/conf_proc_spp_init.py", "/usr/bin/python3.10",
-    ("/usr/bin/python3.10", "-I", "-B", "-S", "/usr/lib/spp/conf_proc_spp_init.py"),
+    "/usr/lib/spp/conf_proc_spp_init.py", 4604,
+    "32b7c8f5b6772f52433adcca11051ad1e883bb59aa4f7c66116e43a379bd1dd3",
+    "/usr/bin/python3.10",
+    _STAGE2_PID1_ARGV_V3,
     _FIXED_ROLE_ENVIRONMENT_V3, 0, 0, (), "/", "/", _ROLE_NAMESPACES_V3,
     (
-        Stage2FdRowV3(0, "stdin", "CLOEXEC", "retain_standard", "stage2_pid1"),
-        Stage2FdRowV3(1, "stdout", "CLOEXEC", "retain_standard", "stage2_pid1"),
-        Stage2FdRowV3(2, "stderr", "CLOEXEC", "retain_standard", "stage2_pid1"),
+        Stage2FdRowV3(0, "stdin", "non_CLOEXEC", "retain_standard", "stage2_pid1"),
+        Stage2FdRowV3(1, "stdout_evidence", "non_CLOEXEC", "framed_evidence_only", "stage2_pid1"),
+        Stage2FdRowV3(2, "stderr_diagnostic", "non_CLOEXEC", "one_line_diagnostics_only", "stage2_pid1"),
         Stage2FdRowV3(3, "sealed_handoff_memfd", "clear_and_readback_immediately_before_same_exec", "consume_once_close_and_prove_absence_before_post_exec_effect", "closed"),
         Stage2FdRowV3(4, "sealed_device_monitor", "clear_and_readback_immediately_before_same_exec", "set_and_readback_CLOEXEC_before_other_post_exec_effect", "stage2_pid1"),
         Stage2FdRowV3(5, "bounded_broker_TPM_transfer", "clear_and_readback_immediately_before_same_exec", "prove_identity_set_and_readback_CLOEXEC_then_transfer_once_to_broker_fd4_close_pid1_copy_prove_absence", "attestation_broker"),
+        Stage2FdRowV3(6, "predicate5_trace", "clear_and_readback_only_after_exact_target_binding", "unissuable_until_exact_target_binding", "stage2_pid1"),
     ),
     (
-        "only_fds_3_4_5_clear_FD_CLOEXEC_for_stage2_exec",
+        "only_fds_3_4_5_6_clear_FD_CLOEXEC_for_stage2_exec_after_fd6_binding",
         "fd3_and_fd4_created_sealed_CLOEXEC_before_stage2_exec",
         "fd3_consumed_once_then_closed_and_inode_fd_absence_proven",
         "fd4_FD_CLOEXEC_restored_and_read_back_before_other_post_exec_effect",
@@ -518,6 +1094,7 @@ STAGE2_CONTROLLER_ROW_V3: Final = Stage2ControllerRowV3(
         "fd5_matches_sealed_TPM_resource_manager_registration_boot_epoch_device_identity",
         "stage2_issues_no_TPM_command_and_transfers_fd5_once_to_broker_fd4",
         "broker_sets_and_reads_back_FD_CLOEXEC_on_fd4_after_exec",
+        "fd6_logical_role_is_nonissuable_with_null_physical_fields_until_exact_target_binding",
     ),
     (
         ("hostname", "services.solstone.app"), ("resolver", "168.63.129.16:53"), ("tcp_peer_port", "443"),
@@ -534,8 +1111,9 @@ STAGE2_CONTROLLER_ROW_V3: Final = Stage2ControllerRowV3(
         ("clean_reject", "policy_apply_rejected_closed_only_before_mutation_exact_base_dump_rule_absence"),
     ),
     ("none", "connecting", "fd_sent", "acked", "rejected"),
-    ("CAP_NET_ADMIN", "CAP_NET_BIND_SERVICE", "CAP_SETUID", "CAP_SETGID", "CAP_KILL", "CAP_SYS_BOOT"),
-    ("CAP_NET_ADMIN", "CAP_SETUID", "CAP_SETGID", "CAP_KILL", "CAP_SYS_BOOT"),
+    _STAGE2_INITIAL_CAPABILITIES_V3,
+    _STAGE2_STEADY_CAPABILITIES_V3,
+    STAGE2_PID1_AUTHORITY_V3,
 )
 
 
