@@ -78,13 +78,6 @@ _GRAPH_KEYS_V3: Final = frozenset({
 _GRAPH_NODE_KINDS_V3: Final = frozenset({
     "measured_file", "measured_directory", "jit_derivation", "jit_output",
 })
-_GRAPH_STARTUP_KINDS_V3: Final = frozenset({
-    "python_meta_path", "python_path_hook", "python_importer_cache", "python_search_path",
-})
-_GRAPH_LOADING_KINDS_V3: Final = frozenset({
-    "python_pth", "python_namespace_package", "python_startup_hook",
-})
-_GRAPH_ELF_KINDS_V3: Final = frozenset({"elf_interpreter", "elf_search"})
 _GRAPH_DECLARATION_KINDS_V3: Final = frozenset({
     "python_import", "elf_interpreter", "elf_needed", "elf_search", "dlopen", "jit_invoke",
 })
@@ -1518,10 +1511,6 @@ def _graph_edge_raw_v3(value: ExecutableGraphEdgeRowV3) -> dict[str, object]:
     return {"id": value.id, "kind": value.kind, "from_id": value.from_id, "to_id": value.to_id, "order_group": value.order_group, "ordinal": value.ordinal, "requested_path": value.requested_path, "resolved_id": value.resolved_id, "alias_chain": list(value.alias_chain), "declaration_kind": value.declaration_kind, "declaration_ref": value.declaration_ref}
 
 
-def _graph_declaration_raw_v3(value: ExecutableGraphDeclarationRowV3) -> dict[str, object]:
-    return {"id": value.id, "kind": value.kind, "owner_id": value.owner_id, "order_group": value.order_group, "ordinal": value.ordinal, "requested_path": value.requested_path, "target_id": value.target_id, "alias_chain": list(value.alias_chain)}
-
-
 def _graph_resolve_edge_v3(
     *, requested_path: str | None, resolved_id: str, alias_chain: tuple[str, ...],
     aliases: tuple[ExecutableGraphAliasRowV3, ...], nodes_by_id: dict[str, object],
@@ -1576,6 +1565,7 @@ def _graph_validate_declarative_edges_v3(
     nodes_by_id: dict[str, object], aliases: tuple[ExecutableGraphAliasRowV3, ...],
     entrypoints: tuple[str, ...],
 ) -> None:
+    # Candidate/independent-inspector raw-byte agreement is the later gate for declared authority.
     declarations_by_id = {row.id: row for row in declarations}
     graph_edges = [row for row in edges if row.declaration_kind == "executable_graph"]
     _require(len(graph_edges) == len(declarations) and {row.declaration_ref for row in graph_edges} == set(declarations_by_id), CP_BOOT_V3_BINDING, "executable graph declarations and edges disagree")

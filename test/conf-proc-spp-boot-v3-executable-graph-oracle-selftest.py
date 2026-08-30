@@ -117,6 +117,100 @@ def _expected_controls(closure: dict[str, object]) -> list[dict[str, object]]:
     return rows
 
 
+def _expected_declarations_and_edges(closure: dict[str, object]) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    eligible = closure["eligible_files"]
+    bootstrap = closure["bootstrap"]
+    startup_kat = closure["startup_kat"]
+    jit_records = closure["jit_derivations"]
+    assert type(eligible) is list and type(bootstrap) is dict and type(startup_kat) is dict and type(jit_records) is list
+    by_path = {row["path"]: row for row in eligible}
+    image = by_path["/usr/bin/python3.10"]["image"]
+    assert type(image) is str
+
+    def file_id(path: str) -> str:
+        row = by_path[path]
+        return _file(row["image"], path)
+
+    declarations: list[dict[str, object]] = []
+    edges: list[dict[str, object]] = []
+
+    def add_source_edge(kind: str, from_id: str, to_id: str, order_group: str, ordinal: int, requested_path: str | None, payload: object, source_kind: str, source_ordinal: int | None = None) -> None:
+        reference = _source_ref(source_kind, None, kind, ordinal if source_ordinal is None else source_ordinal, payload)
+        edge = {
+            "kind": kind, "from_id": from_id, "to_id": to_id, "order_group": order_group,
+            "ordinal": ordinal, "requested_path": requested_path, "resolved_id": to_id,
+            "alias_chain": [], "declaration_kind": source_kind, "declaration_ref": reference,
+        }
+        edge["id"] = _edge_id(edge)
+        edges.append(edge)
+
+    def add_declarative_edge(kind: str, owner_id: str, target_id: str, order_group: str, ordinal: int, requested_path: str | None, alias_chain: list[str] | None = None) -> None:
+        chain = [] if alias_chain is None else alias_chain
+        declaration = {
+            "kind": kind, "owner_id": owner_id, "order_group": order_group,
+            "ordinal": ordinal, "requested_path": requested_path, "target_id": target_id,
+            "alias_chain": chain,
+        }
+        declaration["id"] = _declaration_id(declaration)
+        declarations.append(declaration)
+        edge = {
+            "kind": kind, "from_id": owner_id, "to_id": target_id,
+            "order_group": order_group, "ordinal": ordinal,
+            "requested_path": requested_path, "resolved_id": target_id,
+            "alias_chain": chain, "declaration_kind": "executable_graph",
+            "declaration_ref": declaration["id"],
+        }
+        edge["id"] = _edge_id(edge)
+        edges.append(edge)
+
+    binary = startup_kat["binary"]
+    assert type(binary) is dict and type(binary["path"]) is str
+    script_paths = [bootstrap["controller_entry"], bootstrap["source_path"], *(row["source_path"] for row in bootstrap["role_map"])]
+    for ordinal, path in enumerate(script_paths):
+        source = by_path[path]
+        payload = {
+            "interpreter_path": binary["path"], "source_input_id": source["input_id"],
+            "source_path": path, "source_sha256": source["sha256"],
+        }
+        reference = _source_ref("process_authority", None, "python_script", ordinal, payload)
+        add_source_edge("python_script", file_id(binary["path"]), file_id(path), "python-script:" + reference, 0, path, payload, "process_authority", ordinal)
+
+    controller_path = bootstrap["controller_entry"]
+    bootstrap_path = bootstrap["source_path"]
+    assert type(controller_path) is str and type(bootstrap_path) is str
+    file_alias = "/usr/lib/spp/conf_proc_spp_role_bootstrap_alias.py"
+    directory_alias = "/lib/x86_64-linux-gnu"
+    native_directory = "/usr/lib/x86_64-linux-gnu"
+    add_declarative_edge("python_import", file_id(controller_path), file_id(bootstrap_path), "python-import:" + file_id(controller_path) + ":post_bootstrap", 0, file_alias, [file_alias])
+    add_declarative_edge("elf_search", file_id("/usr/bin/spp"), _directory(image, native_directory), "elf-search:" + file_id("/usr/bin/spp"), 0, directory_alias, [directory_alias])
+
+    for record in jit_records:
+        compiler = record["compiler"]
+        loader = record["loader"]
+        inputs = record["inputs"]
+        output = record["output"]
+        assert type(record) is dict and type(compiler) is dict and type(loader) is dict and type(inputs) is list and type(output) is dict
+        digest = _jit_digest(record)
+        derivation_id = _derivation(digest)
+        compiler_path = compiler["path"]
+        assert type(compiler_path) is str
+        add_declarative_edge("elf_interpreter", file_id(compiler_path), file_id("/usr/lib/x86_64-linux-gnu/ld-spp"), "elf-interpreter:" + file_id(compiler_path), 0, "/usr/lib/x86_64-linux-gnu/ld-spp")
+        add_declarative_edge("elf_needed", file_id(compiler_path), file_id("/usr/lib/spp/lib/libtriton.so"), "elf-needed:" + file_id(compiler_path), 0, "/usr/lib/spp/lib/libtriton.so")
+        add_declarative_edge("dlopen", file_id(compiler_path), file_id("/usr/lib/spp/lib/plugin.so"), "dlopen:" + file_id(compiler_path), 0, "/usr/lib/spp/lib/plugin.so")
+        invoke_path = "/usr/lib/spp/conf_proc_spp_inference.py"
+        add_declarative_edge("jit_invoke", file_id(invoke_path), derivation_id, "jit-invoke:" + file_id(invoke_path), 0, None)
+        add_source_edge("jit_compiler", derivation_id, file_id(compiler["path"]), "jit-compiler:" + derivation_id, 0, None, compiler, "jit_derivation")
+        add_source_edge("jit_loader", derivation_id, file_id(loader["path"]), "jit-loader:" + derivation_id, 0, None, loader, "jit_derivation")
+        for ordinal, item in enumerate(inputs):
+            assert type(item) is dict
+            add_source_edge("jit_input", derivation_id, file_id(item["path"]), "jit-input:" + derivation_id, ordinal, None, item, "jit_derivation")
+        add_source_edge("jit_output", derivation_id, _output(digest, output["output_name"]), "jit-output:" + derivation_id, 0, None, output, "jit_derivation")
+
+    declarations.sort(key=lambda row: row["id"].encode("utf-8"))
+    edges.sort(key=lambda row: row["id"].encode("utf-8"))
+    return declarations, edges
+
+
 def _validate_graph(docs: dict[str, bytes]) -> dict[str, object]:
     contract = canonical_loads(docs["boot_contract_bytes"])
     policy = canonical_loads(docs["policy_bytes"])
@@ -156,13 +250,14 @@ def _validate_graph(docs: dict[str, bytes]) -> dict[str, object]:
         expected = _directory(image, terminal) if terminal in roots else _file(image, terminal)
         _fail(alias["resolved_id"] == expected, "alias terminal")
     _fail(graph["controls"] == _expected_controls(closure), "control denominator")
+    expected_declarations, expected_edges = _expected_declarations_and_edges(closure)
     _fail([row["id"] for row in graph["declarations"]] == sorted((row["id"] for row in graph["declarations"]), key=lambda item: item.encode("utf-8")) and all(row["id"] == _declaration_id(row) for row in graph["declarations"]), "declaration digest")
     _fail([row["id"] for row in graph["edges"]] == sorted((row["id"] for row in graph["edges"]), key=lambda item: item.encode("utf-8")) and all(row["id"] == _edge_id(row) for row in graph["edges"]), "edge digest")
+    _fail(graph["declarations"] == expected_declarations, "declaration denominator")
+    _fail(graph["edges"] == expected_edges, "edge denominator")
     declaration_ids = {row["id"] for row in graph["declarations"]}
     graph_edges = [row for row in graph["edges"] if row["declaration_kind"] == "executable_graph"]
     _fail({row["declaration_ref"] for row in graph_edges} == declaration_ids and len(graph_edges) == len(declaration_ids), "declaration consumption")
-    expected_kinds = {"python_script", "python_import", "elf_search"} | ({"elf_interpreter", "elf_needed", "dlopen", "jit_invoke", "jit_compiler", "jit_loader", "jit_input", "jit_output"} if jit_records else set())
-    _fail({row["kind"] for row in graph["edges"]} == expected_kinds, "edge denominator")
     return graph
 
 
@@ -175,7 +270,7 @@ class ExecutableGraphOracleSelftest(unittest.TestCase):
 
     def test_independent_mutation_matrix(self) -> None:
         docs, _ = build_v3_fixture(execution_mode="python_jit_triton", cache_policy="ephemeral_rebuild")
-        for mutation in ("entrypoint", "alias", "control", "declaration", "edge"):
+        for mutation in ("entrypoint", "alias", "control", "declaration", "edge", "coherent_relation"):
             with self.subTest(mutation=mutation):
                 changed = dict(docs)
                 contract = canonical_loads(changed["boot_contract_bytes"])
@@ -188,8 +283,21 @@ class ExecutableGraphOracleSelftest(unittest.TestCase):
                     graph["controls"][0]["phase"] = "role_pre"
                 elif mutation == "declaration":
                     graph["declarations"][0]["owner_id"] = graph["declarations"][0]["target_id"]
-                else:
+                elif mutation == "edge":
                     graph["edges"][0]["to_id"] = graph["edges"][0]["from_id"]
+                else:
+                    declaration = next(row for row in graph["declarations"] if row["kind"] == "elf_needed")
+                    edge = next(row for row in graph["edges"] if row["declaration_ref"] == declaration["id"])
+                    declaration["target_id"] = "file:runtime-policy:/usr/lib/spp/lib/plugin.so"
+                    declaration["requested_path"] = "/usr/lib/spp/lib/plugin.so"
+                    declaration["id"] = _declaration_id(declaration)
+                    edge["to_id"] = declaration["target_id"]
+                    edge["resolved_id"] = declaration["target_id"]
+                    edge["requested_path"] = declaration["requested_path"]
+                    edge["declaration_ref"] = declaration["id"]
+                    edge["id"] = _edge_id(edge)
+                    graph["declarations"].sort(key=lambda row: row["id"].encode("utf-8"))
+                    graph["edges"].sort(key=lambda row: row["id"].encode("utf-8"))
                 changed["boot_contract_bytes"] = canonical_dumps(contract)
                 with self.assertRaises(ValueError):
                     _validate_graph(changed)

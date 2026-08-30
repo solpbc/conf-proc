@@ -21,9 +21,11 @@ if str(ROOT / "test") not in sys.path:
 from conf_proc_json import canonical_dumps, canonical_loads
 import conf_proc_spp_boot_v3 as boot
 import conf_proc_spp_boot_v3_semantics as semantics
+import conf_proc_spp_boot_v3_fixture as fixture
 from conf_proc_spp_boot_v3_fixture import build_v3_fixture, refresh_v3_contract_bindings
 from conf_proc_spp_reasons_v3 import ApplianceErrorV3, CP_BOOT_V3_BINDING, CP_BOOT_V3_SCHEMA
 from conf_proc_spp_boot_v3_semantics import jit_derivation_sha256_v3
+from conf_proc_reasons import ApplianceError, CP_RUNTIME_CLOSURE_SCHEMA
 
 
 def _mutated_docs(*, execution_mode: str = "python_jit_triton", cache_policy: str = "ephemeral_rebuild") -> tuple[dict[str, bytes], object]:
@@ -38,6 +40,120 @@ def _commit_contract(docs: dict[str, bytes], contract: dict) -> None:
 
 def _parsed_contract(docs: dict[str, bytes]) -> object:
     return boot.parse_boot_contract_v3(docs["boot_contract_bytes"])
+
+
+def _rebuild_predecessors(docs: dict[str, bytes], lock: dict, policy: dict) -> None:
+    policy["images"]["runtime-policy"]["nodes"].sort(key=lambda item: item["path"])
+    docs["policy_bytes"] = canonical_dumps(policy)
+    policy_input = next(item for item in lock["inputs"] if item["id"] == "policy")
+    policy_input["sha256"] = hashlib.sha256(docs["policy_bytes"]).hexdigest()
+    policy_input["size_bytes"] = len(docs["policy_bytes"])
+    policy_input["source_retrieval_immutable_ref"] = "sha256:" + policy_input["sha256"]
+    lock["inputs"].sort(key=lambda item: item["id"])
+    docs["root_lock_bytes"] = canonical_dumps(lock)
+    fixture._set_runtime_closure(docs, lock)
+    manifest = canonical_loads(docs["accepted_manifest_bytes"])
+    images = tuple(
+        fixture._V1.ProvenanceV2ImageRecord(
+            image_id, item["squashfs_sha256"], item["squashfs_size_bytes"],
+            item["hash_device_sha256"], item["hash_device_size_bytes"], item["root_hash"],
+        )
+        for image_id, item in sorted(manifest["images"].items())
+    )
+    modules = tuple(
+        fixture._V1.ProvenanceV2ModuleObservation(item["path"], item["sha256"], item["signer_certificate_sha256"])
+        for item in manifest["module_authority"]["module_inventory"]
+    )
+    firmware = tuple(
+        fixture._V1.ProvenanceV2FirmwareObservation(item["path"], item["sha256"])
+        for item in manifest["module_authority"]["firmware_inventory"]
+    )
+    docs["accepted_manifest_bytes"] = fixture._V1.produce_provenance_v2(
+        root_lock_bytes=docs["root_lock_bytes"], runtime_closure_bytes=docs["runtime_closure_bytes"],
+        verity_rules_bytes=docs["verity_rules_bytes"], tcb_identity_bytes=docs["tcb_identity_bytes"],
+        builder_source_bytes=docs["builder_source_bytes"], policy_bytes=docs["policy_bytes"],
+        images=images, module_observations=modules, firmware_observations=firmware,
+    ).manifest_bytes
+
+
+def _alias_predecessors(lock: dict, policy: dict, path: str) -> tuple[dict, dict]:
+    placement = next(
+        placement
+        for item in lock["inputs"] for placement in item["placements"]
+        if placement["node_type"] == "symlink" and placement["path"] == path
+    )
+    node = next(
+        item for item in policy["images"]["runtime-policy"]["nodes"]
+        if item["node_type"] == "symlink" and item["path"] == path
+    )
+    return placement, node
+
+
+def _append_graph_declaration(
+    graph: dict, *, kind: str, owner_id: str, target_id: str, order_group: str,
+    ordinal: int, requested_path: str | None, alias_chain: list[str],
+) -> None:
+    declaration = {
+        "kind": kind, "owner_id": owner_id, "order_group": order_group,
+        "ordinal": ordinal, "requested_path": requested_path, "target_id": target_id,
+        "alias_chain": alias_chain,
+    }
+    declaration["id"] = semantics._graph_declaration_id_v3(
+        kind=kind, owner_id=owner_id, order_group=order_group, ordinal=ordinal,
+        requested_path=requested_path, target_id=target_id, alias_chain=tuple(alias_chain),
+    )
+    graph["declarations"].append(declaration)
+    edge = {
+        "kind": kind, "from_id": owner_id, "to_id": target_id,
+        "order_group": order_group, "ordinal": ordinal,
+        "requested_path": requested_path, "resolved_id": target_id,
+        "alias_chain": alias_chain, "declaration_kind": "executable_graph",
+        "declaration_ref": declaration["id"],
+    }
+    edge["id"] = semantics._graph_edge_id_v3(
+        kind=kind, from_id=owner_id, to_id=target_id, order_group=order_group,
+        ordinal=ordinal, requested_path=requested_path, resolved_id=target_id,
+        alias_chain=tuple(alias_chain), declaration_kind="executable_graph",
+        declaration_ref=declaration["id"],
+    )
+    graph["edges"].append(edge)
+
+
+def _add_hop_40_alias_chain(docs: dict[str, bytes], contract: dict) -> None:
+    lock = canonical_loads(docs["root_lock_bytes"])
+    policy = canonical_loads(docs["policy_bytes"])
+    paths = tuple(f"/usr/lib/spp/graph-hop-{index:02d}" for index in range(40))
+    terminal_path = "/usr/lib/x86_64-linux-gnu"
+    for index, path in enumerate(paths):
+        input_id = f"runtime-graph-hop-{index:02d}"
+        target = f"graph-hop-{index + 1:02d}" if index < len(paths) - 1 else terminal_path
+        placement = fixture._V1._placement("runtime-policy", path, input_id)
+        placement.update({"node_type": "symlink", "mode": 0o555, "source_input_id": None, "target": target})
+        lock["inputs"].append(fixture._V1._record(input_id, "runtime_tree_input", input_id.encode("ascii"), [placement]))
+        policy["images"]["runtime-policy"]["nodes"].append({
+            "path": path, "node_type": "symlink", "mode": 0o555, "uid": 0, "gid": 0,
+            "xattrs": [], "source_input_id": None, "target": target, "content_class": None,
+        })
+    _rebuild_predecessors(docs, lock, policy)
+
+    graph = contract["execution_closure"]["executable_graph"]
+    target_id = "dir:runtime-policy:" + terminal_path
+    owner_id = "file:runtime-policy:/usr/bin/spp"
+    group = "elf-search:" + owner_id
+    for index, path in enumerate(paths):
+        chain = list(paths[index:])
+        target = f"graph-hop-{index + 1:02d}" if index < len(paths) - 1 else terminal_path
+        graph["aliases"].append({
+            "image": "runtime-policy", "path": path, "target": target,
+            "resolved_id": target_id, "hop_count": len(chain), "chain": chain,
+        })
+        _append_graph_declaration(
+            graph, kind="elf_search", owner_id=owner_id, target_id=target_id,
+            order_group=group, ordinal=index + 1, requested_path=path, alias_chain=chain,
+        )
+    graph["aliases"].sort(key=lambda item: (item["image"], item["path"]))
+    graph["declarations"].sort(key=lambda item: item["id"].encode("utf-8"))
+    graph["edges"].sort(key=lambda item: item["id"].encode("utf-8"))
 
 
 class BootV3Predicate5Selftest(unittest.TestCase):
@@ -71,6 +187,46 @@ class BootV3Predicate5Selftest(unittest.TestCase):
                     alias["image"] = "models"
                 _commit_contract(docs, raw)
                 with self.assertRaisesRegex(ApplianceErrorV3, CP_BOOT_V3_SCHEMA if mutation in ("hop_41", "cycle") else CP_BOOT_V3_BINDING):
+                    boot.bind_boot_inputs_v3(contract=_parsed_contract(docs), **docs)
+
+    def test_executable_graph_hop_40_alias_chain_binds(self) -> None:
+        docs, raw = _mutated_docs()
+        _add_hop_40_alias_chain(docs, raw)
+        _commit_contract(docs, raw)
+        binding = boot.bind_boot_inputs_v3(contract=_parsed_contract(docs), **docs)
+        hop_40 = next(row for row in binding.predicate5.executable_graph.aliases if row.path == "/usr/lib/spp/graph-hop-00")
+        self.assertEqual((hop_40.hop_count, len(hop_40.chain)), (40, 40))
+
+    def test_executable_graph_alias_predecessor_boundaries_are_rejected(self) -> None:
+        for mutation in ("writable", "escaping", "ambiguous", "unlisted"):
+            with self.subTest(alias_mutation=mutation):
+                docs, raw = _mutated_docs()
+                graph = raw["execution_closure"]["executable_graph"]
+                if mutation in ("writable", "escaping"):
+                    lock = canonical_loads(docs["root_lock_bytes"])
+                    policy = canonical_loads(docs["policy_bytes"])
+                    path = "/usr/lib/spp/conf_proc_spp_role_bootstrap_alias.py"
+                    placement, node = _alias_predecessors(lock, policy, path)
+                    alias = next(row for row in graph["aliases"] if row["path"] == path)
+                    if mutation == "writable":
+                        placement["mode"] = node["mode"] = 0o777
+                    else:
+                        target = "../../../etc/passwd"
+                        placement["target"] = node["target"] = alias["target"] = target
+                        alias["resolved_id"] = "file:runtime-policy:/etc/passwd"
+                        with self.assertRaisesRegex(ApplianceError, CP_RUNTIME_CLOSURE_SCHEMA):
+                            _rebuild_predecessors(docs, lock, policy)
+                        continue
+                    _rebuild_predecessors(docs, lock, policy)
+                elif mutation == "ambiguous":
+                    graph["aliases"].append(deepcopy(graph["aliases"][0]))
+                    graph["aliases"].sort(key=lambda item: (item["image"], item["path"]))
+                else:
+                    alias = graph["aliases"][0]
+                    alias["chain"] = [alias["path"], "/usr/lib/spp/unlisted-alias-hop.py"]
+                    alias["hop_count"] = 2
+                _commit_contract(docs, raw)
+                with self.assertRaisesRegex(ApplianceErrorV3, CP_BOOT_V3_BINDING):
                     boot.bind_boot_inputs_v3(contract=_parsed_contract(docs), **docs)
 
     def test_executable_graph_every_edge_kind_rejects_reversal(self) -> None:
