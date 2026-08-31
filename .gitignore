@@ -42,3 +42,6 @@ nonce*
 *.log
 *.tmp
 tmp/
+
+# C build output
+build/

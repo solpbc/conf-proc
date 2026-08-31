@@ -1,6 +1,10 @@
 PYTHON ?= python3
+CC ?= cc
+C11FLAGS := -std=c11 -Wall -Wextra -Werror -pedantic
+SPP_DIAG_TRACE_SRC := conf_proc_spp_diag_trace.c
+SPP_DIAG_TRACE_TEST := test/conf-proc-spp-diag-trace-selftest.c
 
-.PHONY: install check test ci clean ratls-contract
+.PHONY: install check test ci clean ratls-contract test-spp-diag-trace test-spp-diag-trace-sanitized
 
 install:
 	python3 -m venv .venv
@@ -73,10 +77,23 @@ test:
 	$(PYTHON) test/conf-proc-spp-diagbundle-pe-selftest.py
 	$(PYTHON) test/conf-proc-spp-diagbundle-selftest.py
 
-ci: check test
+test-spp-diag-trace:
+	mkdir -p build
+	$(CC) $(C11FLAGS) $(SPP_DIAG_TRACE_SRC) $(SPP_DIAG_TRACE_TEST) -o build/spp-diag-trace-selftest
+	./build/spp-diag-trace-selftest
+	rm -f build/spp-diag-trace-selftest
+
+test-spp-diag-trace-sanitized:
+	mkdir -p build
+	$(CC) $(C11FLAGS) -fsanitize=address,undefined -g $(SPP_DIAG_TRACE_SRC) $(SPP_DIAG_TRACE_TEST) -o build/spp-diag-trace-selftest-sanitized
+	./build/spp-diag-trace-selftest-sanitized
+	rm -f build/spp-diag-trace-selftest-sanitized
+
+ci: check test test-spp-diag-trace test-spp-diag-trace-sanitized
+	rm -rf build
 
 ratls-contract:
 	$(PYTHON) ratls_contract.py generate
 
 clean:
-	rm -rf __pycache__ test/__pycache__ .pytest_cache
+	rm -rf __pycache__ test/__pycache__ .pytest_cache build

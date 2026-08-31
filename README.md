@@ -47,9 +47,11 @@ python3 -m venv .venv
 make PYTHON=.venv/bin/python ci
 ```
 
-`make ci` compiles every shipped module, checks that `ratls-contract.json`
-matches the code source, and runs the CPU verifier, gateway, health, and ASR
-self-tests. It does not require confidential-compute hardware or model weights.
+`make ci` compiles every shipped Python module, compiles and runs the native
+SPP diagnostic-trace C codec tests (ordinary and address/undefined-behavior
+sanitizers), checks that `ratls-contract.json` matches the code source, and
+runs the CPU verifier, gateway, health, and ASR self-tests. It does not
+require confidential-compute hardware or model weights.
 
 The ASR serving environment is intentionally separate and pinned in
 `requirements-asr.txt`. Any NeMo bump, change to `strict_wav.py` or
