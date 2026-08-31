@@ -334,6 +334,41 @@ class ReadinessProtocolRowV3:
 
 
 @dataclass(frozen=True)
+class ReadinessLayoutFieldV3:
+    offset: int
+    width: int
+    name: str
+    encoding: str
+    constraint: str
+
+
+@dataclass(frozen=True)
+class ReadinessLayoutRowV3:
+    row_id: str
+    transport: str
+    total_bytes: int
+    fields: tuple[ReadinessLayoutFieldV3, ...]
+    credential_rule: str
+    fd_rule: str
+    trailing_rule: str
+
+
+@dataclass(frozen=True)
+class ReadinessBarrierRowV3:
+    row_id: str
+    role_order: tuple[str, ...]
+    generation: int
+    census_cardinality: int
+    deadline_clock: str
+    deadline_delta_ns: int
+    states: tuple[str, ...]
+    terminal_event_order: str
+    completion_rule: str
+    consume_rule: str
+    retry_rule: str
+
+
+@dataclass(frozen=True)
 class LaunchRoleRowV3:
     role: str
     source_path: str
@@ -620,6 +655,83 @@ def _long_lived_readiness_v3(role_id: int) -> ReadinessProtocolRowV3:
     )
 
 
+READINESS_LAYOUT_ROWS_V3: Final = (
+    ReadinessLayoutRowV3(
+        "role_probe", "AF_UNIX SOCK_SEQPACKET root_owned", 32,
+        (
+            ReadinessLayoutFieldV3(0, 8, "magic", "bytes", "SPPRDQ3_then_NUL"),
+            ReadinessLayoutFieldV3(8, 2, "version", "u16_be", "3"),
+            ReadinessLayoutFieldV3(10, 2, "role_id", "u16_be", "1_to_3_exact_role"),
+            ReadinessLayoutFieldV3(12, 4, "flags", "u32_be", "zero"),
+            ReadinessLayoutFieldV3(16, 8, "generation", "u64_be", "shared_exact_1"),
+            ReadinessLayoutFieldV3(24, 8, "deadline", "u64_be", "shared_absolute_CLOCK_MONOTONIC_ns"),
+        ),
+        "one_matching_SCM_CREDENTIALS", "no_ancillary_fd", "no_trailing_bytes",
+    ),
+    ReadinessLayoutRowV3(
+        "role_result", "AF_UNIX SOCK_SEQPACKET root_owned", 80,
+        (
+            ReadinessLayoutFieldV3(0, 8, "magic", "bytes", "SPPRDR3_then_NUL"),
+            ReadinessLayoutFieldV3(8, 2, "version", "u16_be", "3"),
+            ReadinessLayoutFieldV3(10, 2, "role_id", "u16_be", "1_to_3_exact_role"),
+            ReadinessLayoutFieldV3(12, 4, "flags", "u32_be", "exactly_1_ready"),
+            ReadinessLayoutFieldV3(16, 8, "generation", "u64_be", "echo_shared_exact_1"),
+            ReadinessLayoutFieldV3(24, 8, "deadline", "u64_be", "echo_shared_absolute_deadline"),
+            ReadinessLayoutFieldV3(32, 4, "pid", "u32_be", "exact_supervised_child"),
+            ReadinessLayoutFieldV3(36, 4, "uid", "u32_be", "exact_role_uid"),
+            ReadinessLayoutFieldV3(40, 4, "gid", "u32_be", "exact_role_gid"),
+            ReadinessLayoutFieldV3(44, 4, "reserved", "u32_be", "zero"),
+            ReadinessLayoutFieldV3(48, 32, "executable_sha256", "bytes", "exact_measured_source_digest"),
+        ),
+        "one_matching_SCM_CREDENTIALS", "no_ancillary_fd", "no_trailing_bytes",
+    ),
+    ReadinessLayoutRowV3(
+        "gateway_probe", "serving_wire_v3", 88,
+        (
+            ReadinessLayoutFieldV3(0, 72, "serving_wire_header", "bytes", "type_22_zero_session_single_chunk_no_fd"),
+            ReadinessLayoutFieldV3(72, 8, "generation", "u64_be", "shared_exact_1"),
+            ReadinessLayoutFieldV3(80, 8, "deadline", "u64_be", "shared_absolute_CLOCK_MONOTONIC_ns"),
+        ),
+        "authenticated_supervised_sender", "no_ancillary_fd", "no_trailing_bytes",
+    ),
+    ReadinessLayoutRowV3(
+        "gateway_result", "serving_wire_v3", 128,
+        (
+            ReadinessLayoutFieldV3(0, 72, "serving_wire_header", "bytes", "type_23_zero_session_single_chunk_no_fd"),
+            ReadinessLayoutFieldV3(72, 8, "generation", "u64_be", "echo_shared_exact_1"),
+            ReadinessLayoutFieldV3(80, 4, "pid", "u32_be", "exact_supervised_gateway"),
+            ReadinessLayoutFieldV3(84, 2, "worker_count", "u16_be", "0_to_4_equals_live_session_ledger"),
+            ReadinessLayoutFieldV3(86, 2, "flags", "u16_be", "exactly_1_control_ready"),
+            ReadinessLayoutFieldV3(88, 32, "executable_sha256", "bytes", "exact_measured_gateway_digest"),
+            ReadinessLayoutFieldV3(120, 8, "control_endpoint_SO_COOKIE", "u64_be", "exact_nonzero"),
+        ),
+        "one_matching_SCM_CREDENTIALS", "no_ancillary_fd", "no_trailing_bytes",
+    ),
+)
+
+
+READINESS_BARRIER_ROWS_V3: Final = (
+    ReadinessBarrierRowV3(
+        "all_four_generation_deadline",
+        ("attestation-broker", "inference", "asr", "gateway"),
+        1,
+        1,
+        "CLOCK_MONOTONIC",
+        4_000_000_000,
+        ("unstarted", "collecting", "candidate", "complete", "consumed", "failed"),
+        "signalfd_and_reap_before_readiness_in_same_epoll_batch",
+        "one_compare_and_set_collecting_to_complete_same_epoch_nonterminal",
+        "one_exact_completion_makes_serving_eligible_then_duplicate_fails",
+        "failed_census_is_terminal_no_retry_or_second_census",
+    ),
+)
+
+
+LAUNCH_DELETE_WITNESS_ROWS_V3: Final = (
+    "independent_coherent_delete",
+)
+
+
 LAUNCH_ROLE_ROWS_V3: Final = (
     LaunchRoleRowV3(
         "attestation-broker", "/usr/lib/spp/conf_proc_spp_attestation_broker.py", "interpreter",
@@ -672,6 +784,7 @@ LAUNCH_ROLE_ROWS_V3: Final = (
             LaunchFdRowV3(3, "pid1_created_gateway_control_endpoint", "pid1", "inherited", "sole_control_endpoint"),
         ), _ROLE_PIPE_CENSUS_V3, "no_listener", "connect_only_loopback_127.0.0.1:8000_and_127.0.0.1:8100_after_work_permit", "pid1_admitted_connected_fds_and_pid1_entitlement_fd_only", None,
     ),
+    # COHERENT_DELETE_COLLECTOR_START
     LaunchRoleRowV3(
         "collector", "/usr/lib/spp/ratls_collector.py", "interpreter",
         "/usr/bin/python3.10", _python_role_argv_v3("collector"), "none", (), (), (), True,
@@ -687,6 +800,7 @@ LAUNCH_ROLE_ROWS_V3: Final = (
             PipeCensusRowV3(2, "stderr", 65536, 65536, 65536, 1, "immediate_discard"),
         ), "no_listener", "no_network", "pid1_spawned_reaped_one_bounded_request_response", None,
     ),
+    # COHERENT_DELETE_COLLECTOR_END
 )
 
 

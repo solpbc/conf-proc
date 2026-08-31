@@ -67,11 +67,11 @@ BOOT_PAYLOAD_SOURCE_AUTHORITY_V3: Final = (
     _SourceAuthorityV3("/usr/lib/spp/conf_proc_reasons.py", "support", 0o444, 12571, "c56b629a0fc156860c7400d6bc6884c1f41c8a9e4b0626ef4f2821f71102067a"),
     _SourceAuthorityV3("/usr/lib/spp/conf_proc_spp_boot.py", "engine", 0o444, 147664, "c1dfba4c4ca71cf64ab8ecef12440950edab88f6ef3e2fb73791fc1f900076a6"),
     _SourceAuthorityV3("/usr/lib/spp/conf_proc_spp_boot_dispatch_v3.py", "dispatcher", 0o444, 1141, "83a0652bff152a7e9e96e4f5daa0bde0278092d012d0b8fbf8832a39f23fa139"),
-    _SourceAuthorityV3("/usr/lib/spp/conf_proc_spp_boot_v3.py", "engine", 0o444, 90749, "a189338f7d8ecd84dd1f2686163211f25a8555635ec8aa6df486e3ca36709fe6"),
+    _SourceAuthorityV3("/usr/lib/spp/conf_proc_spp_boot_v3.py", "engine", 0o444, 118853, "56998181a899b945ec85c6f03415b415c39d06d83fcc0e42f1e1010419ba7791"),
     _SourceAuthorityV3("/usr/lib/spp/conf_proc_spp_boot_v3_resource.py", "support", 0o444, 25792, "b172f2dd4dbe70e295e4dbdd0ebe066c7e247e8d2183db22b15ac48f5afc57de"),
     _SourceAuthorityV3("/usr/lib/spp/conf_proc_spp_boot_v3_semantics.py", "engine", 0o444, 128500, "09572aa6d76e83ee4117ed1f10c7bc32397397014abb34d55812c8f8ebd3cd85"),
-    _SourceAuthorityV3("/usr/lib/spp/conf_proc_spp_boot_v3_tables.py", "support", 0o444, 58972, "b1151dabfb3596b02ad1584f5066bad4094c9b34b758c27608173af77e64a927"),
-    _SourceAuthorityV3("/usr/lib/spp/conf_proc_spp_boot_v3_wire.py", "support", 0o444, 41779, "00c03278031280dd572bf221be2075ab741e36b378af8a7fd2c874560b840e90"),
+    _SourceAuthorityV3("/usr/lib/spp/conf_proc_spp_boot_v3_tables.py", "support", 0o444, 63653, "44cf1b7af901d2f0a29c845e2134bfca851b007b72ba52b80fec343d85d249d0"),
+    _SourceAuthorityV3("/usr/lib/spp/conf_proc_spp_boot_v3_wire.py", "support", 0o444, 47503, "71e491df1ab92a70b1102af866ae8fc917754a8d76763e0c8606bd8b5c1d7549"),
     _SourceAuthorityV3("/usr/lib/spp/conf_proc_spp_init.py", "engine", 0o444, 4604, "32b7c8f5b6772f52433adcca11051ad1e883bb59aa4f7c66116e43a379bd1dd3"),
     _SourceAuthorityV3("/usr/lib/spp/conf_proc_spp_reasons_v3.py", "support", 0o444, 3215, "4ca5821dd0edca148bffa312fd6d9208083fa5f6e22345e61c5284d3cbbcdf75"),
 )
@@ -87,11 +87,11 @@ _EXPECTED_LITERAL_SOURCE_ROWS_V3: Final = (
     _ExpectedSourceRowV3("/usr/lib/spp/conf_proc_reasons.py", "support", 0o444, 12571, "c56b629a0fc156860c7400d6bc6884c1f41c8a9e4b0626ef4f2821f71102067a"),
     _ExpectedSourceRowV3("/usr/lib/spp/conf_proc_spp_boot.py", "engine", 0o444, 147664, "c1dfba4c4ca71cf64ab8ecef12440950edab88f6ef3e2fb73791fc1f900076a6"),
     _ExpectedSourceRowV3("/usr/lib/spp/conf_proc_spp_boot_dispatch_v3.py", "dispatcher", 0o444, 1141, "83a0652bff152a7e9e96e4f5daa0bde0278092d012d0b8fbf8832a39f23fa139"),
-    _ExpectedSourceRowV3("/usr/lib/spp/conf_proc_spp_boot_v3.py", "engine", 0o444, 90749, "a189338f7d8ecd84dd1f2686163211f25a8555635ec8aa6df486e3ca36709fe6"),
+    _ExpectedSourceRowV3("/usr/lib/spp/conf_proc_spp_boot_v3.py", "engine", 0o444, 118853, "56998181a899b945ec85c6f03415b415c39d06d83fcc0e42f1e1010419ba7791"),
     _ExpectedSourceRowV3("/usr/lib/spp/conf_proc_spp_boot_v3_resource.py", "support", 0o444, 25792, "b172f2dd4dbe70e295e4dbdd0ebe066c7e247e8d2183db22b15ac48f5afc57de"),
     _ExpectedSourceRowV3("/usr/lib/spp/conf_proc_spp_boot_v3_semantics.py", "engine", 0o444, 128500, "09572aa6d76e83ee4117ed1f10c7bc32397397014abb34d55812c8f8ebd3cd85"),
-    _ExpectedSourceRowV3("/usr/lib/spp/conf_proc_spp_boot_v3_tables.py", "support", 0o444, 58972, "b1151dabfb3596b02ad1584f5066bad4094c9b34b758c27608173af77e64a927"),
-    _ExpectedSourceRowV3("/usr/lib/spp/conf_proc_spp_boot_v3_wire.py", "support", 0o444, 41779, "00c03278031280dd572bf221be2075ab741e36b378af8a7fd2c874560b840e90"),
+    _ExpectedSourceRowV3("/usr/lib/spp/conf_proc_spp_boot_v3_tables.py", "support", 0o444, 63653, "44cf1b7af901d2f0a29c845e2134bfca851b007b72ba52b80fec343d85d249d0"),
+    _ExpectedSourceRowV3("/usr/lib/spp/conf_proc_spp_boot_v3_wire.py", "support", 0o444, 47503, "71e491df1ab92a70b1102af866ae8fc917754a8d76763e0c8606bd8b5c1d7549"),
     _ExpectedSourceRowV3("/usr/lib/spp/conf_proc_spp_init.py", "engine", 0o444, 4604, "32b7c8f5b6772f52433adcca11051ad1e883bb59aa4f7c66116e43a379bd1dd3"),
     _ExpectedSourceRowV3("/usr/lib/spp/conf_proc_spp_reasons_v3.py", "support", 0o444, 3215, "4ca5821dd0edca148bffa312fd6d9208083fa5f6e22345e61c5284d3cbbcdf75"),
 )
@@ -106,7 +106,7 @@ _EXPECTED_LOCAL_IMPORTS_V3: Final = {
     "conf_proc_reasons": frozenset(),
     "conf_proc_spp_boot": frozenset({"conf_proc_geometry", "conf_proc_json", "conf_proc_lock", "conf_proc_module_authority", "conf_proc_policy", "conf_proc_provenance_v2", "conf_proc_provenance_v2_manifest", "conf_proc_reasons"}),
     "conf_proc_spp_boot_dispatch_v3": frozenset({"conf_proc_json", "conf_proc_spp_boot_v3", "conf_proc_spp_reasons_v3"}),
-    "conf_proc_spp_boot_v3": frozenset({"conf_proc_json", "conf_proc_spp_boot", "conf_proc_spp_boot_v3_resource", "conf_proc_spp_boot_v3_semantics", "conf_proc_spp_boot_v3_tables", "conf_proc_spp_reasons_v3"}),
+    "conf_proc_spp_boot_v3": frozenset({"conf_proc_json", "conf_proc_spp_boot", "conf_proc_spp_boot_v3_resource", "conf_proc_spp_boot_v3_semantics", "conf_proc_spp_boot_v3_tables", "conf_proc_spp_boot_v3_wire", "conf_proc_spp_reasons_v3"}),
     "conf_proc_spp_boot_v3_semantics": frozenset({"conf_proc_spp_boot", "conf_proc_spp_boot_v3_tables", "conf_proc_spp_reasons_v3"}),
     "conf_proc_spp_boot_v3_resource": frozenset({"conf_proc_spp_boot", "conf_proc_spp_boot_v3", "conf_proc_spp_boot_v3_tables", "conf_proc_spp_boot_v3_wire", "conf_proc_spp_reasons_v3"}),
     "conf_proc_spp_boot_v3_tables": frozenset({"conf_proc_spp_boot"}),
@@ -297,7 +297,7 @@ def _validate_literal_authority() -> None:
         previous = encoded
         seen.add(row.archive_path)
         roles[row.role] += 1
-    if roles != {"support": 12, "engine": 4, "dispatcher": 1} or sum(row.size_bytes for row in rows) != 602042:
+    if roles != {"support": 12, "engine": 4, "dispatcher": 1} or sum(row.size_bytes for row in rows) != 640551:
         _error(CP_SPP_PAYLOAD_V3_AUTHORITY)
     paths = sorted(seen, key=lambda value: value.encode("utf-8"))
     if any(right.startswith(left + "/") for left, right in zip(paths, paths[1:], strict=False)):

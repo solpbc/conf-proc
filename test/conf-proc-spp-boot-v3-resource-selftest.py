@@ -30,7 +30,7 @@ from conf_proc_spp_boot_v3_wire import (
     WorkFinishOutcomeV3,
 )
 from conf_proc_spp_reasons_v3 import ApplianceErrorV3, CP_BOOT_V3_BINDING
-from conf_proc_spp_boot_v3_fixture import build_v3_fixture
+from conf_proc_spp_boot_v3_fixture import build_v3_fixture, install_consumed_readiness_for_test
 
 
 def _completed_session(reducer: ServingResourceReducerV3) -> bytes:
@@ -75,6 +75,8 @@ def _admitted_wrapper() -> ServingAuthorityWrapperV3:
     transport = _AuthorityTransport()
     while engine.next_effect() is not None:
         engine.advance(transport)
+    # Resource-reducer tests start after the separately tested A3.1b barrier.
+    install_consumed_readiness_for_test(engine)
     return engine.admit_serving_authority()
 
 

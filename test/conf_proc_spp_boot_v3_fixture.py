@@ -20,7 +20,13 @@ if str(ROOT / "test") not in sys.path:
     sys.path.insert(0, str(ROOT / "test"))
 
 from conf_proc_json import canonical_dumps, canonical_loads
-from conf_proc_spp_boot_v3 import BOOT_CONTRACT_V3_SCHEMA, parse_boot_contract_v3
+from conf_proc_spp_boot_v3 import (
+    BOOT_CONTRACT_V3_SCHEMA,
+    BootTransitionEngineV3,
+    LaunchReadinessBarrierV3,
+    ReadinessCompletionV3,
+    parse_boot_contract_v3,
+)
 import conf_proc_spp_boot_v3_tables as tables
 from conf_proc_spp_boot_v3_semantics import jit_derivation_sha256_v3
 
@@ -54,6 +60,23 @@ _ROLE_SOURCES = (
 )
 _BOOTSTRAP_SOURCE = "/usr/lib/spp/conf_proc_spp_role_bootstrap.py"
 _CONTROLLER_SOURCE = "/usr/lib/spp/conf_proc_spp_init.py"
+
+
+def install_consumed_readiness_for_test(engine: BootTransitionEngineV3) -> None:
+    """Install the exact post-barrier shape for tests outside readiness scope."""
+
+    if type(engine) is not BootTransitionEngineV3:
+        raise AssertionError("test readiness owner type")
+    completion = ReadinessCompletionV3(1, 1, 1, b"\x01" * 32)
+    barrier = object.__new__(LaunchReadinessBarrierV3)
+    barrier._epoch = 1
+    barrier._state = "consumed"
+    barrier._completion = completion
+    barrier._owner_engine = engine
+    engine._launch_readiness_barrier = barrier
+    engine._launch_readiness_completion_consumed = True
+    engine._launch_readiness_consumed_completion = completion
+    engine._launch_readiness_serving_eligible = True
 
 
 def _sha256(value: bytes) -> str:

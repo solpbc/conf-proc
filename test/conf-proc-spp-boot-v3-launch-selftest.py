@@ -385,6 +385,16 @@ class BootV3LaunchAuthoritySelftest(unittest.TestCase):
         self.assertEqual(tables.LAUNCH_ROLE_ROWS_V3[0].pipe_census[0].detection_bytes, 1)
         self.assertEqual(tables.LAUNCH_ROLE_ROWS_V3[-1].pipe_census[0].census_budget_bytes, 8388608)
 
+    # COHERENT_DELETE_COLLECTOR_TEST_START
+    def test_collector_launch_row_has_its_bounded_transient_shape(self) -> None:
+        collector = tables.LAUNCH_ROLE_ROWS_V3[4]
+        self.assertEqual(collector.role, "collector")
+        self.assertEqual(collector.cardinality, "zero_or_one_transient")
+        self.assertEqual(tuple(row.fd for row in collector.fd_surface), (0, 1, 2))
+        self.assertEqual(collector.pipe_census[0].census_budget_bytes, 8388608)
+        self.assertIsNone(collector.readiness)
+    # COHERENT_DELETE_COLLECTOR_TEST_END
+
     def test_every_wire_row_and_constraint_is_measured(self) -> None:
         original = tables.WIRE_MESSAGE_AUTHORITY_ROWS_V3
         baseline = boot._literal_v3_observation_shape_bytes(self.binding.process_authority)

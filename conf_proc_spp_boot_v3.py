@@ -47,6 +47,7 @@ from conf_proc_spp_boot_v3_semantics import (
     validate_semantic_conjunction_v3,
 )
 import conf_proc_spp_boot_v3_tables as tables
+import conf_proc_spp_boot_v3_wire as wire
 from conf_proc_spp_reasons_v3 import (
     ApplianceErrorV3,
     CP_BOOT_V3_BINDING,
@@ -1089,6 +1090,9 @@ def _literal_v3_observation_shape_bytes(
             tables.FAILURE_STAGES_V3,
         ),
         ("launch_roles", tables.LAUNCH_ROLE_ROWS_V3),
+        ("readiness_layouts", tables.READINESS_LAYOUT_ROWS_V3),
+        ("readiness_barrier", tables.READINESS_BARRIER_ROWS_V3),
+        ("launch_delete_witness", tables.LAUNCH_DELETE_WITNESS_ROWS_V3),
         ("stage2_controller", tables.STAGE2_CONTROLLER_ROW_V3),
         (
             "wire_message_authority",
@@ -1718,10 +1722,458 @@ def _publish_serving_wrapper_v3(
     return wrapper
 
 
+@dataclass(frozen=True)
+class ReadinessProcessCredentialsV3:
+    pid: int
+    uid: int
+    gid: int
+
+
+@dataclass(frozen=True)
+class ReadinessDatagramV3:
+    data: bytes
+    credentials: tuple[ReadinessProcessCredentialsV3, ...]
+    ancillary_fds: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class ReadinessRoleIdentityV3:
+    role: str
+    role_id: int | None
+    pid: int
+    uid: int
+    gid: int
+    executable_sha256: bytes
+    gateway_worker_count: int | None = None
+    gateway_control_endpoint_so_cookie: int | None = None
+
+
+@dataclass(frozen=True)
+class ReadinessProbeEmissionV3:
+    role: str
+    data: bytes
+
+
+@dataclass(frozen=True)
+class ReadinessCompletionV3:
+    epoch: int
+    generation: int
+    absolute_monotonic_deadline_ns: int
+    all_four_identity_digest: bytes
+
+
+def _locked_readiness_transition_v3(method: object) -> object:
+    """Serialize one barrier transition so candidate completion is a real CAS."""
+
+    if not callable(method):
+        raise TypeError("readiness transition is not callable")
+
+    def locked(self: "LaunchReadinessBarrierV3", *args: object, **kwargs: object) -> object:
+        owner = getattr(self, "_owner_engine", None)
+        authority = getattr(owner, "_launch_transition_lock", None)
+        if (
+            type(owner) is BootTransitionEngineV3
+            and type(authority) is _LaunchTransitionAuthorityV3
+        ):
+            try:
+                with authority:
+                    with self._transition_lock:
+                        return method(self, *args, **kwargs)
+            except BaseException:
+                if (
+                    not authority.held_by_current_thread()
+                    and owner._state is BootTransitionStateV3.FAILED_NON_SERVING
+                ):
+                    wrapper = getattr(owner, "_serving_authority", None)
+                    if type(wrapper) is ServingAuthorityWrapperV3:
+                        wrapper.global_revoke()
+                raise
+        with self._transition_lock:
+            return method(self, *args, **kwargs)
+
+    return locked
+
+
+def _exact_readiness_epoch_v3(value: object, expected: int) -> bool:
+    """Reject bools and equality-forging objects at every epoch boundary."""
+
+    return (
+        type(value) is int
+        and 0 < value < 1 << 64
+        and type(expected) is int
+        and value == expected
+    )
+
+
+class _LaunchTransitionAuthorityV3:
+    """One deepcopy-safe reentrant authority for the readiness/admission edge."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._local = threading.local()
+
+    def __enter__(self) -> "_LaunchTransitionAuthorityV3":
+        self.acquire()
+        return self
+
+    def __exit__(self, _kind: object, _value: object, _traceback: object) -> None:
+        self.release()
+
+    def acquire(self) -> None:
+        self._lock.acquire()
+        self._local.depth = getattr(self._local, "depth", 0) + 1
+
+    def release(self) -> None:
+        depth = getattr(self._local, "depth", 0)
+        if depth <= 0:
+            raise RuntimeError("launch transition authority is not held")
+        self._local.depth = depth - 1
+        self._lock.release()
+
+    def held_by_current_thread(self) -> bool:
+        return getattr(self._local, "depth", 0) > 0
+
+    def __deepcopy__(self, _memo: object) -> "_LaunchTransitionAuthorityV3":
+        return type(self)()
+
+
+def _locked_launch_transition_v3(method: object) -> object:
+    """Serialize the engine's census, terminal, consume, and admission edge."""
+
+    if not callable(method):
+        raise TypeError("launch transition is not callable")
+
+    def locked(self: "BootTransitionEngineV3", *args: object, **kwargs: object) -> object:
+        try:
+            with self._launch_transition_lock:
+                return method(self, *args, **kwargs)
+        except BaseException:
+            if (
+                not self._launch_transition_lock.held_by_current_thread()
+                and self._state is BootTransitionStateV3.FAILED_NON_SERVING
+            ):
+                wrapper = getattr(self, "_serving_authority", None)
+                if type(wrapper) is ServingAuthorityWrapperV3:
+                    wrapper.global_revoke()
+            raise
+
+    return locked
+
+
+class LaunchReadinessBarrierV3:
+    """One controller-epoch launch census with no replay or retry surface."""
+
+    _ROLE_ORDER: Final = ("attestation-broker", "inference", "asr", "gateway")
+    _DEADLINE_DELTA_NS: Final = 4_000_000_000
+    _GENERATION: Final = 1
+
+    def __init__(
+        self,
+        *,
+        controller_epoch: int,
+        census_start_ns: int,
+        expected_identities: tuple[ReadinessRoleIdentityV3, ...],
+    ) -> None:
+        if type(controller_epoch) is not int or not 0 < controller_epoch < 1 << 64:
+            raise ApplianceErrorV3(CP_BOOT_V3_LAUNCH_SUPERVISION, "readiness controller epoch is invalid")
+        if type(census_start_ns) is not int or not 0 <= census_start_ns <= (1 << 64) - 1 - self._DEADLINE_DELTA_NS:
+            raise ApplianceErrorV3(CP_BOOT_V3_LAUNCH_SUPERVISION, "readiness deadline overflows")
+        if (
+            type(expected_identities) is not tuple
+            or len(expected_identities) != len(self._ROLE_ORDER)
+            or any(type(item) is not ReadinessRoleIdentityV3 for item in expected_identities)
+        ):
+            raise ApplianceErrorV3(CP_BOOT_V3_LAUNCH_SUPERVISION, "readiness identity census is invalid")
+        if (
+            any(type(item.role) is not str for item in expected_identities)
+            or tuple(item.role for item in expected_identities) != self._ROLE_ORDER
+        ):
+            raise ApplianceErrorV3(CP_BOOT_V3_LAUNCH_SUPERVISION, "readiness identity roles are invalid")
+        for index, identity in enumerate(expected_identities):
+            expected_role_id = index + 1 if index < 3 else None
+            if (
+                (
+                    expected_role_id is None
+                    and identity.role_id is not None
+                )
+                or (
+                    expected_role_id is not None
+                    and (
+                        type(identity.role_id) is not int
+                        or not 1 <= identity.role_id <= 3
+                        or identity.role_id != expected_role_id
+                    )
+                )
+                or type(identity.pid) is not int
+                or not 0 < identity.pid < 1 << 32
+                or type(identity.uid) is not int
+                or not 0 <= identity.uid < 1 << 32
+                or type(identity.gid) is not int
+                or not 0 <= identity.gid < 1 << 32
+                or type(identity.executable_sha256) is not bytes
+                or len(identity.executable_sha256) != 32
+            ):
+                raise ApplianceErrorV3(CP_BOOT_V3_LAUNCH_SUPERVISION, "readiness identity is invalid")
+            gateway = identity.role == "gateway"
+            if gateway != (identity.gateway_worker_count is not None):
+                raise ApplianceErrorV3(CP_BOOT_V3_LAUNCH_SUPERVISION, "gateway readiness ledger is invalid")
+            if gateway != (identity.gateway_control_endpoint_so_cookie is not None):
+                raise ApplianceErrorV3(CP_BOOT_V3_LAUNCH_SUPERVISION, "gateway readiness cookie is invalid")
+            if gateway and (
+                type(identity.gateway_worker_count) is not int
+                or not 0 <= identity.gateway_worker_count <= 4
+                or type(identity.gateway_control_endpoint_so_cookie) is not int
+                or not 0 < identity.gateway_control_endpoint_so_cookie < 1 << 64
+            ):
+                raise ApplianceErrorV3(CP_BOOT_V3_LAUNCH_SUPERVISION, "gateway readiness identity is invalid")
+        self._epoch = controller_epoch
+        self._deadline = census_start_ns + self._DEADLINE_DELTA_NS
+        self._identities = expected_identities
+        self._transition_lock = threading.RLock()
+        self._owner_engine: BootTransitionEngineV3 | None = None
+        self._state = "collecting"
+        self._result_index = 0
+        self._probe_outstanding = False
+        self._accepted_identity_material: list[bytes] = []
+        self._completion: ReadinessCompletionV3 | None = None
+
+    @property
+    def state(self) -> str:
+        return self._state
+
+    @property
+    def generation(self) -> int:
+        return self._GENERATION
+
+    @property
+    def absolute_monotonic_deadline_ns(self) -> int:
+        return self._deadline
+
+    def _fail(self, message: str) -> None:
+        self._state = "failed"
+        self._probe_outstanding = False
+        self._completion = None
+        self._accepted_identity_material.clear()
+        owner = self._owner_engine
+        if type(owner) is BootTransitionEngineV3:
+            owner._invalidate_launch_readiness_from_barrier_failure_v3(self)
+        raise ApplianceErrorV3(CP_BOOT_V3_LAUNCH_SUPERVISION, message)
+
+    def _guard_collecting(
+        self, *, controller_epoch: int, controller_terminal: bool, now_ns: int
+    ) -> None:
+        if self._state != "collecting":
+            self._fail("readiness census is not collecting")
+        if type(controller_terminal) is not bool or controller_terminal:
+            self._fail("controller terminal transition won readiness race")
+        if not _exact_readiness_epoch_v3(controller_epoch, self._epoch):
+            self._fail("readiness controller epoch changed")
+        if type(now_ns) is not int or not 0 <= now_ns < self._deadline:
+            self._fail("readiness census deadline expired")
+
+    @_locked_readiness_transition_v3
+    def next_probe(
+        self, *, controller_epoch: int, controller_terminal: bool, now_ns: int
+    ) -> ReadinessProbeEmissionV3:
+        self._guard_collecting(
+            controller_epoch=controller_epoch,
+            controller_terminal=controller_terminal,
+            now_ns=now_ns,
+        )
+        if self._probe_outstanding or self._result_index >= len(self._identities):
+            self._fail("readiness probe order is invalid")
+        identity = self._identities[self._result_index]
+        if identity.role_id is not None:
+            data = wire.encode_standalone_readiness_probe_v3(
+                wire.StandaloneReadinessProbeV3(
+                    identity.role_id, self._GENERATION, self._deadline,
+                )
+            )
+        else:
+            payload = wire.encode_gateway_readiness_probe_payload_v3(
+                wire.GatewayReadinessProbePayloadV3(self._GENERATION, self._deadline)
+            )
+            data = wire.encode_serving_wire_frame_v3(
+                tables.ServingWireMessageTypeV3.GATEWAY_READINESS_PROBE,
+                session_token=b"\0" * 32,
+                sequence=1,
+                chunk_index=0,
+                chunk_count=1,
+                chunk_length=16,
+                total_length=16,
+                flags=wire.FLAG_START_V3 | wire.FLAG_END_V3,
+                payload_bytes=payload,
+            )
+        self._probe_outstanding = True
+        return ReadinessProbeEmissionV3(identity.role, data)
+
+    def _validated_datagram(
+        self, identity: ReadinessRoleIdentityV3, datagram: object
+    ) -> bytes:
+        if (
+            type(datagram) is not ReadinessDatagramV3
+            or type(datagram.data) is not bytes
+            or type(datagram.credentials) is not tuple
+            or len(datagram.credentials) != 1
+            or type(datagram.credentials[0]) is not ReadinessProcessCredentialsV3
+            or type(datagram.ancillary_fds) is not tuple
+            or datagram.ancillary_fds
+        ):
+            self._fail("readiness datagram framing is invalid")
+        credential = datagram.credentials[0]
+        if (
+            type(credential.pid) is not int
+            or not 0 < credential.pid < 1 << 32
+            or type(credential.uid) is not int
+            or not 0 <= credential.uid < 1 << 32
+            or type(credential.gid) is not int
+            or not 0 <= credential.gid < 1 << 32
+            or (credential.pid, credential.uid, credential.gid) != (
+                identity.pid, identity.uid, identity.gid,
+            )
+        ):
+            self._fail("readiness sender credentials disagree")
+        return datagram.data
+
+    @_locked_readiness_transition_v3
+    def accept_result(
+        self,
+        *,
+        role: str,
+        datagram: ReadinessDatagramV3,
+        controller_epoch: int,
+        controller_terminal: bool,
+        now_ns: int,
+    ) -> None:
+        self._guard_collecting(
+            controller_epoch=controller_epoch,
+            controller_terminal=controller_terminal,
+            now_ns=now_ns,
+        )
+        if not self._probe_outstanding or self._result_index >= len(self._identities):
+            self._fail("readiness result has no matching probe")
+        identity = self._identities[self._result_index]
+        if type(role) is not str or role != identity.role:
+            self._fail("readiness result order is invalid")
+        data = self._validated_datagram(identity, datagram)
+        try:
+            if identity.role_id is not None:
+                result = wire.decode_standalone_readiness_result_v3(data)
+                if (
+                    result.role_id != identity.role_id
+                    or result.flags != 1
+                    or result.census_generation != self._GENERATION
+                    or result.absolute_monotonic_deadline_ns != self._deadline
+                    or result.supervised_child_pid != identity.pid
+                    or result.role_uid != identity.uid
+                    or result.role_gid != identity.gid
+                    or result.executable_sha256 != identity.executable_sha256
+                ):
+                    self._fail("standalone readiness identity disagrees")
+                suffix = b""
+            else:
+                frame = wire.decode_serving_wire_frame_v3(data)
+                header = frame.header
+                result = frame.payload
+                if (
+                    len(data) != 128
+                    or header.message_type is not tables.ServingWireMessageTypeV3.GATEWAY_READINESS_RESULT
+                    or header.flags != wire.FLAG_START_V3 | wire.FLAG_END_V3
+                    or header.sequence != 1
+                    or header.chunk_index != 0
+                    or header.chunk_count != 1
+                    or header.chunk_length != 56
+                    or header.total_length != 56
+                    or header.session_token != b"\0" * 32
+                    or type(result) is not wire.GatewayReadinessResultPayloadV3
+                    or result.census_generation != self._GENERATION
+                    or result.gateway_pid != identity.pid
+                    or result.session_worker_count != identity.gateway_worker_count
+                    or result.flags != 1
+                    or result.executable_sha256 != identity.executable_sha256
+                    or result.control_endpoint_so_cookie != identity.gateway_control_endpoint_so_cookie
+                ):
+                    self._fail("gateway readiness identity disagrees")
+                suffix = (
+                    result.session_worker_count.to_bytes(2, "big")
+                    + result.control_endpoint_so_cookie.to_bytes(8, "big")
+                )
+        except ApplianceErrorV3:
+            if self._state != "failed":
+                self._fail("readiness result framing is invalid")
+            raise
+        role_bytes = identity.role.encode("ascii")
+        self._accepted_identity_material.append(
+            len(role_bytes).to_bytes(1, "big")
+            + role_bytes
+            + identity.pid.to_bytes(4, "big")
+            + identity.uid.to_bytes(4, "big")
+            + identity.gid.to_bytes(4, "big")
+            + identity.executable_sha256
+            + suffix
+        )
+        self._probe_outstanding = False
+        self._result_index += 1
+        if self._result_index == len(self._identities):
+            self._state = "candidate"
+
+    @_locked_readiness_transition_v3
+    def complete(
+        self, *, controller_epoch: int, controller_terminal: bool
+    ) -> ReadinessCompletionV3:
+        if self._state != "candidate":
+            self._fail("readiness completion compare-and-set is invalid")
+        if (
+            type(controller_terminal) is not bool
+            or controller_terminal
+            or not _exact_readiness_epoch_v3(controller_epoch, self._epoch)
+        ):
+            self._fail("controller terminal transition won readiness completion race")
+        identity_digest = hashlib.sha256(
+            b"sol-spp-launch-readiness-v3\0" + b"".join(self._accepted_identity_material)
+        ).digest()
+        completion = ReadinessCompletionV3(
+            self._epoch, self._GENERATION, self._deadline, identity_digest,
+        )
+        self._completion = completion
+        self._state = "complete"
+        return completion
+
+    @_locked_readiness_transition_v3
+    def consume(
+        self,
+        completion: ReadinessCompletionV3,
+        *,
+        controller_epoch: int,
+        controller_terminal: bool,
+    ) -> None:
+        if (
+            self._state != "complete"
+            or type(completion) is not ReadinessCompletionV3
+            or completion is not self._completion
+            or type(controller_terminal) is not bool
+            or controller_terminal
+            or not _exact_readiness_epoch_v3(controller_epoch, self._epoch)
+        ):
+            self._fail("readiness completion consume is invalid")
+        self._state = "consumed"
+
+    @_locked_readiness_transition_v3
+    def note_terminal(self, *, controller_epoch: int, event: str) -> None:
+        if (
+            type(event) is not str
+            or not event
+            or not _exact_readiness_epoch_v3(controller_epoch, self._epoch)
+        ):
+            self._fail("controller terminal event is invalid")
+        self._fail("controller terminal transition invalidated launch readiness")
+
+
 class BootTransitionEngineV3:
     """The sealed v3 causal chain and its PCR-15 authority calculation."""
 
     def __init__(self, binding: BootBindingV3) -> None:
+        self._launch_transition_lock = _LaunchTransitionAuthorityV3()
         self._binding_liveness_anchor = binding
         _claim_engine_v3(binding, self)
         self._state = BootTransitionStateV3.PID1_IDENTITY_ESTABLISHED
@@ -1730,6 +2182,10 @@ class BootTransitionEngineV3:
         self._extend_request_issued = False
         self._serving_effect_completed = False
         self._serving_authority: ServingAuthorityWrapperV3 | None = None
+        self._launch_readiness_barrier: LaunchReadinessBarrierV3 | None = None
+        self._launch_readiness_completion_consumed = False
+        self._launch_readiness_consumed_completion: ReadinessCompletionV3 | None = None
+        self._launch_readiness_serving_eligible = False
         self._failure_diagnostic_token: str | None = None
 
     def _binding_mismatch_cleanup_v3(self) -> None:
@@ -1763,6 +2219,7 @@ class BootTransitionEngineV3:
     def predicted_pcr15_v3(self) -> bytes:
         return self._verify_v3().predicted_pcr15
 
+    @_locked_launch_transition_v3
     def next_effect(self) -> AuthorityStepEffectV3 | None:
         material = self._verify_v3()
         if self._pending is not None:
@@ -1784,6 +2241,7 @@ class BootTransitionEngineV3:
         )
         return self._pending
 
+    @_locked_launch_transition_v3
     def advance(self, transport: BootTransport) -> BootTransitionStateV3:
         self._verify_v3()
         effect = self.next_effect()
@@ -1814,6 +2272,7 @@ class BootTransitionEngineV3:
             self._fail(_reason_for_state_v3(self._state), "typed v3 boot transport failed")
         return self.accept(observation)
 
+    @_locked_launch_transition_v3
     def accept(self, observation: BootObservation) -> BootTransitionStateV3:
         """Accept one typed step readback for deterministic reducer tests."""
 
@@ -1855,21 +2314,207 @@ class BootTransitionEngineV3:
         return self._state
 
     def _fail(self, reason_code: str, message: str) -> None:
+        if not self._launch_transition_lock.held_by_current_thread():
+            raise AssertionError("engine failure transition lacks launch authority")
         if self._state is not BootTransitionStateV3.FAILED_NON_SERVING:
             self._failure_diagnostic_token = DIAGNOSTIC_TOKEN_FOR_STATE_V3[self._state]
             self._state = BootTransitionStateV3.FAILED_NON_SERVING
+        barrier = getattr(self, "_launch_readiness_barrier", None)
+        if type(barrier) is LaunchReadinessBarrierV3 and barrier.state in (
+            "collecting", "candidate", "complete",
+        ):
+            try:
+                barrier.note_terminal(controller_epoch=barrier._epoch, event="engine_failure")
+            except ApplianceErrorV3:
+                pass
+        self._launch_readiness_serving_eligible = False
+        self._launch_readiness_consumed_completion = None
         self._pending = None
         raise ApplianceErrorV3(reason_code, message)
 
-    def admit_serving_authority(self) -> ServingAuthorityWrapperV3:
+    def _invalidate_launch_readiness_from_barrier_failure_v3(
+        self, barrier: LaunchReadinessBarrierV3
+    ) -> None:
+        if not self._launch_transition_lock.held_by_current_thread():
+            raise AssertionError("readiness owner invalidation lacks launch authority")
+        if barrier is not self._launch_readiness_barrier:
+            raise AssertionError("readiness owner invalidation has the wrong barrier")
+        if self._state is not BootTransitionStateV3.FAILED_NON_SERVING:
+            self._failure_diagnostic_token = DIAGNOSTIC_TOKEN_FOR_STATE_V3[self._state]
+            self._state = BootTransitionStateV3.FAILED_NON_SERVING
+        self._launch_readiness_serving_eligible = False
+        self._launch_readiness_consumed_completion = None
+        self._pending = None
+
+    @_locked_launch_transition_v3
+    def begin_launch_readiness_census_v3(
+        self,
+        *,
+        controller_epoch: int,
+        census_start_ns: int,
+        role_pids: tuple[tuple[str, int], ...],
+        gateway_live_session_worker_count: int,
+        gateway_control_endpoint_so_cookie: int,
+    ) -> LaunchReadinessBarrierV3:
         self._verify_v3()
-        if self._state is not BootTransitionStateV3.SERVING_AVAILABLE:
-            if type(self._serving_authority) is ServingAuthorityWrapperV3:
-                _binding_reject_v3("binding was not issued")
+        if (
+            self._state is not BootTransitionStateV3.SERVING_AVAILABLE
+            or not self._serving_effect_completed
+            or self._launch_readiness_barrier is not None
+            or self._launch_readiness_completion_consumed
+        ):
             self._fail(
                 CP_BOOT_V3_LAUNCH_SUPERVISION,
-                "v3 serving authority is not available before SERVING_AVAILABLE",
+                "launch readiness census is unavailable or already used",
             )
+        role_order = LaunchReadinessBarrierV3._ROLE_ORDER
+        if (
+            type(role_pids) is not tuple
+            or tuple(item[0] for item in role_pids if type(item) is tuple and len(item) == 2) != role_order
+            or len(role_pids) != len(role_order)
+            or any(
+                type(item) is not tuple
+                or len(item) != 2
+                or type(item[0]) is not str
+                or type(item[1]) is not int
+                or not 0 < item[1] < 1 << 32
+                for item in role_pids
+            )
+        ):
+            self._fail(CP_BOOT_V3_LAUNCH_SUPERVISION, "launch readiness PID census is invalid")
+        binding = self._binding_liveness_anchor
+        launch_roles = binding.launch_projection.roles
+        if tuple(snapshot.authority.role for snapshot in launch_roles[:4]) != role_order:
+            self._fail(CP_BOOT_V3_LAUNCH_SUPERVISION, "launch readiness role projection is invalid")
+        identities = []
+        for index, (snapshot, (_role, pid)) in enumerate(zip(launch_roles[:4], role_pids, strict=True)):
+            authority = snapshot.authority
+            gateway = authority.role == "gateway"
+            identities.append(ReadinessRoleIdentityV3(
+                authority.role,
+                index + 1 if not gateway else None,
+                pid,
+                authority.uid,
+                authority.gid,
+                bytes.fromhex(snapshot.source.sha256),
+                gateway_live_session_worker_count if gateway else None,
+                gateway_control_endpoint_so_cookie if gateway else None,
+            ))
+        try:
+            barrier = LaunchReadinessBarrierV3(
+                controller_epoch=controller_epoch,
+                census_start_ns=census_start_ns,
+                expected_identities=tuple(identities),
+            )
+        except ApplianceErrorV3:
+            self._fail(CP_BOOT_V3_LAUNCH_SUPERVISION, "launch readiness census is invalid")
+        barrier._owner_engine = self
+        self._launch_readiness_barrier = barrier
+        return barrier
+
+    @_locked_launch_transition_v3
+    def consume_launch_readiness_completion_v3(
+        self,
+        completion: ReadinessCompletionV3,
+        *,
+        controller_epoch: int,
+        controller_terminal: bool,
+    ) -> None:
+        self._verify_v3()
+        barrier = self._launch_readiness_barrier
+        if (
+            self._state is not BootTransitionStateV3.SERVING_AVAILABLE
+            or not self._serving_effect_completed
+            or type(barrier) is not LaunchReadinessBarrierV3
+            or self._launch_readiness_completion_consumed
+        ):
+            self._fail(CP_BOOT_V3_LAUNCH_SUPERVISION, "launch readiness completion is unavailable")
+        try:
+            barrier.consume(
+                completion,
+                controller_epoch=controller_epoch,
+                controller_terminal=controller_terminal,
+            )
+        except ApplianceErrorV3:
+            self._fail(CP_BOOT_V3_LAUNCH_SUPERVISION, "launch readiness completion was rejected")
+        self._launch_readiness_completion_consumed = True
+        self._launch_readiness_consumed_completion = completion
+        self._launch_readiness_serving_eligible = True
+
+    def _has_valid_consumed_readiness_v3(self) -> bool:
+        if not self._launch_transition_lock.held_by_current_thread():
+            raise AssertionError("readiness eligibility check lacks launch authority")
+        barrier = self._launch_readiness_barrier
+        completion = self._launch_readiness_consumed_completion
+        return (
+            self._launch_readiness_serving_eligible
+            and self._launch_readiness_completion_consumed
+            and type(barrier) is LaunchReadinessBarrierV3
+            and barrier.state == "consumed"
+            and type(completion) is ReadinessCompletionV3
+            and completion is barrier._completion
+        )
+
+    def report_controller_terminal_v3(self, *, controller_epoch: int, event: str) -> None:
+        wrapper_to_revoke: ServingAuthorityWrapperV3 | None = None
+        invalid_epoch_error: ApplianceErrorV3 | None = None
+        with self._launch_transition_lock:
+            self._verify_v3()
+            barrier = self._launch_readiness_barrier
+            wrapper = self._serving_authority
+            if (
+                type(barrier) is not LaunchReadinessBarrierV3
+                or type(event) is not str
+                or not event
+                or not _exact_readiness_epoch_v3(controller_epoch, barrier._epoch)
+            ):
+                try:
+                    self._fail(
+                        CP_BOOT_V3_LAUNCH_SUPERVISION,
+                        "controller terminal transition has an invalid readiness epoch",
+                    )
+                except ApplianceErrorV3 as error:
+                    if type(wrapper) is not ServingAuthorityWrapperV3:
+                        raise
+                    invalid_epoch_error = error
+                    wrapper_to_revoke = wrapper
+            elif type(wrapper) is ServingAuthorityWrapperV3:
+                try:
+                    self._fail(
+                        CP_BOOT_V3_LAUNCH_SUPERVISION,
+                        "controller terminal transition revoked serving authority",
+                    )
+                except ApplianceErrorV3:
+                    wrapper_to_revoke = wrapper
+            else:
+                try:
+                    barrier.note_terminal(controller_epoch=controller_epoch, event=event)
+                except ApplianceErrorV3:
+                    pass
+                self._fail(
+                    CP_BOOT_V3_LAUNCH_SUPERVISION,
+                    "controller terminal transition preempted serving admission",
+                )
+        if wrapper_to_revoke is None:
+            raise AssertionError("controller terminal transition lost its wrapper")
+        wrapper_to_revoke.global_revoke()
+        if invalid_epoch_error is not None:
+            raise invalid_epoch_error
+
+    def admit_serving_authority(self) -> ServingAuthorityWrapperV3:
+        with self._launch_transition_lock:
+            self._verify_v3()
+            if (
+                self._state is not BootTransitionStateV3.SERVING_AVAILABLE
+                or not self._serving_effect_completed
+                or not self._has_valid_consumed_readiness_v3()
+            ):
+                if type(self._serving_authority) is ServingAuthorityWrapperV3:
+                    _binding_reject_v3("binding was not issued")
+                self._fail(
+                    CP_BOOT_V3_LAUNCH_SUPERVISION,
+                    "v3 serving authority is not available before SERVING_AVAILABLE",
+                )
         while True:
             capability = _serving_admission_capability_v3(self)
             retry = False
@@ -1894,9 +2539,19 @@ class BootTransitionEngineV3:
                     capability.constructing_wrapper_ref = None
                     break
             if admitted:
-                wrapper = _return_admitted_wrapper_v3(self, capability)
-                if wrapper is not None:
-                    return wrapper
+                with self._launch_transition_lock:
+                    self._verify_v3()
+                    if (
+                        self._state is not BootTransitionStateV3.SERVING_AVAILABLE
+                        or not self._has_valid_consumed_readiness_v3()
+                    ):
+                        self._fail(
+                            CP_BOOT_V3_LAUNCH_SUPERVISION,
+                            "controller terminal transition preempted serving admission",
+                        )
+                    wrapper = _return_admitted_wrapper_v3(self, capability)
+                    if wrapper is not None:
+                        return wrapper
             if wait:
                 self._verify_v3()
             if retry or wait:
@@ -1908,8 +2563,17 @@ class BootTransitionEngineV3:
                 admission_capability=capability,
                 on_global_fault=self._on_wrapper_global_fault,
             )
-            self._verify_v3()
-            return _publish_serving_wrapper_v3(self, capability, wrapper)
+            with self._launch_transition_lock:
+                self._verify_v3()
+                if (
+                    self._state is not BootTransitionStateV3.SERVING_AVAILABLE
+                    or not self._has_valid_consumed_readiness_v3()
+                ):
+                    self._fail(
+                        CP_BOOT_V3_LAUNCH_SUPERVISION,
+                        "controller terminal transition preempted serving admission",
+                    )
+                return _publish_serving_wrapper_v3(self, capability, wrapper)
         except BaseException:
             constructed_wrapper = locals().get("wrapper")
             if (
@@ -1920,6 +2584,7 @@ class BootTransitionEngineV3:
             _abandon_serving_wrapper_construction_v3(capability, constructed_wrapper)
             raise
 
+    @_locked_launch_transition_v3
     def _on_wrapper_global_fault(self) -> None:
         self._verify_v3()
         if self._state is BootTransitionStateV3.FAILED_NON_SERVING:

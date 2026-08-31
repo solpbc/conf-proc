@@ -35,7 +35,11 @@ from conf_proc_spp_boot_v3 import (
     parse_boot_contract_v3,
 )
 from conf_proc_spp_reasons_v3 import ApplianceErrorV3, CP_BOOT_V3_BINDING
-from conf_proc_spp_boot_v3_fixture import build_v3_fixture, refresh_v3_contract_bindings
+from conf_proc_spp_boot_v3_fixture import (
+    build_v3_fixture,
+    install_consumed_readiness_for_test,
+    refresh_v3_contract_bindings,
+)
 
 
 _INPUT_NAMES = (
@@ -366,6 +370,8 @@ class BootAuthorityV3SelfTest(unittest.TestCase):
         self.assertEqual(engine.state, BootTransitionStateV3.SERVING_AVAILABLE)
         self.assertEqual(len(transport.effects), len(boot_v3.BOOT_TRANSITION_STEPS_V3))
         self.assertIsNone(engine._serving_authority)
+        # The exact launch barrier and its admission connection have their own KAT.
+        install_consumed_readiness_for_test(engine)
         wrapper = engine.admit_serving_authority()
         self.assertIsInstance(wrapper, ServingAuthorityWrapperV3)
         self.assertIs(wrapper, engine.admit_serving_authority())

@@ -38,7 +38,7 @@ from conf_proc_spp_reasons_v3 import (
     CP_BOOT_V3_BINDING,
     CP_BOOT_V3_RESOURCE_REDUCER,
 )
-from conf_proc_spp_boot_v3_fixture import build_v3_fixture
+from conf_proc_spp_boot_v3_fixture import build_v3_fixture, install_consumed_readiness_for_test
 
 
 def _binding() -> BootBindingV3:
@@ -50,6 +50,8 @@ def _engine(*, serving: bool = False) -> BootTransitionEngineV3:
     engine = BootTransitionEngineV3(_binding())
     if serving:
         engine._state = BootTransitionStateV3.SERVING_AVAILABLE
+        engine._serving_effect_completed = True
+        install_consumed_readiness_for_test(engine)
     return engine
 
 
@@ -231,7 +233,7 @@ class BootBindingIntegritySelftest(unittest.TestCase):
         independent = _independent_fingerprint(binding)
         self.assertEqual(
             independent.hex(),
-            "f75d82f71f562cf88a9e0e8f1f7561c6ab69b1e883d36d8e305f7655514c97cf",
+            "576d38405c9be8d159a671f71e2c99e15f071a2d8c1a057addd05f295e2f3383",
         )
         record = boot_v3._ISSUED_BOOT_BINDINGS_V3.records[id(binding)]
         self.assertEqual(record.fingerprint, independent)
@@ -749,6 +751,8 @@ class BootBindingIntegritySelftest(unittest.TestCase):
         binding = _binding()
         engine = BootTransitionEngineV3(binding)
         engine._state = BootTransitionStateV3.SERVING_AVAILABLE
+        engine._serving_effect_completed = True
+        install_consumed_readiness_for_test(engine)
         capability = boot_v3._serving_admission_capability_v3(engine)
         original_init = boot_v3.ServingAuthorityWrapperV3.__init__
         original_wait = capability.condition.wait
@@ -830,6 +834,8 @@ class BootBindingIntegritySelftest(unittest.TestCase):
         binding = _binding()
         engine = BootTransitionEngineV3(binding)
         engine._state = BootTransitionStateV3.SERVING_AVAILABLE
+        engine._serving_effect_completed = True
+        install_consumed_readiness_for_test(engine)
         capability = boot_v3._serving_admission_capability_v3(engine)
         original_init = boot_v3.ServingAuthorityWrapperV3.__init__
         constructed: list[ServingAuthorityWrapperV3] = []
@@ -866,6 +872,8 @@ class BootBindingIntegritySelftest(unittest.TestCase):
         binding = _binding()
         engine = BootTransitionEngineV3(binding)
         engine._state = BootTransitionStateV3.SERVING_AVAILABLE
+        engine._serving_effect_completed = True
+        install_consumed_readiness_for_test(engine)
         capability = boot_v3._serving_admission_capability_v3(engine)
         original_init = boot_v3.ServingAuthorityWrapperV3.__init__
         original_wait = capability.condition.wait
@@ -956,6 +964,8 @@ class BootBindingIntegritySelftest(unittest.TestCase):
         binding = _binding()
         engine = BootTransitionEngineV3(binding)
         engine._state = BootTransitionStateV3.SERVING_AVAILABLE
+        engine._serving_effect_completed = True
+        install_consumed_readiness_for_test(engine)
         capability = boot_v3._serving_admission_capability_v3(engine)
         original_verify = BootTransitionEngineV3._verify_v3
         original_init = boot_v3.ServingAuthorityWrapperV3.__init__
@@ -1031,6 +1041,8 @@ class BootBindingIntegritySelftest(unittest.TestCase):
         binding = _binding()
         engine = BootTransitionEngineV3(binding)
         engine._state = BootTransitionStateV3.SERVING_AVAILABLE
+        engine._serving_effect_completed = True
+        install_consumed_readiness_for_test(engine)
         capability = boot_v3._serving_admission_capability_v3(engine)
         original_init = boot_v3.ServingAuthorityWrapperV3.__init__
         original_retire = boot_v3._retire_record_admission_v3
@@ -1151,6 +1163,8 @@ class BootBindingIntegritySelftest(unittest.TestCase):
         binding = _binding()
         engine = BootTransitionEngineV3(binding)
         engine._state = BootTransitionStateV3.SERVING_AVAILABLE
+        engine._serving_effect_completed = True
+        install_consumed_readiness_for_test(engine)
         capability = boot_v3._serving_admission_capability_v3(engine)
         original_condition = capability.condition
         original_init = boot_v3.ServingAuthorityWrapperV3.__init__
@@ -1678,6 +1692,8 @@ class BootBindingIntegritySelftest(unittest.TestCase):
         self.assertEqual(winner.contract_sha256, winner_contract)
 
         winner._state = BootTransitionStateV3.SERVING_AVAILABLE
+        winner._serving_effect_completed = True
+        install_consumed_readiness_for_test(winner)
         pre_capability = claimed
         capability = boot_v3._serving_admission_capability_v3(winner)
         pre_admitted = boot_v3._ISSUED_BOOT_BINDINGS_V3.records[binding_id]
@@ -1761,6 +1777,8 @@ class BootBindingIntegritySelftest(unittest.TestCase):
         serving_id = id(serving_binding)
         engine = BootTransitionEngineV3(serving_binding)
         engine._state = BootTransitionStateV3.SERVING_AVAILABLE
+        engine._serving_effect_completed = True
+        install_consumed_readiness_for_test(engine)
         wrapper = engine.admit_serving_authority()
         admitted_record = boot_v3._ISSUED_BOOT_BINDINGS_V3.records[serving_id]
         del boot_v3._ISSUED_BOOT_BINDINGS_V3.records[serving_id]
@@ -1928,6 +1946,8 @@ class BootBindingIntegritySelftest(unittest.TestCase):
         binding = _binding()
         engine = BootTransitionEngineV3(binding)
         engine._state = BootTransitionStateV3.SERVING_AVAILABLE
+        engine._serving_effect_completed = True
+        install_consumed_readiness_for_test(engine)
         wrapper = engine.admit_serving_authority()
         closed: list[str] = []
         callback_lock_state: list[tuple[bool, bool]] = []
@@ -2009,6 +2029,8 @@ class BootBindingIntegritySelftest(unittest.TestCase):
         binding_id = id(binding)
         engine = BootTransitionEngineV3(binding)
         engine._state = BootTransitionStateV3.SERVING_AVAILABLE
+        engine._serving_effect_completed = True
+        install_consumed_readiness_for_test(engine)
         wrapper = engine.admit_serving_authority()
         closed: list[str] = []
         session = wrapper.open_session(
@@ -2063,6 +2085,8 @@ class BootBindingIntegritySelftest(unittest.TestCase):
         binding_id = id(binding)
         engine = BootTransitionEngineV3(binding)
         engine._state = BootTransitionStateV3.SERVING_AVAILABLE
+        engine._serving_effect_completed = True
+        install_consumed_readiness_for_test(engine)
         wrapper = engine.admit_serving_authority()
         closed: list[str] = []
         session = wrapper.open_session(
@@ -2128,6 +2152,8 @@ class BootBindingIntegritySelftest(unittest.TestCase):
                 binding = _binding()
                 engine = BootTransitionEngineV3(binding)
                 engine._state = BootTransitionStateV3.SERVING_AVAILABLE
+                engine._serving_effect_completed = True
+                install_consumed_readiness_for_test(engine)
                 wrapper = engine.admit_serving_authority()
                 invoked: list[int] = []
                 sessions = []
@@ -2168,6 +2194,8 @@ class BootBindingIntegritySelftest(unittest.TestCase):
         binding = _binding()
         engine = BootTransitionEngineV3(binding)
         engine._state = BootTransitionStateV3.SERVING_AVAILABLE
+        engine._serving_effect_completed = True
+        install_consumed_readiness_for_test(engine)
         wrapper = engine.admit_serving_authority()
         callback_entered = threading.Event()
         release_callback = threading.Event()
@@ -2253,6 +2281,8 @@ class BootBindingIntegritySelftest(unittest.TestCase):
         self.assertIn(binding_id, boot_v3._ISSUED_BOOT_BINDINGS_V3.records)
 
         engine._state = BootTransitionStateV3.SERVING_AVAILABLE
+        engine._serving_effect_completed = True
+        install_consumed_readiness_for_test(engine)
         wrapper = engine.admit_serving_authority()
         gc.collect()
         self.assertIsNotNone(reference())
@@ -2362,6 +2392,8 @@ class BootBindingIntegritySelftest(unittest.TestCase):
         binding_id = id(binding)
         engine = BootTransitionEngineV3(binding)
         engine._state = BootTransitionStateV3.SERVING_AVAILABLE
+        engine._serving_effect_completed = True
+        install_consumed_readiness_for_test(engine)
         wrapper = engine.admit_serving_authority()
         saved_record = boot_v3._ISSUED_BOOT_BINDINGS_V3.records[binding_id]
         original = binding.root_lock_bytes

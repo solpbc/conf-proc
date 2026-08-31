@@ -30,8 +30,16 @@ _ZERO_TOKEN: Final = b"\0" * 32
 _STREAM_BUFFER_BYTES_V3: Final = 2097152
 _COLLECTOR_RESPONSE_MAX_TAIL_BYTES_V3: Final = 8388608
 _COLLECTOR_RESPONSE_MAX_PAYLOAD_BYTES_V3: Final = 44 + _COLLECTOR_RESPONSE_MAX_TAIL_BYTES_V3
+STANDALONE_READINESS_PROBE_BYTES_V3: Final = 32
+STANDALONE_READINESS_RESULT_BYTES_V3: Final = 80
+STANDALONE_READINESS_PROBE_MAGIC_V3: Final = b"SPPRDQ3\0"
+STANDALONE_READINESS_RESULT_MAGIC_V3: Final = b"SPPRDR3\0"
+_STANDALONE_READINESS_PROBE_FORMAT_V3: Final = ">8sHHIQQ"
+_STANDALONE_READINESS_RESULT_FORMAT_V3: Final = ">8sHHIQQIIII32s"
 
 assert struct.calcsize(_HEADER_FORMAT) == HEADER_SIZE_V3
+assert struct.calcsize(_STANDALONE_READINESS_PROBE_FORMAT_V3) == STANDALONE_READINESS_PROBE_BYTES_V3
+assert struct.calcsize(_STANDALONE_READINESS_RESULT_FORMAT_V3) == STANDALONE_READINESS_RESULT_BYTES_V3
 
 
 class RouteV3(IntEnum):
@@ -108,6 +116,107 @@ class SessionReleaseReasonV3(IntEnum):
     AUTHORIZATION_DENIED = 13
     UPSTREAM_FAILED = 14
     HARD_AUDIO = 15
+
+
+@dataclass(frozen=True)
+class StandaloneReadinessProbeV3:
+    role_id: int
+    census_generation: int
+    absolute_monotonic_deadline_ns: int
+
+
+def encode_standalone_readiness_probe_v3(probe: StandaloneReadinessProbeV3) -> bytes:
+    if type(probe) is not StandaloneReadinessProbeV3:
+        _reject("standalone readiness probe is invalid")
+    if type(probe.role_id) is not int or not 1 <= probe.role_id <= 3:
+        _reject("standalone readiness role is invalid")
+    generation = _uint(probe.census_generation, 64, "standalone readiness generation")
+    if generation != 1:
+        _reject("standalone readiness generation is invalid")
+    if type(probe.absolute_monotonic_deadline_ns) is not int or not 0 < probe.absolute_monotonic_deadline_ns < 1 << 64:
+        _reject("standalone readiness deadline is invalid")
+    return struct.pack(
+        _STANDALONE_READINESS_PROBE_FORMAT_V3,
+        STANDALONE_READINESS_PROBE_MAGIC_V3,
+        3,
+        probe.role_id,
+        0,
+        generation,
+        probe.absolute_monotonic_deadline_ns,
+    )
+
+
+def decode_standalone_readiness_probe_v3(data: bytes) -> StandaloneReadinessProbeV3:
+    if type(data) is not bytes or len(data) != STANDALONE_READINESS_PROBE_BYTES_V3:
+        _reject("standalone readiness probe length is invalid")
+    magic, version, role_id, flags, generation, deadline = struct.unpack(
+        _STANDALONE_READINESS_PROBE_FORMAT_V3, data
+    )
+    if magic != STANDALONE_READINESS_PROBE_MAGIC_V3 or version != 3 or flags != 0:
+        _reject("standalone readiness probe framing is invalid")
+    probe = StandaloneReadinessProbeV3(role_id, generation, deadline)
+    if encode_standalone_readiness_probe_v3(probe) != data:
+        _reject("standalone readiness probe is not canonical")
+    return probe
+
+
+@dataclass(frozen=True)
+class StandaloneReadinessResultV3:
+    role_id: int
+    flags: int
+    census_generation: int
+    absolute_monotonic_deadline_ns: int
+    supervised_child_pid: int
+    role_uid: int
+    role_gid: int
+    executable_sha256: bytes
+
+
+def encode_standalone_readiness_result_v3(result: StandaloneReadinessResultV3) -> bytes:
+    if type(result) is not StandaloneReadinessResultV3:
+        _reject("standalone readiness result is invalid")
+    if type(result.role_id) is not int or not 1 <= result.role_id <= 3:
+        _reject("standalone readiness role is invalid")
+    flags = _uint(result.flags, 32, "standalone readiness flags")
+    if flags != 1:
+        _reject("standalone readiness flags are invalid")
+    generation = _uint(result.census_generation, 64, "standalone readiness generation")
+    if generation != 1:
+        _reject("standalone readiness generation is invalid")
+    if type(result.absolute_monotonic_deadline_ns) is not int or not 0 < result.absolute_monotonic_deadline_ns < 1 << 64:
+        _reject("standalone readiness deadline is invalid")
+    return struct.pack(
+        _STANDALONE_READINESS_RESULT_FORMAT_V3,
+        STANDALONE_READINESS_RESULT_MAGIC_V3,
+        3,
+        result.role_id,
+        flags,
+        generation,
+        result.absolute_monotonic_deadline_ns,
+        _uint(result.supervised_child_pid, 32, "supervised child PID"),
+        _uint(result.role_uid, 32, "readiness role UID"),
+        _uint(result.role_gid, 32, "readiness role GID"),
+        0,
+        _exact_bytes(result.executable_sha256, 32, "readiness executable digest"),
+    )
+
+
+def decode_standalone_readiness_result_v3(data: bytes) -> StandaloneReadinessResultV3:
+    if type(data) is not bytes or len(data) != STANDALONE_READINESS_RESULT_BYTES_V3:
+        _reject("standalone readiness result length is invalid")
+    (
+        magic, version, role_id, flags, generation, deadline, child_pid,
+        role_uid, role_gid, reserved, executable_sha256,
+    ) = struct.unpack(_STANDALONE_READINESS_RESULT_FORMAT_V3, data)
+    if magic != STANDALONE_READINESS_RESULT_MAGIC_V3 or version != 3 or reserved != 0:
+        _reject("standalone readiness result framing is invalid")
+    result = StandaloneReadinessResultV3(
+        role_id, flags, generation, deadline, child_pid, role_uid, role_gid,
+        executable_sha256,
+    )
+    if encode_standalone_readiness_result_v3(result) != data:
+        _reject("standalone readiness result is not canonical")
+    return result
 
 
 class PreRequestRejectedReasonV3(IntEnum):
@@ -892,8 +1001,13 @@ class GatewayReadinessProbePayloadV3:
 def encode_gateway_readiness_probe_payload_v3(payload: GatewayReadinessProbePayloadV3) -> bytes:
     if type(payload) is not GatewayReadinessProbePayloadV3:
         _reject("gateway readiness probe payload is invalid")
+    generation = _uint(payload.census_generation, 64, "census generation")
+    if generation != 1:
+        _reject("gateway readiness generation is invalid")
+    if type(payload.absolute_monotonic_deadline_ns) is not int or not 0 < payload.absolute_monotonic_deadline_ns < 1 << 64:
+        _reject("gateway readiness deadline is invalid")
     return struct.pack(
-        ">QQ", _uint(payload.census_generation, 64, "census generation"),
+        ">QQ", generation,
         _uint(payload.absolute_monotonic_deadline_ns, 64, "readiness deadline"),
     )
 
@@ -917,12 +1031,22 @@ class GatewayReadinessResultPayloadV3:
 def encode_gateway_readiness_result_payload_v3(payload: GatewayReadinessResultPayloadV3) -> bytes:
     if type(payload) is not GatewayReadinessResultPayloadV3:
         _reject("gateway readiness result payload is invalid")
-    if _uint(payload.flags, 16, "gateway readiness flags") & ~1:
+    generation = _uint(payload.census_generation, 64, "census generation")
+    if generation != 1:
+        _reject("gateway readiness generation is invalid")
+    if type(payload.gateway_pid) is not int or not 0 < payload.gateway_pid < 1 << 32:
+        _reject("gateway readiness PID is invalid")
+    if type(payload.session_worker_count) is not int or not 0 <= payload.session_worker_count <= 4:
+        _reject("gateway readiness worker count is invalid")
+    flags = _uint(payload.flags, 16, "gateway readiness flags")
+    if flags != 1:
         _reject("gateway readiness flags are invalid")
+    if type(payload.control_endpoint_so_cookie) is not int or not 0 < payload.control_endpoint_so_cookie < 1 << 64:
+        _reject("gateway readiness control endpoint cookie is invalid")
     return struct.pack(
-        ">QIHH32sQ", _uint(payload.census_generation, 64, "census generation"),
+        ">QIHH32sQ", generation,
         _uint(payload.gateway_pid, 32, "gateway PID"),
-        _uint(payload.session_worker_count, 16, "session worker count"), payload.flags,
+        _uint(payload.session_worker_count, 16, "session worker count"), flags,
         _exact_bytes(payload.executable_sha256, 32, "gateway executable digest"),
         _uint(payload.control_endpoint_so_cookie, 64, "control endpoint socket cookie"),
     )
