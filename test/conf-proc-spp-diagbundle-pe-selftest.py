@@ -23,6 +23,7 @@ from conf_proc_spp_diagbundle_reasons import (  # noqa: E402
     CP_DIAGBUNDLE_DESCRIPTOR_MALFORMED,
     CP_DIAGBUNDLE_DESCRIPTOR_MISSING,
     CP_DIAGBUNDLE_PE_FORMAT,
+    CP_DIAGBUNDLE_PE_SIZE,
     DiagBundleError,
 )
 
@@ -35,10 +36,15 @@ SCN_EXECUTE = 0x20000000
 SCN_READ = 0x40000000
 SCN_WRITE = 0x80000000
 VALID_CHARS = SCN_INITIALIZED | SCN_READ
-DEFAULT_SCHEMA = "sol-spp-diagbundle-input-closure/v1"
+DEFAULT_SCHEMA = "sol-spp-diagbundle-descriptor/v1"
 DEFAULT_ADDRESS = "ab" * 32
 _COFF_FORMAT = "<HHIIIHH"
 _SECTION_FORMAT = "<8sIIIIIIHHI"
+_DEFAULT_FILE_ALIGNMENT = 512
+
+
+def _align_up(value: int, alignment: int) -> int:
+    return (value + alignment - 1) // alignment * alignment
 
 
 def _descriptor_object(**updates: object) -> dict[str, object]:
@@ -62,13 +68,21 @@ def _logical_section(payload: bytes, *, extra: bytes = b"") -> bytes:
     return struct.pack("<I", len(payload)) + payload + extra
 
 
-def _optional_header(*, pe32plus: bool, checksum: int, n_rva: int, directories: list[tuple[int, int]]) -> bytes:
+def _optional_header(
+    *,
+    pe32plus: bool,
+    checksum: int,
+    n_rva: int,
+    directories: list[tuple[int, int]],
+    file_alignment: int,
+    size_of_headers: int,
+) -> bytes:
     if not pe32plus:
         header = bytearray()
         header += struct.pack("<HBB", 0x10B, 0, 0)
-        header += struct.pack("<9I", 0, 0, 0, 0, 0, 0, 0, 4096, 512)
+        header += struct.pack("<9I", 0, 0, 0, 0, 0, 0, 0, 4096, file_alignment)
         header += struct.pack("<6H", 0, 0, 0, 0, 0, 0)
-        header += struct.pack("<3I", 0, 0, 0)
+        header += struct.pack("<3I", 0, 0, size_of_headers)
         header += struct.pack("<I", checksum)
         header += struct.pack("<HH", 10, 0)
         header += struct.pack("<4I", 0, 0, 0, 0)
@@ -78,9 +92,9 @@ def _optional_header(*, pe32plus: bool, checksum: int, n_rva: int, directories: 
         header += struct.pack("<HBB", 0x20B, 0, 0)
         header += struct.pack("<5I", 0, 0, 0, 0, 0)
         header += struct.pack("<Q", 0)
-        header += struct.pack("<II", 4096, 512)
+        header += struct.pack("<II", 4096, file_alignment)
         header += struct.pack("<6H", 0, 0, 0, 0, 0, 0)
-        header += struct.pack("<3I", 0, 0, 0)
+        header += struct.pack("<3I", 0, 0, size_of_headers)
         header += struct.pack("<I", checksum)
         header += struct.pack("<HH", 10, 0)
         header += struct.pack("<4Q", 0, 0, 0, 0)
@@ -94,7 +108,7 @@ def _optional_header(*, pe32plus: bool, checksum: int, n_rva: int, directories: 
 
 def build_pe(
     *,
-    pe32plus: bool = False,
+    pe32plus: bool = True,
     checksum: int = 0,
     n_rva: int = 16,
     cert_offset: int = 0,
@@ -107,19 +121,43 @@ def build_pe(
     number_of_sections: int | None = None,
     machine: int = 0x8664,
     truncate: int | None = None,
+    file_alignment: int = _DEFAULT_FILE_ALIGNMENT,
+    size_of_headers: int | None = None,
 ) -> tuple[bytes, dict[str, int]]:
     if sections is None:
         sections = [_sppdiag_section()]
     directories = [(0, 0)] * n_rva
     if n_rva > 4:
         directories[4] = (cert_offset, cert_size)
-    optional = _optional_header(pe32plus=pe32plus, checksum=checksum, n_rva=n_rva, directories=directories)
-    optional_used = size_of_optional_header if size_of_optional_header is not None else len(optional)
+    optional_probe = _optional_header(
+        pe32plus=pe32plus,
+        checksum=checksum,
+        n_rva=n_rva,
+        directories=directories,
+        file_alignment=file_alignment,
+        size_of_headers=0,
+    )
+    optional_used = size_of_optional_header if size_of_optional_header is not None else len(optional_probe)
     optional_start = e_lfanew + 4 + 20
     section_table_start = optional_start + optional_used
     declared_sections = len(sections) if number_of_sections is None else number_of_sections
     headers_end = section_table_start + 40 * max(declared_sections, len(sections))
-    cursor = headers_end
+    layout_alignment = (
+        file_alignment
+        if 0 < file_alignment <= 64 * 1024 and file_alignment & (file_alignment - 1) == 0
+        else _DEFAULT_FILE_ALIGNMENT
+    )
+    physical_headers_end = _align_up(headers_end, layout_alignment)
+    declared_headers = physical_headers_end if size_of_headers is None else size_of_headers
+    optional = _optional_header(
+        pe32plus=pe32plus,
+        checksum=checksum,
+        n_rva=n_rva,
+        directories=directories,
+        file_alignment=file_alignment,
+        size_of_headers=declared_headers,
+    )
+    cursor = physical_headers_end
     laid_out: list[dict[str, object]] = []
     for section in sections:
         raw = bytes(section["raw_bytes"])
@@ -127,7 +165,7 @@ def build_pe(
             virtual_size = int(section["logical_size"])
         else:
             virtual_size = int(section.get("virtual_size", len(raw)))
-        size_of_raw_data = int(section.get("size_of_raw_data", len(raw)))
+        size_of_raw_data = int(section.get("size_of_raw_data", _align_up(len(raw), layout_alignment)))
         content_offset = cursor
         declared_pointer = int(section["pointer_to_raw_data"]) if "pointer_to_raw_data" in section else content_offset
         laid_out.append(
@@ -140,8 +178,8 @@ def build_pe(
                 "content_offset": content_offset,
             }
         )
-        cursor = content_offset + max(len(raw), size_of_raw_data, 0)
-    file_size = max(cursor, headers_end, cert_offset + cert_size, e_lfanew + 24)
+        cursor = _align_up(content_offset + max(len(raw), size_of_raw_data, 0), layout_alignment)
+    file_size = max(cursor, physical_headers_end, cert_offset + cert_size, e_lfanew + 24)
     buf = bytearray(file_size)
     buf[0:2] = e_magic[:2].ljust(2, b"\x00")
     if 60 + 4 <= len(buf):
@@ -201,6 +239,9 @@ def build_pe(
         "sppdiag_offset": sppdiag_offset,
         "section_table_start": section_table_start,
         "headers_end": headers_end,
+        "size_of_headers": declared_headers,
+        "size_of_headers_offset": optional_start + 60,
+        "file_alignment_offset": optional_start + 36,
     }
     data = bytes(buf[:truncate] if truncate is not None else buf)
     return data, info
@@ -225,8 +266,9 @@ def _sppdiag_section(
         "characteristics": characteristics,
         "raw_bytes": raw,
         "logical_size": 4 + len(payload) if virtual_size is None else virtual_size,
-        "size_of_raw_data": len(raw) if size_of_raw_data is None else size_of_raw_data,
     }
+    if size_of_raw_data is not None:
+        section["size_of_raw_data"] = size_of_raw_data
     if pointer_to_raw_data is not None:
         section["pointer_to_raw_data"] = pointer_to_raw_data
     return section
@@ -254,11 +296,9 @@ def _assert_pe_format_only(data: bytes) -> None:
     raise AssertionError("expected DiagBundleError")
 
 
-def test_positive_pe32() -> None:
-    data, _info = build_pe()
-    result = extract_sppdiag_descriptor(data)
-    assert result.schema == DEFAULT_SCHEMA
-    assert result.input_closure_address == DEFAULT_ADDRESS
+def test_pe32_is_rejected() -> None:
+    data, _info = build_pe(pe32plus=False)
+    _expect(CP_DIAGBUNDLE_PE_FORMAT, data)
 
 
 def test_missing_sppdiag() -> None:
@@ -355,6 +395,29 @@ def test_ambiguous_overlapping_sections() -> None:
     _expect(CP_DIAGBUNDLE_PE_FORMAT, data)
 
 
+def test_size_of_headers_and_file_alignment_cover_section_metadata() -> None:
+    positive, info = build_pe()
+    assert info["size_of_headers"] == _DEFAULT_FILE_ALIGNMENT
+    assert info["headers_end"] <= info["size_of_headers"]
+    result = extract_sppdiag_descriptor(positive)
+    assert result.input_closure_address == DEFAULT_ADDRESS
+
+    for declared in (0, 64, info["headers_end"] - 1, _DEFAULT_FILE_ALIGNMENT - 1, 1024):
+        data, _info = build_pe(size_of_headers=declared)
+        _expect(CP_DIAGBUNDLE_PE_FORMAT, data)
+
+    invalid_alignment, _info = build_pe(file_alignment=513)
+    _expect(CP_DIAGBUNDLE_PE_FORMAT, invalid_alignment)
+    invalid_raw_size, _info = build_pe(sections=[_sppdiag_section(size_of_raw_data=513)])
+    _expect(CP_DIAGBUNDLE_PE_FORMAT, invalid_raw_size)
+
+    shifted = bytearray(positive + b"\0")
+    original_raw = bytes(shifted[info["sppdiag_offset"] : info["sppdiag_offset"] + 512])
+    shifted[info["sppdiag_offset"] + 1 : info["sppdiag_offset"] + 513] = original_raw
+    struct.pack_into("<I", shifted, info["section_table_start"] + 20, info["sppdiag_offset"] + 1)
+    _expect(CP_DIAGBUNDLE_PE_FORMAT, bytes(shifted))
+
+
 def test_noncanonical_descriptor_json() -> None:
     payload = _descriptor_bytes(noncanonical=True)
     data, _info = build_pe(sections=[_sppdiag_section(payload=payload)])
@@ -373,6 +436,10 @@ def test_descriptor_wrong_keys() -> None:
     wrong_type["input_closure_address"] = 1
     typed, _info = build_pe(sections=[_sppdiag_section(payload=canonical_dumps(wrong_type))])
     _expect(CP_DIAGBUNDLE_DESCRIPTOR_MALFORMED, typed)
+    wrong_schema, _info = build_pe(
+        sections=[_sppdiag_section(payload=_descriptor_bytes(schema="sol-spp-diagbundle-descriptor/v2"))]
+    )
+    _expect(CP_DIAGBUNDLE_DESCRIPTOR_MALFORMED, wrong_schema)
 
 
 def test_coverage_checksum_field() -> None:
@@ -421,8 +488,43 @@ def test_malformed_headers_are_pe_format() -> None:
     _assert_pe_format_only(bytes(bad_sig))
 
 
+class _TracingRangeSource:
+    def __init__(self, data: bytes, size_bytes: int) -> None:
+        self.data = data
+        self.size_bytes = size_bytes
+        self.reads: list[tuple[int, int]] = []
+
+    def read_range(self, offset: int, length: int) -> bytes:
+        self.reads.append((offset, length))
+        if offset + length <= len(self.data):
+            return self.data[offset : offset + length]
+        return b"\0" * length
+
+
+def test_range_source_one_gib_boundary_without_whole_image_read() -> None:
+    data, _info = build_pe(pe32plus=True)
+    source = _TracingRangeSource(data, 1024**3)
+    result = extract_sppdiag_descriptor(source)
+    assert result.input_closure_address == DEFAULT_ADDRESS
+    assert source.reads
+    assert max(length for _offset, length in source.reads) <= 4 * 1024**2
+    assert sum(length for _offset, length in source.reads) < 64 * 1024
+    assert (0, source.size_bytes) not in source.reads
+
+
+def test_range_source_over_one_gib_rejected_before_read() -> None:
+    source = _TracingRangeSource(b"", 1024**3 + 1)
+    try:
+        extract_sppdiag_descriptor(source)
+    except DiagBundleError as exc:
+        assert exc.reason_code == CP_DIAGBUNDLE_PE_SIZE
+    else:
+        raise AssertionError("expected PE_SIZE")
+    assert source.reads == []
+
+
 TESTS = (
-    test_positive_pe32,
+    test_pe32_is_rejected,
     test_missing_sppdiag,
     test_duplicate_sppdiag,
     test_characteristics_missing_initialized_data,
@@ -438,6 +540,7 @@ TESTS = (
     test_valid_prefix_plus_extra_data,
     test_raw_size_less_than_virtual_size,
     test_ambiguous_overlapping_sections,
+    test_size_of_headers_and_file_alignment_cover_section_metadata,
     test_noncanonical_descriptor_json,
     test_descriptor_wrong_keys,
     test_coverage_checksum_field,
@@ -445,6 +548,8 @@ TESTS = (
     test_coverage_certificate_table_bytes,
     test_positive_pe32plus,
     test_malformed_headers_are_pe_format,
+    test_range_source_one_gib_boundary_without_whole_image_read,
+    test_range_source_over_one_gib_rejected_before_read,
 )
 
 

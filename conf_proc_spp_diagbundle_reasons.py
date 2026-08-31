@@ -10,11 +10,12 @@ from typing import Final
 
 NODE_ARTIFACT_STATE: Final = "diagnostic_unqualified"
 
-CP_DIAGBUNDLE_SNAPSHOT_READ: Final = "CP_DIAGBUNDLE_SNAPSHOT_READ"
-CP_DIAGBUNDLE_SNAPSHOT_SHAPE: Final = "CP_DIAGBUNDLE_SNAPSHOT_SHAPE"
-CP_DIAGBUNDLE_SNAPSHOT_SIZE: Final = "CP_DIAGBUNDLE_SNAPSHOT_SIZE"
-CP_DIAGBUNDLE_CONCURRENT_MUTATION: Final = "CP_DIAGBUNDLE_CONCURRENT_MUTATION"
+CP_DIAGBUNDLE_STREAM_READ: Final = "CP_DIAGBUNDLE_STREAM_READ"
+CP_DIAGBUNDLE_STREAM_FORMAT: Final = "CP_DIAGBUNDLE_STREAM_FORMAT"
+CP_DIAGBUNDLE_STREAM_SIZE: Final = "CP_DIAGBUNDLE_STREAM_SIZE"
+CP_DIAGBUNDLE_SOURCE_CHANGED: Final = "CP_DIAGBUNDLE_SOURCE_CHANGED"
 CP_DIAGBUNDLE_INTERNAL: Final = "CP_DIAGBUNDLE_INTERNAL"
+CP_DIAGBUNDLE_PE_SIZE: Final = "CP_DIAGBUNDLE_PE_SIZE"
 CP_DIAGBUNDLE_PE_FORMAT: Final = "CP_DIAGBUNDLE_PE_FORMAT"
 CP_DIAGBUNDLE_DESCRIPTOR_MISSING: Final = "CP_DIAGBUNDLE_DESCRIPTOR_MISSING"
 CP_DIAGBUNDLE_DESCRIPTOR_DUPLICATE: Final = "CP_DIAGBUNDLE_DESCRIPTOR_DUPLICATE"
@@ -50,11 +51,12 @@ RECOVERY_CALLER_EXPECTATION_MISMATCH: Final = "caller_expectation_mismatch"
 
 ALL_REASON_CODES_DIAGBUNDLE: Final = frozenset(
     {
-        CP_DIAGBUNDLE_SNAPSHOT_READ,
-        CP_DIAGBUNDLE_SNAPSHOT_SHAPE,
-        CP_DIAGBUNDLE_SNAPSHOT_SIZE,
-        CP_DIAGBUNDLE_CONCURRENT_MUTATION,
+        CP_DIAGBUNDLE_STREAM_READ,
+        CP_DIAGBUNDLE_STREAM_FORMAT,
+        CP_DIAGBUNDLE_STREAM_SIZE,
+        CP_DIAGBUNDLE_SOURCE_CHANGED,
         CP_DIAGBUNDLE_INTERNAL,
+        CP_DIAGBUNDLE_PE_SIZE,
         CP_DIAGBUNDLE_PE_FORMAT,
         CP_DIAGBUNDLE_DESCRIPTOR_MISSING,
         CP_DIAGBUNDLE_DESCRIPTOR_DUPLICATE,
@@ -94,26 +96,34 @@ ALL_RECOVERY_CLASSES: Final = frozenset(
     }
 )
 
-REASON_RECOVERY: Final = {
-    CP_DIAGBUNDLE_SNAPSHOT_READ: (
+def _reason_recovery() -> dict[str, tuple[str, str]]:
+    # Keep the large literal behind a call. The repository's static reference
+    # scanner intentionally expands assigned mappings and would otherwise form
+    # a Cartesian product across the two-string recovery tuples.
+    return {
+    CP_DIAGBUNDLE_STREAM_READ: (
         RECOVERY_RETRY_AFTER_ENVIRONMENT_FIX,
-        "retry the snapshot against a readable diagnostic-bundle directory",
+        "retry with a readable regular diagnostic-bundle stream file",
     ),
-    CP_DIAGBUNDLE_SNAPSHOT_SHAPE: (
+    CP_DIAGBUNDLE_STREAM_FORMAT: (
         RECOVERY_RETRY_AFTER_INPUT_FIX,
-        "replace symlinks, special files, and hardlinked members with regular files and directories",
+        "rebuild the diagnostic bundle in the canonical SPPDBN1 stream format",
     ),
-    CP_DIAGBUNDLE_SNAPSHOT_SIZE: (
+    CP_DIAGBUNDLE_STREAM_SIZE: (
         RECOVERY_RETRY_AFTER_INPUT_FIX,
-        "reduce the diagnostic-bundle tree so it fits the snapshot size budget",
+        "reduce the diagnostic-bundle stream so it fits the declared size budget",
     ),
-    CP_DIAGBUNDLE_CONCURRENT_MUTATION: (
+    CP_DIAGBUNDLE_SOURCE_CHANGED: (
         RECOVERY_RETRY_AFTER_ENVIRONMENT_FIX,
-        "retry the snapshot against an unchanged diagnostic-bundle directory",
+        "retry from a stable immutable diagnostic-bundle stream source",
     ),
     CP_DIAGBUNDLE_INTERNAL: (
         RECOVERY_NOT_RECOVERABLE_STRUCTURAL,
-        "report an internal diagnostic-bundle snapshot fault",
+        "report an internal diagnostic-bundle inspector fault",
+    ),
+    CP_DIAGBUNDLE_PE_SIZE: (
+        RECOVERY_RETRY_AFTER_INPUT_FIX,
+        "rebuild the UKI so its exact byte length is at most 1 GiB",
     ),
     CP_DIAGBUNDLE_PE_FORMAT: (
         RECOVERY_RETRY_AFTER_INPUT_FIX,
@@ -223,7 +233,10 @@ REASON_RECOVERY: Final = {
         RECOVERY_RETRY_AFTER_INPUT_FIX,
         "fix the caller-expectations document so it is a closed object with the required fields",
     ),
-}
+    }
+
+
+REASON_RECOVERY: Final = _reason_recovery()
 
 
 class DiagBundleError(RuntimeError):

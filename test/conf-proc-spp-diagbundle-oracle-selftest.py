@@ -24,6 +24,7 @@ import conf_proc_spp_diagbundle_oracle as oracle  # noqa: E402
 from conf_proc_json import canonical_dumps  # noqa: E402
 from conf_proc_spp_diagbundle_reasons import (  # noqa: E402
     CP_DIAGBUNDLE_FORBIDDEN,
+    CP_DIAGBUNDLE_MEMBER,
     CP_DIAGBUNDLE_NODE_KIND,
     CP_DIAGBUNDLE_ROLE,
     CP_DIAGBUNDLE_SCHEMA,
@@ -43,19 +44,21 @@ from conf_proc_spp_diagbundle_reasons import (  # noqa: E402
 
 _EXPECTED_INPUT_CLOSURE_ADDRESS = "bafe18a2cd072235ece04d66650d28104fb2bb6d373031a1a9c78cd7eadd2d51"
 _EXPECTED_CONTROL_PLAN_ADDRESS = "a96815d7e0eb79ff8e9e92839badb14b483eca88e0cb3272ad8d798d9457d03e"
-_EXPECTED_IMAGE_BINDING_ADDRESS = "3465b297ffa87299cd999939d8fc81b608fe623a1a63c8f4e2e874161901ca1b"
-_EXPECTED_INNER_RECEIPT_DIGEST = "249e95485d773234f3d07512e33932a476e10a59ff3186e92594bc596c8c5c28"
-_EXPECTED_OUTER_ENVELOPE_ADDRESS = "2d72cd9484f9a07439dcb6446ddfb34da5c015ea2ebaaa09c9484fac0c06df9b"
-_EXPECTED_QUOTE_EXTRA_DATA = "5fb414f4b59e9dcf96095d0717ed356d8c3619d0265ff1236e940b8a596a2626"
+_EXPECTED_IMAGE_BINDING_ADDRESS = "e3f4cf091f7a17d7d982bd1bc82c4abe8369d2633725918a5fa3cca514fb4fc7"
+_EXPECTED_INNER_RECEIPT_DIGEST = "f1f7dafc97b062ffde6e966d28424e27cc04bbcffc1ddac589dc7742fb2e5873"
+_EXPECTED_OUTER_ENVELOPE_ADDRESS = "c372bb7dced7481fca1ed5c5ae91e94c4341e9623040c29837e2a27c661e3c54"
+_EXPECTED_QUOTE_EXTRA_DATA = "24bd181188deafe7286b7f8ec894ebdd76c1e887fc543134bc2efd53b8605a31"
 _TMP = "/var/tmp"
 
 
 def _bundle(spec: oracle.BundleSpec = oracle.DEFAULT_SPEC):
     tmp = tempfile.TemporaryDirectory(prefix="diagbundle-oracle-", dir=_TMP)
-    root = os.path.join(tmp.name, "bundle")
+    source_root = os.path.join(tmp.name, "bundle-source")
+    bundle = os.path.join(tmp.name, "bundle.sppdbn")
     exp = os.path.join(tmp.name, "expectations.json")
-    addrs = oracle.build_bundle(root, exp, spec)
-    return tmp, root, exp, addrs
+    addrs = oracle.build_bundle(source_root, exp, spec)
+    oracle.pack_bundle(source_root, bundle)
+    return tmp, bundle, exp, addrs
 
 
 def _inspect(spec: oracle.BundleSpec) -> dict[str, str]:
@@ -130,9 +133,8 @@ def test_content_change_changes_address() -> None:
     assert result["input_closure_address"] != _EXPECTED_INPUT_CLOSURE_ADDRESS
 
 
-def test_wrong_declared_sha256_is_ignored() -> None:
-    result = _inspect(replace(oracle.DEFAULT_SPEC, declared_sha256=(("trace.json", "0" * 64),)))
-    assert result["input_closure_address"] == _EXPECTED_INPUT_CLOSURE_ADDRESS
+def test_wrong_declared_sha256_is_rejected() -> None:
+    _expect(CP_DIAGBUNDLE_MEMBER, replace(oracle.DEFAULT_SPEC, declared_sha256=(("trace.json", "0" * 64),)))
 
 
 def test_wrong_role_at_control_plan_path() -> None:
@@ -190,19 +192,14 @@ def test_image_field_mismatch() -> None:
 
 
 def test_image_binding_mismatch() -> None:
-    tmp, root, exp, _addrs = _bundle()
-    try:
-        with open(os.path.join(root, "signed-image", "rootfs.img"), "ab") as handle:
-            handle.write(b"x")
-        try:
-            prod.inspect_diagnostic_bundle(root, exp)
-        except DiagBundleError as exc:
-            if exc.reason_code != CP_DIAGBUNDLE_SEAM_IMAGE_BINDING:
-                raise AssertionError(f"expected SEAM_IMAGE_BINDING, got {exc.reason_code}: {exc}") from exc
-        else:
-            raise AssertionError("expected SEAM_IMAGE_BINDING")
-    finally:
-        tmp.cleanup()
+    _expect(
+        CP_DIAGBUNDLE_SEAM_IMAGE_BINDING,
+        replace(
+            oracle.DEFAULT_SPEC,
+            rootfs=b"rootfs-mutated",
+            receipt_image_binding=_EXPECTED_IMAGE_BINDING_ADDRESS,
+        ),
+    )
 
 
 def test_inner_receipt_digest_mismatch() -> None:
@@ -274,7 +271,7 @@ TESTS = (
     test_add_row_changes_address,
     test_rename_path_changes_address,
     test_content_change_changes_address,
-    test_wrong_declared_sha256_is_ignored,
+    test_wrong_declared_sha256_is_rejected,
     test_wrong_role_at_control_plan_path,
     test_duplicate_control_plan_role,
     test_missing_mandatory_role,

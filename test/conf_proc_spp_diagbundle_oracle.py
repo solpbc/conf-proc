@@ -21,6 +21,7 @@ DOMAIN_QUOTE_QD = b"sol-spp-diagbundle-quote-qd-v1\0"
 DOMAIN_OUTER_ENVELOPE = b"sol-spp-diagbundle-outer-envelope-v1\0"
 
 SCHEMA_INPUT_CLOSURE = "sol-spp-diagbundle-input-closure/v1"
+SCHEMA_DESCRIPTOR = "sol-spp-diagbundle-descriptor/v1"
 SCHEMA_SIGNED_IMAGE = "sol-spp-diagbundle-signed-image/v1"
 SCHEMA_INNER_RECEIPT = "sol-spp-diagbundle-inner-receipt/v1"
 SCHEMA_OUTER_ENVELOPE = "sol-spp-diagbundle-outer-envelope/v1"
@@ -31,7 +32,8 @@ KIND_OUTER_ENVELOPE = "outer_envelope"
 ARTIFACT_STATE = "diagnostic_unqualified"
 LAYOUT_IMAGE = "uki-verity/v1"
 LAYOUT_OUTER = "snp-tpm-gpu/v1"
-TERMINAL_INTENT = "intent_to_export"
+TERMINAL_FRAME_PATH = "terminal-frame.bin"
+TERMINAL_FRAME_PREFIX = b"SPPDIAG\0\x01\x01\x00\x40"
 CONTROL_PLAN_PATH = "control-plan.json"
 SIGNED_IMAGE_MEMBER_NAMES = (
     "diagnostic.efi",
@@ -57,6 +59,8 @@ _SCN_INITIALIZED = 0x40
 _SCN_READ = 0x40000000
 _COFF_FORMAT = "<HHIIIHH"
 _SECTION_FORMAT = "<8sIIIIIIHHI"
+STREAM_MAGIC = b"SPPDBN1\0"
+STREAM_VERSION = 1
 
 
 def domain_address(domain: bytes, obj: dict) -> str:
@@ -67,16 +71,45 @@ def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _frame_field(value: str) -> bytes:
+    try:
+        decoded = bytes.fromhex(value)
+    except ValueError:
+        return b"\0" * 32
+    return decoded if len(decoded) == 32 else b"\0" * 32
+
+
 def _write(path: str, data: bytes) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "wb") as handle:
         handle.write(data)
 
 
+def pack_bundle(root_dir: str, bundle_path: str) -> bytes:
+    """Build canonical stream bytes without importing production code."""
+
+    members: list[tuple[bytes, bytes]] = []
+    for directory, _subdirectories, filenames in os.walk(root_dir):
+        for filename in filenames:
+            source = os.path.join(directory, filename)
+            logical = os.path.relpath(source, root_dir).replace(os.sep, "/").encode("utf-8")
+            with open(source, "rb") as handle:
+                members.append((logical, handle.read()))
+    members.sort(key=lambda item: item[0])
+    output = bytearray(struct.pack(">8sII", STREAM_MAGIC, STREAM_VERSION, len(members)))
+    for path, payload in members:
+        output += struct.pack(">HQ32s", len(path), len(payload), hashlib.sha256(payload).digest())
+        output += path
+        output += payload
+    encoded = bytes(output)
+    _write(bundle_path, encoded)
+    return encoded
+
+
 def build_uki(descriptor_input_closure_address: str) -> bytes:
     payload = canonical_dumps(
         {
-            "schema": SCHEMA_INPUT_CLOSURE,
+            "schema": SCHEMA_DESCRIPTOR,
             "artifact_state": ARTIFACT_STATE,
             "input_closure_address": descriptor_input_closure_address,
         }
@@ -84,13 +117,15 @@ def build_uki(descriptor_input_closure_address: str) -> bytes:
     raw = struct.pack("<I", len(payload)) + payload
     directories = [(0, 0)] * 16
     optional = bytearray()
-    optional += struct.pack("<HBB", 0x10B, 0, 0)
-    optional += struct.pack("<9I", 0, 0, 0, 0, 0, 0, 0, 4096, 512)
+    optional += struct.pack("<HBB", 0x20B, 0, 0)
+    optional += struct.pack("<5I", 0, 0, 0, 0, 0)
+    optional += struct.pack("<Q", 0)
+    optional += struct.pack("<II", 4096, 512)
     optional += struct.pack("<6H", 0, 0, 0, 0, 0, 0)
-    optional += struct.pack("<3I", 0, 0, 0)
+    optional += struct.pack("<3I", 0, 0, 512)
     optional += struct.pack("<I", 0)
     optional += struct.pack("<HH", 10, 0)
-    optional += struct.pack("<4I", 0, 0, 0, 0)
+    optional += struct.pack("<4Q", 0, 0, 0, 0)
     optional += struct.pack("<II", 0, 16)
     for virtual_address, size in directories:
         optional += struct.pack("<II", virtual_address, size)
@@ -98,8 +133,11 @@ def build_uki(descriptor_input_closure_address: str) -> bytes:
     optional_start = e_lfanew + 24
     section_table_start = optional_start + len(optional)
     headers_end = section_table_start + 40
-    pointer = headers_end
-    buf = bytearray(pointer + len(raw))
+    if headers_end > 512:
+        raise AssertionError("independent UKI fixture headers exceed one file-alignment unit")
+    pointer = 512
+    raw_size = 512
+    buf = bytearray(pointer + raw_size)
     buf[0:2] = b"MZ"
     struct.pack_into("<I", buf, 60, e_lfanew)
     buf[e_lfanew : e_lfanew + 4] = b"PE\x00\x00"
@@ -112,7 +150,7 @@ def build_uki(descriptor_input_closure_address: str) -> bytes:
         b".sppdiag",
         len(raw),
         0,
-        len(raw),
+        raw_size,
         pointer,
         0,
         0,
@@ -131,7 +169,7 @@ class BundleSpec:
     challenge: str
     run_identity: str
     target_profile_id: str
-    terminal_intent: str
+    terminal_frame: bytes | None
     rootfs: bytes
     verity: bytes
     root_hash: bytes
@@ -184,7 +222,7 @@ DEFAULT_SPEC = BundleSpec(
     challenge=_sha(b"diagbundle-oracle-challenge-v1"),
     run_identity=_sha(b"diagbundle-oracle-run-identity-v1"),
     target_profile_id="profile-v1",
-    terminal_intent=TERMINAL_INTENT,
+    terminal_frame=None,
     rootfs=b"rootfs",
     verity=b"verity",
     root_hash=b"h" * 32,
@@ -298,6 +336,20 @@ def build_bundle(root_dir: str, expectations_path: str, spec: BundleSpec) -> dic
     receipt_control_plan = spec.receipt_control_plan if spec.receipt_control_plan is not None else control_plan_address
     receipt_challenge = spec.receipt_challenge if spec.receipt_challenge is not None else spec.challenge
     receipt_run_identity = spec.receipt_run_identity if spec.receipt_run_identity is not None else spec.run_identity
+    terminal_frame = (
+        spec.terminal_frame
+        if spec.terminal_frame is not None
+        else TERMINAL_FRAME_PREFIX + _frame_field(receipt_challenge) + _frame_field(receipt_run_identity)
+    )
+    _write(os.path.join(root_dir, "inner-receipt", TERMINAL_FRAME_PATH), terminal_frame)
+    terminal_row = {
+        "path": TERMINAL_FRAME_PATH,
+        "content_kind": "bytes",
+        "size_bytes": len(terminal_frame),
+        "sha256": _sha(terminal_frame),
+    }
+    true_receipt.append(terminal_row)
+    receipt_inventory.append(terminal_row)
     inner_object = {
         "schema": SCHEMA_INNER_RECEIPT,
         "node_kind": KIND_INNER_RECEIPT,
@@ -307,7 +359,6 @@ def build_bundle(root_dir: str, expectations_path: str, spec: BundleSpec) -> dic
         "signed_image_binding_address": receipt_image_binding,
         "target_profile_id": spec.target_profile_id,
         "control_plan_address": receipt_control_plan,
-        "terminal_intent": spec.terminal_intent,
         "inventory": true_receipt,
     }
     inner_receipt_digest = domain_address(DOMAIN_INNER_RECEIPT, inner_object)
@@ -321,7 +372,6 @@ def build_bundle(root_dir: str, expectations_path: str, spec: BundleSpec) -> dic
             "signed_image_binding_address": receipt_image_binding,
             "target_profile_id": spec.target_profile_id,
             "control_plan_address": receipt_control_plan,
-            "terminal_intent": spec.terminal_intent,
             "inventory": receipt_inventory,
         }
     )
