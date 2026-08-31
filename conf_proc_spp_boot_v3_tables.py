@@ -369,6 +369,110 @@ class ReadinessBarrierRowV3:
 
 
 @dataclass(frozen=True)
+class ResumeAnchorRowV3:
+    row_id: str
+    bank: str
+    pcr_index: int
+    appraiser_selection: str
+    reset_start: bytes
+    reset_receipt_sha256: str
+    transport_receipt_sha256: str
+    device_path: str
+    inherited_fd: int
+    open_flags: str
+    target_sku: str
+    target_kernel: str
+    target_source_image: str
+    target_vm_id: str
+    target_boot_ids: tuple[str, ...]
+    target_reset_counts: tuple[int, ...]
+    target_restart_counts: tuple[int, ...]
+    registration_uevent_sha256: str
+    transport_identity_domain: bytes
+    transport_identity_fields: tuple[tuple[str, int | bytes], ...]
+    lineage_input_rows: tuple[tuple[str, int, str], ...]
+    namespace_order: tuple[str, ...]
+    final_state: str
+    runtime_mode: str
+    post_transfer_authority_rule: str
+
+
+@dataclass(frozen=True)
+class ResumeDomainRowV3:
+    row_id: str
+    domain: bytes
+    field_order: tuple[str, ...]
+    field_widths: tuple[int, ...]
+    prior_state: str
+    digest_name: str
+    resulting_state: str
+
+
+@dataclass(frozen=True)
+class Pcr16OperationRowV3:
+    row_id: str
+    ordinal: int
+    owner: str
+    operation: str
+    prerequisite: str
+    request_prefix: bytes
+    request_digest: str | None
+    expected_state: str
+    response_prefix: bytes
+    response_dynamic_fields: tuple[str, ...]
+    response_rule: str
+    fixed_response: bytes | None
+    maximum_packet_bytes: int
+    timeout_ms: int
+    poll_events: tuple[str, ...]
+    accepted_return_codes: tuple[int, ...]
+    retry_rule: str
+
+
+@dataclass(frozen=True)
+class SupportingMemfdRowV3:
+    row_id: str
+    name: str
+    create_flags: tuple[str, ...]
+    size_bytes: int
+    seals: tuple[str, ...]
+    stage1_census_rule: str
+    stage2_read_rule: str
+    close_absence_rule: str
+    authority_rule: str
+
+
+@dataclass(frozen=True)
+class ResumeCallGraphRowV3:
+    row_id: str
+    schema: str
+    modes: tuple[str, ...]
+    root_path: str
+    root_symbol: str
+    preparatory_constructor_kind: str
+    authorization_sink_kinds: tuple[str, ...]
+    required_dominator: str
+    exact_preparatory_constructors: int
+    exact_helper_call_edges: int
+    forbid_preparatory_authority_bypass: bool
+    unknown_indirect_call_policy: str
+    canonical_bytes: bytes
+    canonical_sha256: str
+
+
+@dataclass(frozen=True)
+class ResumeClosureOracleRowV3:
+    row_id: str
+    oracle_mode: str
+    production_imports: tuple[str, ...]
+    owned_domains: tuple[str, ...]
+    mutation_denominator: tuple[str, ...]
+    replay_crash_denominator: tuple[str, ...]
+    closed_command_rule: str
+    coherent_delete_rule: str
+
+
+@dataclass(frozen=True)
 class LaunchRoleRowV3:
     role: str
     source_path: str
@@ -729,6 +833,193 @@ READINESS_BARRIER_ROWS_V3: Final = (
 
 LAUNCH_DELETE_WITNESS_ROWS_V3: Final = (
     "independent_coherent_delete",
+)
+
+
+_RESUME_LINEAGE_INPUT_ROWS_V3: Final = (
+    ("sealed_handoff_frame", 1048, "sealed_offset_zero_sole_reference_readback"),
+    ("handoff_nonce.raw", 32, "generated_once_equals_sealed_frame_nonce"),
+    ("issued_binding_digest", 32, "fresh_exact_binding_equals_sealed_frame_field"),
+    ("boot_contract_measurement", 32, "fresh_exact_binding_equals_sealed_frame_field"),
+    ("predicted_pcr15", 32, "binding_equals_stage1_and_stage2_exact_reads"),
+    ("root_lock_sha256", 32, "root_lock_bytes"),
+    ("runtime_closure_sha256", 32, "runtime_closure_bytes"),
+    ("verity_rules_sha256", 32, "verity_rules_bytes"),
+    ("tcb_identity_sha256", 32, "tcb_identity_bytes"),
+    ("builder_source_sha256", 32, "builder_source_bytes"),
+    ("policy_sha256", 32, "policy_bytes"),
+    ("accepted_manifest_sha256", 32, "accepted_manifest_bytes"),
+    ("kernel_feature_contract_sha256", 32, "kernel_feature_contract_bytes"),
+    ("trusted_certificate_bundle_sha256", 32, "trusted_certificate_bundle_bytes"),
+    ("boot_contract_sha256", 32, "boot_contract_bytes"),
+    ("module_plan_sha256", 32, "module_plan_bytes"),
+    ("gpt_layout_rules_sha256", 32, "gpt_layout_rules_bytes"),
+    ("literal_observation_shape_digest", 32, "independently_derived_observation_shape"),
+    ("mount_namespace_inode", 8, "u64_be"),
+    ("user_namespace_inode", 8, "u64_be"),
+    ("pid_namespace_inode", 8, "u64_be"),
+    ("network_namespace_inode", 8, "u64_be"),
+    ("tpmrm_transport_identity", 32, "independent_canonical_transport_formula"),
+)
+
+
+RESUME_ANCHOR_ROWS_V3: Final = (
+    ResumeAnchorRowV3(
+        "tpm_pcr16_stage2_once",
+        "sha256",
+        16,
+        "sha256:0,2,4,7,8,9,11,12,13,14,15,16,22,23_requires_S2",
+        bytes.fromhex("00" * 32),
+        "2ebf2a8e0625ed5866aee4394238f4819270a3b7401028b0d170b5261dd1b8c1",
+        "e1fe6f2206c8e945faddeacf9d6089bb3a89515195415ecdaa2cc53f10772b1d",
+        "/dev/tpmrm0",
+        5,
+        "O_RDWR|O_CLOEXEC_stage1_then_same_open_file_description_fd_cloexec_restored_stage2",
+        "Standard_NCC40ads_H100_v5",
+        "6.8.0-1058-azure-fde",
+        "/CommunityGalleries/cgpuimage-db870bae-5bcf-4120-9415-b841adef61d3/Images/cgpu-NCC-2204-base-image/Versions/2204.20260615.0",
+        "/subscriptions/e7ee841a-cbce-4e6d-a8d4-54adcdeea6ee/resourceGroups/spp-phase1-proof-20260829-xvlld4xh-r2/providers/Microsoft.Compute/virtualMachines/sppp1src01",
+        (
+            "9d834bda-00cb-4658-83ad-37ca9b7e1818",
+            "b0af86a9-0970-452a-b692-a9550ad80da8",
+            "519e03b7-b374-4973-9c52-020ba58d9011",
+        ),
+        (4, 5, 6),
+        (0, 0, 0),
+        "f6f8fedb71c385acfc7fb4b45c6f861f63194c053497d9b651cee98a211c4a92",
+        b"sol-pbc/spp/tpmrm-transport-v3\0",
+        (
+            ("st_dev_major_u32be", 0),
+            ("st_dev_minor_u32be", 5),
+            ("st_ino_u64be", 125),
+            ("st_rdev_major_u32be", 253),
+            ("st_rdev_minor_u32be", 65536),
+            ("F_GETFL_without_O_CLOEXEC_u32be", 32770),
+            ("F_GETFD_u32be", 1),
+            ("fdinfo_mnt_id_u64be", 26),
+            ("fdinfo_ino_u64be", 125),
+            ("registration_identity_sha256_raw", bytes.fromhex("546542a11e9f1274de677dbe06facecc78fccaec1e5783e03c767d00d7321526")),
+        ),
+        _RESUME_LINEAGE_INPUT_ROWS_V3,
+        ("mount_namespace_inode", "user_namespace_inode", "pid_namespace_inode", "network_namespace_inode"),
+        "stage2_consumed_S2_only",
+        "declared_unissuable_until_B_and_physical_production_enforced_gates",
+        "after_stage2_PCR15_read_and_one_transfer_broker_allows_quote_and_PCR_read_only_no_extend_reset_or_passthrough",
+    ),
+)
+
+
+RESUME_DOMAIN_ROWS_V3: Final = (
+    ResumeDomainRowV3(
+        "stage1_staged",
+        b"sol-pbc/spp/resume-anchor-v3/staged\0",
+        ("domain", "version_exact_3", "frame_length_exact_1048", "frame_sha256", "lineage", "nonce_commitment"),
+        (36, 2, 4, 32, 32, 32),
+        "S0",
+        "D1",
+        "S1=SHA256(S0||D1)",
+    ),
+    ResumeDomainRowV3(
+        "stage2_consumed",
+        b"sol-pbc/spp/resume-anchor-v3/consumed\0",
+        ("domain", "version_exact_3", "S1", "D1", "frame_sha256", "lineage", "nonce_commitment"),
+        (38, 2, 32, 32, 32, 32, 32),
+        "S1_after_memfd_close_and_original_inode_absence",
+        "D2",
+        "S2=SHA256(S1||D2)",
+    ),
+)
+
+
+_PCR16_READ_REQUEST_V3: Final = bytes.fromhex(
+    "8001000000140000017e00000001000b03000001"
+)
+_PCR16_EXTEND_REQUEST_PREFIX_V3: Final = bytes.fromhex(
+    "80020000004100000182000000100000000940000009000000000000000001000b"
+)
+_PCR16_EXTEND_SUCCESS_V3: Final = bytes.fromhex(
+    "80020000001300000000000000000000010000"
+)
+_PCR16_READ_RESPONSE_PREFIX_V3: Final = bytes.fromhex(
+    "80010000003e00000000"
+)
+
+
+PCR16_OPERATION_ROWS_V3: Final = (
+    Pcr16OperationRowV3("stage1_read_start", 1, "stage1", "TPM2_PCR_Read_sha256_16", "PCR15_acknowledged_readback_boot_transport_closed_fd5_identity_exact_frame_sealed", _PCR16_READ_REQUEST_V3, None, "S0", _PCR16_READ_RESPONSE_PREFIX_V3, ("pcr_update_counter_u32be", "S0_raw_32"), "prefix_then_counter_then_00000001000b03000001000000010020_then_state_no_trailing", None, 4096, 5000, ("POLLIN",), (0,), "terminal_no_retry_after_any_write_read_timeout_or_ambiguity"),
+    Pcr16OperationRowV3("stage1_extend_staged", 2, "stage1", "TPM2_PCR_Extend_sha256_16", "stage1_read_start_S0_exact", _PCR16_EXTEND_REQUEST_PREFIX_V3, "D1", "S0", _PCR16_EXTEND_SUCCESS_V3, (), "exact_fixed_success", _PCR16_EXTEND_SUCCESS_V3, 4096, 5000, ("POLLIN",), (0,), "terminal_no_retry_after_any_write_read_timeout_or_ambiguity"),
+    Pcr16OperationRowV3("stage1_read_staged", 3, "stage1", "TPM2_PCR_Read_sha256_16", "stage1_extend_staged_success", _PCR16_READ_REQUEST_V3, None, "S1", _PCR16_READ_RESPONSE_PREFIX_V3, ("pcr_update_counter_u32be", "S1_raw_32"), "prefix_then_counter_then_00000001000b03000001000000010020_then_state_no_trailing", None, 4096, 5000, ("POLLIN",), (0,), "terminal_no_retry_after_any_write_read_timeout_or_ambiguity"),
+    Pcr16OperationRowV3("stage2_read_staged", 4, "stage2", "TPM2_PCR_Read_sha256_16", "fixed_stage2_exec_fd5_cloexec_restored_same_open_file_description", _PCR16_READ_REQUEST_V3, None, "S1", _PCR16_READ_RESPONSE_PREFIX_V3, ("pcr_update_counter_u32be", "S1_raw_32"), "prefix_then_counter_then_00000001000b03000001000000010020_then_state_no_trailing", None, 4096, 5000, ("POLLIN",), (0,), "terminal_no_retry_after_any_write_read_timeout_or_ambiguity"),
+    Pcr16OperationRowV3("stage2_extend_consumed", 5, "stage2", "TPM2_PCR_Extend_sha256_16", "fd3_exact_advancing_read_closed_original_inode_absent", _PCR16_EXTEND_REQUEST_PREFIX_V3, "D2", "S1", _PCR16_EXTEND_SUCCESS_V3, (), "exact_fixed_success", _PCR16_EXTEND_SUCCESS_V3, 4096, 5000, ("POLLIN",), (0,), "terminal_no_retry_after_any_write_read_timeout_or_ambiguity"),
+    Pcr16OperationRowV3("stage2_read_consumed", 6, "stage2", "TPM2_PCR_Read_sha256_16", "stage2_extend_consumed_success", _PCR16_READ_REQUEST_V3, None, "S2", _PCR16_READ_RESPONSE_PREFIX_V3, ("pcr_update_counter_u32be", "S2_raw_32"), "prefix_then_counter_then_00000001000b03000001000000010020_then_state_no_trailing", None, 4096, 5000, ("POLLIN",), (0,), "terminal_no_retry_after_any_write_read_timeout_or_ambiguity"),
+)
+
+
+SUPPORTING_MEMFD_ROWS_V3: Final = (
+    SupportingMemfdRowV3(
+        "sealed_handoff_fd3_evidence",
+        "spp-handoff-v3",
+        ("MFD_CLOEXEC", "MFD_ALLOW_SEALING"),
+        1048,
+        ("F_SEAL_SEAL", "F_SEAL_SHRINK", "F_SEAL_GROW", "F_SEAL_WRITE"),
+        "twice_before_D1_and_immediately_before_exec_after_complete_seal_offset_zero_exactly_one_inode_and_open_file_description_reference_no_thread_no_child",
+        "after_S1_read_metadata_before_content_exactly_one_advancing_read_fd3_1049_returns_1048_offset_1048_parse_and_bind_no_pread_copy_reset_or_second_read",
+        "close_fd3_then_complete_PID_namespace_fd_census_proves_original_inode_absent_before_D2",
+        "supporting_causal_evidence_only_never_resume_authority",
+    ),
+)
+
+
+_RESUME_DOMINANCE_CANONICAL_BYTES_V3: Final = (
+    b'{"authorization_sink_kinds":["Stage2ResumeEvidenceV3_constructor",'
+    b'"_resume_boot_transition_from_consumed_v3_call","stage2_engine_constructor"],'
+    b'"exact_helper_call_edges":1,"exact_preparatory_constructors":1,'
+    b'"forbid_preparatory_authority_bypass":true,'
+    b'"modes":["declared_unissuable","production_enforced"],'
+    b'"preparatory_constructor_kind":"resume_only_binding_constructor",'
+    b'"required_dominator":"stage2_consumed_s2_accepted",'
+    b'"root_path":"/usr/lib/spp/conf_proc_spp_init.py",'
+    b'"root_symbol":"stage2_resume_entry_v3",'
+    b'"schema":"conf-proc-spp-resume-dominance/v3",'
+    b'"unknown_indirect_call_policy":"reject"}'
+)
+
+
+RESUME_CALL_GRAPH_ROWS_V3: Final = (
+    ResumeCallGraphRowV3(
+        "production_entry_dominance",
+        "conf-proc-spp-resume-dominance/v3",
+        ("declared_unissuable", "production_enforced"),
+        "/usr/lib/spp/conf_proc_spp_init.py",
+        "stage2_resume_entry_v3",
+        "resume_only_binding_constructor",
+        (
+            "Stage2ResumeEvidenceV3_constructor",
+            "_resume_boot_transition_from_consumed_v3_call",
+            "stage2_engine_constructor",
+        ),
+        "stage2_consumed_s2_accepted",
+        1,
+        1,
+        True,
+        "reject",
+        _RESUME_DOMINANCE_CANONICAL_BYTES_V3,
+        "08c7fdd7f94dd6c333a745c32752abd6c1a3cdc5382783a33ceb3abcd625cce6",
+    ),
+)
+
+
+RESUME_CLOSURE_ORACLE_ROWS_V3: Final = (
+    ResumeClosureOracleRowV3(
+        "independent_resume_closure",
+        "handwritten_hermetic_no_physical_claim",
+        (),
+        ("handoff_nonce_v3", "boot_lineage_v3", "tpmrm_transport_v3", "resume_staged_v3", "resume_consumed_v3"),
+        ("every_input_byte", "every_length", "every_endian", "every_order", "every_state", "every_operation"),
+        ("copied_bytes", "fresh_process", "second_entry", "duplicate_memfd", "pread", "reset_offset", "crash_before_after_each_operation", "ambiguous_TPM_result"),
+        "six_ordered_PCR16_operations_plus_separate_stage2_PCR15_read_no_reset_generic_passthrough_or_caller_command_buffer",
+        "remove_one_operation_or_resume_edge_and_ordinary_test_from_temporary_source_copy_unchanged_oracle_fails",
+    ),
 )
 
 

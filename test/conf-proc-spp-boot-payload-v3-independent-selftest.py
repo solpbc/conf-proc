@@ -47,10 +47,10 @@ _PINS = (
     ("conf_proc_spp_boot_payload_inspect.py", 16879, "cd990a62d73315d93f4f9e45c58c1529beb63a12409ffcfc8c384d8caa0f32d2"),
     ("conf_proc_spp_init.py", 4604, "32b7c8f5b6772f52433adcca11051ad1e883bb59aa4f7c66116e43a379bd1dd3"),
     ("conf_proc_spp_reasons_v3.py", 3215, "4ca5821dd0edca148bffa312fd6d9208083fa5f6e22345e61c5284d3cbbcdf75"),
-    ("conf_proc_spp_boot_v3_tables.py", 63653, "44cf1b7af901d2f0a29c845e2134bfca851b007b72ba52b80fec343d85d249d0"),
+    ("conf_proc_spp_boot_v3_tables.py", 76499, "29362baa68d627b1f0453b434e22afbb0bc530916d2fd5d3614ca4451a7ea785"),
     ("conf_proc_spp_boot_v3_wire.py", 47503, "71e491df1ab92a70b1102af866ae8fc917754a8d76763e0c8606bd8b5c1d7549"),
     ("conf_proc_spp_boot_v3_resource.py", 25792, "b172f2dd4dbe70e295e4dbdd0ebe066c7e247e8d2183db22b15ac48f5afc57de"),
-    ("conf_proc_spp_boot_v3.py", 118853, "56998181a899b945ec85c6f03415b415c39d06d83fcc0e42f1e1010419ba7791"),
+    ("conf_proc_spp_boot_v3.py", 119545, "36ae26eb8c9f201f6705f16d2b8bee530b0340b4589714bc39e344d38d7a7028"),
     ("conf_proc_spp_boot_v3_semantics.py", 128500, "09572aa6d76e83ee4117ed1f10c7bc32397397014abb34d55812c8f8ebd3cd85"),
     ("conf_proc_spp_boot_dispatch_v3.py", 1141, "83a0652bff152a7e9e96e4f5daa0bde0278092d012d0b8fbf8832a39f23fa139"),
 )

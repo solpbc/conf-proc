@@ -233,7 +233,7 @@ class BootBindingIntegritySelftest(unittest.TestCase):
         independent = _independent_fingerprint(binding)
         self.assertEqual(
             independent.hex(),
-            "576d38405c9be8d159a671f71e2c99e15f071a2d8c1a057addd05f295e2f3383",
+            "e30ca498c5226923a565159536c782edeb428cbfd73d49034aae6c3dd9f20ab2",
         )
         record = boot_v3._ISSUED_BOOT_BINDINGS_V3.records[id(binding)]
         self.assertEqual(record.fingerprint, independent)
