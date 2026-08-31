@@ -843,6 +843,18 @@ static int test_just_outside_and_adjacent(void)
     fill_valid_command(&c, 1, 2);
     EXPECT_EQ(spp_diag_trace_command_encode(&c, cwire, 128, &written, &required),
               WIRE_OK);
+    for (i = 0; i < n; i++) {
+        uint8_t w[128];
+        struct spp_diag_trace_command tmp, snapshot;
+        fill_valid_command(&tmp, 1, 2);
+        k_cmd_faults[i].poison(&tmp);
+        layout_command(w, &tmp);
+        memset(&snapshot, CANARY2, sizeof snapshot);
+        consumed = (size_t)-1;
+        EXPECT_EQ(spp_diag_trace_command_decode(w, 128, &snapshot, &consumed),
+                  k_cmd_faults[i].expected);
+        EXPECT_EQ(consumed, 0);
+    }
     for (i = 0; i + 1 < n; i++) {
         uint8_t w[128];
         struct spp_diag_trace_command tmp, out;
@@ -885,6 +897,18 @@ static int test_just_outside_and_adjacent(void)
     fill_valid_ima(&r, 1);
     EXPECT_EQ(spp_diag_trace_ima_encode(&r, iwire, 256, &written, &required),
               WIRE_OK);
+    for (i = 0; i < n; i++) {
+        uint8_t w[256];
+        struct spp_diag_trace_ima tmp, snapshot;
+        fill_valid_ima(&tmp, 1);
+        k_ima_faults[i].poison(&tmp);
+        layout_ima(w, &tmp);
+        memset(&snapshot, CANARY2, sizeof snapshot);
+        consumed = (size_t)-1;
+        EXPECT_EQ(spp_diag_trace_ima_decode(w, 256, &snapshot, &consumed),
+                  k_ima_faults[i].expected);
+        EXPECT_EQ(consumed, 0);
+    }
     for (i = 0; i + 1 < n; i++) {
         uint8_t w[256];
         struct spp_diag_trace_ima tmp, out;
@@ -1171,6 +1195,16 @@ static int test_byte_flips(void)
         EXPECT_EQ(spp_diag_trace_ima_decode(iwire, 256, &iout, &consumed),
                   WIRE_RESERVED);
         iwire[22 + i] = saved;
+        fill_valid_ima(&r, 1);
+        r.reserved16 = (uint16_t)(1u << (8u * (1u - (unsigned)i)));
+        written = required = 0;
+        EXPECT_EQ(spp_diag_trace_ima_encode(&r, iwire, 256, &written, &required),
+                  WIRE_RESERVED);
+        EXPECT_EQ(written, 0);
+        EXPECT_EQ(required, 0);
+        fill_valid_ima(&r, 1);
+        EXPECT_EQ(spp_diag_trace_ima_encode(&r, iwire, 256, &written, &required),
+                  WIRE_OK);
     }
     for (i = 0; i < 4; i++) {
         saved = iwire[252 + i];
@@ -1179,6 +1213,16 @@ static int test_byte_flips(void)
         EXPECT_EQ(spp_diag_trace_ima_decode(iwire, 256, &iout, &consumed),
                   WIRE_RESERVED);
         iwire[252 + i] = saved;
+        fill_valid_ima(&r, 1);
+        r.reserved32 = (uint32_t)(1u << (8u * (3u - (unsigned)i)));
+        written = required = 0;
+        EXPECT_EQ(spp_diag_trace_ima_encode(&r, iwire, 256, &written, &required),
+                  WIRE_RESERVED);
+        EXPECT_EQ(written, 0);
+        EXPECT_EQ(required, 0);
+        fill_valid_ima(&r, 1);
+        EXPECT_EQ(spp_diag_trace_ima_encode(&r, iwire, 256, &written, &required),
+                  WIRE_OK);
     }
 
     for (kind = 1; kind <= 3; kind++) {
@@ -1198,8 +1242,10 @@ static int test_byte_flips(void)
 static int test_precedence(void)
 {
     struct spp_diag_trace_header h, hout;
-    struct spp_diag_trace_ima r;
-    uint8_t wire[192], out[192], pre[224];
+    struct spp_diag_trace_command c, couts;
+    struct spp_diag_trace_ima r, iouts;
+    uint8_t wire[192], out[256], pre[224];
+    uint8_t cwire[129], iwire[257];
     size_t written, required, consumed;
     uint8_t bad_ev[8];
 
@@ -1232,11 +1278,54 @@ static int test_precedence(void)
     EXPECT_EQ(written, 0);
     EXPECT_EQ(required, 0);
 
+    fill_valid_command(&c, 1, 2);
+    c.magic[0] ^= 1u;
+    layout_command(cwire, &c);
+    cwire[128] = CANARY;
+    memset(&couts, CANARY2, sizeof couts);
+    consumed = (size_t)-1;
+    EXPECT_EQ(spp_diag_trace_command_decode(cwire, 0, &couts, &consumed),
+              WIRE_LENGTH);
+    EXPECT_EQ(consumed, 0);
+    EXPECT_EQ(spp_diag_trace_command_decode(cwire, 129, &couts, &consumed),
+              WIRE_LENGTH);
+    EXPECT_EQ(consumed, 0);
+    EXPECT_EQ(spp_diag_trace_command_decode(cwire, 128, &couts, &consumed),
+              WIRE_MAGIC);
+    memset(out, CANARY, sizeof out);
+    written = required = 1;
+    EXPECT_EQ(spp_diag_trace_command_encode(&c, out, 0, &written, &required),
+              WIRE_MAGIC);
+    EXPECT_EQ(written, 0);
+    EXPECT_EQ(required, 0);
+    EXPECT_EQ(out[0], CANARY);
+
     fill_valid_ima(&r, 1);
     r.magic[0] ^= 1u;
+    layout_ima(iwire, &r);
+    iwire[256] = CANARY;
+    memset(&iouts, CANARY2, sizeof iouts);
+    consumed = (size_t)-1;
+    EXPECT_EQ(spp_diag_trace_ima_decode(iwire, 0, &iouts, &consumed),
+              WIRE_LENGTH);
+    EXPECT_EQ(consumed, 0);
+    EXPECT_EQ(spp_diag_trace_ima_decode(iwire, 257, &iouts, &consumed),
+              WIRE_LENGTH);
+    EXPECT_EQ(consumed, 0);
+    EXPECT_EQ(spp_diag_trace_ima_decode(iwire, 256, &iouts, &consumed),
+              WIRE_MAGIC);
+    memset(out, CANARY, sizeof out);
+    written = required = 1;
+    EXPECT_EQ(spp_diag_trace_ima_encode(&r, out, 0, &written, &required),
+              WIRE_MAGIC);
+    EXPECT_EQ(written, 0);
+    EXPECT_EQ(required, 0);
+    EXPECT_EQ(out[0], CANARY);
+
     memset(bad_ev, 'z', sizeof bad_ev);
     EXPECT_EQ(spp_diag_trace_ima_validate(&r, bad_ev, sizeof bad_ev),
               WIRE_MAGIC);
+    EXPECT_EQ(spp_diag_trace_ima_validate(&r, k_ev_ready, 5), WIRE_MAGIC);
     fill_valid_ima(&r, 1);
     r.state = 2;
     EXPECT_EQ(spp_diag_trace_ima_validate(&r, k_ev_release, 23), WIRE_STATE);
