@@ -264,6 +264,39 @@ def provenance_payload(path: bytes, access: int, modifiers: int, dirfd_bits: int
     )
 
 
+def file_policy_payload(
+    access: int,
+    modifiers: int,
+    decision: int,
+    object_kind: int,
+    raw_result: int,
+    filesystem_magic: int,
+    device_major: int,
+    device_minor: int,
+    inode: int,
+    mount_identity: int,
+    observed_size: int,
+) -> bytes:
+    raw = b"".join(
+        (
+            be(access, 2),
+            be(modifiers, 2),
+            be(decision, 2),
+            be(object_kind, 2),
+            be(raw_result, 4),
+            be(filesystem_magic, 4),
+            be(device_major, 4),
+            be(device_minor, 4),
+            be(inode, 8),
+            be(mount_identity, 8),
+            be(observed_size, 8),
+        )
+    )
+    if len(raw) != 48:
+        raise AssertionError(f"file-policy payload is {len(raw)} bytes")
+    return raw
+
+
 def expect_provenance_encode(
     harness: Path, encoded: bytes, result: int = 0, capacity: int | None = None
 ) -> None:
@@ -938,10 +971,306 @@ def main() -> int:
         expect_provenance_encode(harness, encoded, WIRE_EVENT)
         expect_provenance_preimage(harness, encoded, zero, WIRE_EVENT)
 
+    policy_dense_literal = bytes.fromhex(
+        "0101000000000030"
+        "0fedcba987654321"
+        "0102030405060708"
+        "0000000000000000"
+        "8877665544332211"
+        "00060000"
+        "0004003500020003"
+        "fffffffb10203040"
+        "5060708090a0b0c0"
+        "1122334455667788"
+        "99aabbccddeeff00"
+        "0123456789abcdef"
+    )
+    if policy_dense_literal != frame(
+        0x0101,
+        0,
+        0x0FEDCBA987654321,
+        0x0102030405060708,
+        0,
+        0x8877665544332211,
+        6,
+        file_policy_payload(
+            4,
+            0x0035,
+            2,
+            3,
+            0xFFFFFFFB,
+            0x10203040,
+            0x50607080,
+            0x90A0B0C0,
+            0x1122334455667788,
+            0x99AABBCCDDEEFF00,
+            0x0123456789ABCDEF,
+        ),
+    ):
+        raise AssertionError("dense file-policy literal disagrees with prose builder")
+
+    policy_allow_regular = frame(
+        0x0101,
+        0,
+        0,
+        1,
+        0,
+        1,
+        1,
+        file_policy_payload(1, 0, 1, 1, 0, 0, 0, 0, 1, 1, 0),
+    )
+    policy_allow_directory = frame(
+        0x0101,
+        0,
+        maximum64,
+        maximum64,
+        0,
+        maximum64,
+        14,
+        file_policy_payload(
+            2,
+            0x003F,
+            1,
+            2,
+            0,
+            maximum32,
+            maximum32,
+            maximum32,
+            maximum64,
+            maximum64,
+            maximum64,
+        ),
+    )
+    policy_deny_other = frame(
+        0x0101,
+        0,
+        7,
+        11,
+        0,
+        13,
+        9,
+        file_policy_payload(
+            3,
+            1,
+            2,
+            4,
+            0x80000001,
+            0xA1B2C3D4,
+            0x01020304,
+            0xF0E0D0C0,
+            0x1020304050607080,
+            0xFFEEDDCCBBAA9988,
+            0x8877665544332211,
+        ),
+    )
+    policy_vectors = (
+        policy_allow_regular,
+        policy_allow_directory,
+        policy_dense_literal,
+        policy_deny_other,
+    )
+    policy_preimages: list[bytes] = []
+    for encoded in policy_vectors:
+        expect_provenance_encode(harness, encoded)
+        expect_provenance_decode(harness, encoded)
+        for previous in (zero, chain_b):
+            policy_preimages.append(
+                expect_provenance_preimage(harness, encoded, previous)
+            )
+
+    for raw_result in (0x80000000, 0x80000001, 0xFFFFFFFB, 0xFFFFFFFF):
+        encoded = replace(policy_dense_literal, 52, be(raw_result, 4))
+        expect_provenance_encode(harness, encoded)
+        expect_provenance_decode(harness, encoded)
+        expect_provenance_preimage(harness, encoded, chain_b)
+
+    for phase in (1, 7, 14):
+        encoded = replace(policy_dense_literal, 40, be(phase, 2))
+        expect_provenance_encode(harness, encoded)
+        expect_provenance_decode(harness, encoded)
+        expect_provenance_preimage(harness, encoded, zero)
+
+    expect_provenance_encode(
+        harness, policy_dense_literal, result=2, capacity=91
+    )
+    expect_provenance_preimage(
+        harness, policy_dense_literal, chain_b, result=2, capacity=154
+    )
+
+    policy_invalid_structs: list[tuple[bytes, int]] = [
+        (replace(policy_dense_literal, 0, be(0x0102, 2)), WIRE_EVENT),
+        (replace(policy_dense_literal, 2, be(1, 2)), WIRE_FLAGS),
+        (replace(policy_dense_literal, 4, be(1045, 4)), WIRE_CAP),
+        (replace(policy_dense_literal, 4, be(47, 4)), WIRE_LENGTH),
+        (replace(policy_dense_literal, 16, bytes(8)), WIRE_VALUE),
+        (replace(policy_dense_literal, 24, be(1, 8)), WIRE_VALUE),
+        (replace(policy_dense_literal, 32, bytes(8)), WIRE_VALUE),
+        (replace(policy_dense_literal, 40, bytes(2)), WIRE_STATE),
+        (replace(policy_dense_literal, 42, be(1, 2)), WIRE_RESERVED),
+        (replace(policy_dense_literal, 44, bytes(2)), WIRE_STATE),
+        (replace(policy_dense_literal, 46, be(0x0040, 2)), WIRE_FLAGS),
+        (replace(policy_dense_literal, 48, bytes(2)), WIRE_STATE),
+        (replace(policy_dense_literal, 50, bytes(2)), WIRE_STATE),
+        (replace(policy_dense_literal, 52, bytes(4)), WIRE_VALUE),
+        (replace(policy_dense_literal, 68, bytes(8)), WIRE_VALUE),
+        (replace(policy_dense_literal, 76, bytes(8)), WIRE_VALUE),
+    ]
+    for encoded, result in policy_invalid_structs:
+        expect_provenance_decode(harness, encoded, result)
+        for capacity in (0, 91):
+            expect_provenance_encode(harness, encoded, result, capacity)
+        for capacity in (0, 154):
+            expect_provenance_preimage(harness, encoded, zero, result, capacity)
+
+    for short_len in range(44):
+        expect_provenance_decode(harness, policy_dense_literal[:short_len], WIRE_LENGTH)
+    for short_len in range(44, 92):
+        expect_provenance_decode(harness, policy_dense_literal[:short_len], WIRE_LENGTH)
+    expect_provenance_decode(harness, policy_dense_literal + b"\x00", WIRE_LENGTH)
+
+    policy_envelope_negatives: list[tuple[bytes, int]] = []
+    for payload_len in (0, 47, 49, 1044):
+        policy_envelope_negatives.append(
+            (replace(policy_dense_literal, 4, be(payload_len, 4)), WIRE_LENGTH)
+        )
+    for payload_len in (1045, maximum32):
+        policy_envelope_negatives.append(
+            (replace(policy_dense_literal, 4, be(payload_len, 4)), WIRE_CAP)
+        )
+    for encoded, result in policy_envelope_negatives:
+        expect_provenance_decode(harness, encoded, result)
+        expect_provenance_encode(harness, encoded, result)
+        expect_provenance_preimage(harness, encoded, zero, result)
+
+    policy_adjacent_negatives: tuple[tuple[bytes, int, int], ...] = (
+        (
+            replace(replace(policy_dense_literal, 0, be(0x0102, 2)), 2, be(1, 2)),
+            WIRE_EVENT,
+            WIRE_EVENT,
+        ),
+        (
+            replace(replace(policy_dense_literal, 2, be(1, 2)), 4, be(47, 4)),
+            WIRE_FLAGS,
+            WIRE_FLAGS,
+        ),
+        (
+            replace(policy_dense_literal, 4, be(47, 4)) + b"\x00",
+            WIRE_LENGTH,
+            WIRE_LENGTH,
+        ),
+        (
+            replace(policy_dense_literal, 16, bytes(8)) + b"\x00",
+            WIRE_LENGTH,
+            WIRE_VALUE,
+        ),
+        (
+            replace(replace(policy_dense_literal, 16, bytes(8)), 24, be(1, 8)),
+            WIRE_VALUE,
+            WIRE_VALUE,
+        ),
+        (
+            replace(replace(policy_dense_literal, 24, be(1, 8)), 32, bytes(8)),
+            WIRE_VALUE,
+            WIRE_VALUE,
+        ),
+        (
+            replace(replace(policy_dense_literal, 32, bytes(8)), 40, bytes(2)),
+            WIRE_VALUE,
+            WIRE_VALUE,
+        ),
+        (
+            replace(replace(policy_dense_literal, 40, bytes(2)), 42, be(1, 2)),
+            WIRE_STATE,
+            WIRE_STATE,
+        ),
+        (
+            replace(replace(policy_dense_literal, 42, be(1, 2)), 44, bytes(2)),
+            WIRE_RESERVED,
+            WIRE_RESERVED,
+        ),
+        (
+            replace(replace(policy_dense_literal, 44, bytes(2)), 46, be(0x40, 2)),
+            WIRE_STATE,
+            WIRE_STATE,
+        ),
+        (
+            replace(replace(policy_dense_literal, 46, be(0x40, 2)), 48, bytes(2)),
+            WIRE_FLAGS,
+            WIRE_FLAGS,
+        ),
+        (
+            replace(replace(policy_dense_literal, 48, bytes(2)), 50, bytes(2)),
+            WIRE_STATE,
+            WIRE_STATE,
+        ),
+        (
+            replace(replace(policy_dense_literal, 50, bytes(2)), 52, bytes(4)),
+            WIRE_STATE,
+            WIRE_STATE,
+        ),
+        (
+            replace(replace(policy_dense_literal, 52, bytes(4)), 68, bytes(8)),
+            WIRE_VALUE,
+            WIRE_VALUE,
+        ),
+        (
+            replace(replace(policy_dense_literal, 68, bytes(8)), 76, bytes(8)),
+            WIRE_VALUE,
+            WIRE_VALUE,
+        ),
+    )
+    for encoded, decode_result, struct_result in policy_adjacent_negatives:
+        expect_provenance_decode(harness, encoded, decode_result)
+        expect_provenance_encode(harness, encoded, struct_result)
+        expect_provenance_preimage(harness, encoded, zero, struct_result)
+
+    policy_boundary_negatives: list[tuple[bytes, int]] = []
+    for phase in (0, 15, 16, 0xFFFF):
+        policy_boundary_negatives.append(
+            (replace(policy_dense_literal, 40, be(phase, 2)), WIRE_STATE)
+        )
+    for access in (0, 5, 0xFFFF):
+        policy_boundary_negatives.append(
+            (replace(policy_dense_literal, 44, be(access, 2)), WIRE_STATE)
+        )
+    for modifiers in (0x0040, 0x8000, 0xFFFF):
+        policy_boundary_negatives.append(
+            (replace(policy_dense_literal, 46, be(modifiers, 2)), WIRE_FLAGS)
+        )
+    for decision in (0, 3, 0xFFFF):
+        policy_boundary_negatives.append(
+            (replace(policy_dense_literal, 48, be(decision, 2)), WIRE_STATE)
+        )
+    for object_kind in (0, 5, 0xFFFF):
+        policy_boundary_negatives.append(
+            (replace(policy_dense_literal, 50, be(object_kind, 2)), WIRE_STATE)
+        )
+    allow_dense = replace(policy_dense_literal, 48, be(1, 2))
+    for raw_result in (0x7FFFFFFF, 0x80000000, 0x80000001, 0xFFFFFFFB, 0xFFFFFFFF):
+        policy_boundary_negatives.append(
+            (replace(allow_dense, 52, be(raw_result, 4)), WIRE_VALUE)
+        )
+    for raw_result in (0, 0x7FFFFFFF):
+        policy_boundary_negatives.append(
+            (replace(policy_dense_literal, 52, be(raw_result, 4)), WIRE_VALUE)
+        )
+    for encoded, result in policy_boundary_negatives:
+        expect_provenance_decode(harness, encoded, result)
+        expect_provenance_encode(harness, encoded, result)
+        expect_provenance_preimage(harness, encoded, zero, result)
+
+    for event in (0x0000, 0x0001, 0x00FF, 0x0102, 0x01FF, 0x0200, 0xFFFF):
+        encoded = replace(policy_dense_literal, 0, be(event, 2))
+        expect_provenance_decode(harness, encoded, WIRE_EVENT)
+        expect_provenance_encode(harness, encoded, WIRE_EVENT)
+        expect_provenance_preimage(harness, encoded, zero, WIRE_EVENT)
+
     provenance_digest = hashlib.sha256(b"".join(provenance_vectors)).hexdigest()
     provenance_preimage_digest = hashlib.sha256(
         b"".join(provenance_preimages)
     ).hexdigest()
+    policy_digest = hashlib.sha256(b"".join(policy_vectors)).hexdigest()
+    policy_preimage_digest = hashlib.sha256(b"".join(policy_preimages)).hexdigest()
 
     print(
         "ok   independent fixed-object/frame oracle "
@@ -953,7 +1282,11 @@ def main() -> int:
         f"provenance_vectors={len(provenance_vectors)} "
         f"provenance_vector_set_sha256={provenance_digest} "
         f"provenance_preimage_set_sha256={provenance_preimage_digest} "
-        f"provenance_negatives={44 + len(envelope_negatives) + len(adjacent_negatives) + len(boundary_negatives) + 6}"
+        f"provenance_negatives={44 + len(envelope_negatives) + len(adjacent_negatives) + len(boundary_negatives) + 6} "
+        f"policy_vectors={len(policy_vectors)} "
+        f"policy_vector_set_sha256={policy_digest} "
+        f"policy_preimage_set_sha256={policy_preimage_digest} "
+        f"policy_negatives={93 + len(policy_invalid_structs) + len(policy_envelope_negatives) + len(policy_adjacent_negatives) + len(policy_boundary_negatives) + 7}"
     )
     return 0
 
