@@ -696,7 +696,11 @@ static int test_compatibility(void)
 
     for (v = 0; v <= 0xffffu; v++) {
         if (v == SPP_DIAG_TRACE_PROVENANCE_EVENT_FILE_OPEN_ATTEMPT ||
-            v == SPP_DIAG_TRACE_PROVENANCE_EVENT_FILE_POLICY_DECISION) {
+            v == SPP_DIAG_TRACE_PROVENANCE_EVENT_FILE_POLICY_DECISION
+#ifdef SPP_DIAG_TRACE_PROVENANCE_EVENT_EXEC_MAPPING_POLICY_DECISION
+            || v == SPP_DIAG_TRACE_PROVENANCE_EVENT_EXEC_MAPPING_POLICY_DECISION
+#endif
+        ) {
             continue;
         }
         fill_valid(&f);
