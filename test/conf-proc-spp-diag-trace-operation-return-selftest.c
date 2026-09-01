@@ -93,6 +93,7 @@ static void test_asan_unpoison(void *ptr, size_t len)
 
 _Static_assert(SPP_DIAG_TRACE_OPERATION_RETURN_PAYLOAD_SIZE == 16,
                "payload size");
+_Static_assert(SPP_DIAG_TRACE_OPERATION_EXEC == 6, "exec operation kind");
 _Static_assert(SPP_DIAG_TRACE_FRAME_HEADER_SIZE +
                    SPP_DIAG_TRACE_OPERATION_RETURN_PAYLOAD_SIZE == 60,
                "frame size");
