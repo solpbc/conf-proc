@@ -135,6 +135,13 @@ static const uint8_t k_literal_e[60] = {
     0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
+static const uint8_t k_literal_f[60] = {
+    0x01, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+
 static const uint8_t k_preimage_zero_a[123] = {
     0x73, 0x6f, 0x6c, 0x2d, 0x73, 0x70, 0x70, 0x2d, 0x64, 0x69, 0x61, 0x67,
     0x2d, 0x74, 0x72, 0x61, 0x63, 0x65, 0x2d, 0x66, 0x72, 0x61, 0x6d, 0x65,
@@ -265,6 +272,32 @@ static const uint8_t k_preimage_nz_e[123] = {
     0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00};
 
+static const uint8_t k_preimage_zero_f[123] = {
+    0x73, 0x6f, 0x6c, 0x2d, 0x73, 0x70, 0x70, 0x2d, 0x64, 0x69, 0x61, 0x67,
+    0x2d, 0x74, 0x72, 0x61, 0x63, 0x65, 0x2d, 0x66, 0x72, 0x61, 0x6d, 0x65,
+    0x2f, 0x76, 0x31, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x3c, 0x01, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff};
+
+static const uint8_t k_preimage_nz_f[123] = {
+    0x73, 0x6f, 0x6c, 0x2d, 0x73, 0x70, 0x70, 0x2d, 0x64, 0x69, 0x61, 0x67,
+    0x2d, 0x74, 0x72, 0x61, 0x63, 0x65, 0x2d, 0x66, 0x72, 0x61, 0x6d, 0x65,
+    0x2f, 0x76, 0x31, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09,
+    0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15,
+    0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x00,
+    0x00, 0x00, 0x3c, 0x01, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff};
+
 struct frame_box {
     uint8_t pre[8];
     struct spp_diag_trace_frame f;
@@ -385,6 +418,13 @@ static void fill_distinct_e(struct spp_diag_trace_frame *f)
     fill_valid(f);
     store16(f->payload + 0, SPP_DIAG_TRACE_OPERATION_SENDMSG);
     store64(f->payload + 8, UINT64_C(0x8000000000000000));
+}
+
+static void fill_distinct_f(struct spp_diag_trace_frame *f)
+{
+    fill_valid(f);
+    store16(f->payload + 0, SPP_DIAG_TRACE_OPERATION_EXEC);
+    store64(f->payload + 8, UINT64_MAX);
 }
 
 static void fill_open_min(struct spp_diag_trace_frame *f)
@@ -865,6 +905,7 @@ static int test_compatibility(void)
     EXPECT_EQ(SPP_DIAG_TRACE_OPERATION_MPROTECT, 3);
     EXPECT_EQ(SPP_DIAG_TRACE_OPERATION_CONNECT, 4);
     EXPECT_EQ(SPP_DIAG_TRACE_OPERATION_SENDMSG, 5);
+    EXPECT_EQ(SPP_DIAG_TRACE_OPERATION_EXEC, 6);
     EXPECT_EQ(SPP_DIAG_TRACE_OPERATION_RETURN_PAYLOAD_SIZE, 16);
 
     fill_valid(&f);
@@ -1040,6 +1081,11 @@ static int test_literals(void)
     EXPECT_MEM_EQ(k_preimage_nz_d + 63, k_literal_d, 60);
     EXPECT_MEM_EQ(k_preimage_zero_e + 63, k_literal_e, 60);
     EXPECT_MEM_EQ(k_preimage_nz_e + 63, k_literal_e, 60);
+    EXPECT_EQ(sizeof k_literal_f, (size_t)60);
+    EXPECT_EQ(sizeof k_preimage_zero_f, (size_t)123);
+    EXPECT_EQ(sizeof k_preimage_nz_f, (size_t)123);
+    EXPECT_MEM_EQ(k_preimage_zero_f + 63, k_literal_f, 60);
+    EXPECT_MEM_EQ(k_preimage_nz_f + 63, k_literal_f, 60);
 
     CALL(roundtrip_literal(fill_distinct_a, k_literal_a, k_preimage_zero_a,
                            k_preimage_nz_a));
@@ -1051,6 +1097,8 @@ static int test_literals(void)
                            k_preimage_nz_d));
     CALL(roundtrip_literal(fill_distinct_e, k_literal_e, k_preimage_zero_e,
                            k_preimage_nz_e));
+    CALL(roundtrip_literal(fill_distinct_f, k_literal_f, k_preimage_zero_f,
+                           k_preimage_nz_f));
 
     fill_distinct_a(&f);
     CALL(expect_bytes_swap(&f, 0, 2, 2, WIRE_STATE));
@@ -1108,7 +1156,7 @@ static int test_matrix(void)
         UINT64_C(0x8000000000000000),
         UINT64_MAX};
 
-    for (kind = 1; kind <= 5; kind++) {
+    for (kind = 1; kind <= 6; kind++) {
         for (ri = 0; ri < sizeof raws / sizeof raws[0]; ri++) {
             fill_valid(&f);
             store16(f.payload + 0, (uint16_t)kind);
@@ -1121,14 +1169,14 @@ static int test_matrix(void)
         fill_valid(&f);
         store16(f.payload + 0, (uint16_t)v);
         if (v >= SPP_DIAG_TRACE_OPERATION_FILE_OPEN &&
-            v <= SPP_DIAG_TRACE_OPERATION_SENDMSG) {
+            v <= SPP_DIAG_TRACE_OPERATION_EXEC) {
             CALL(expect_ok_both_paths(&f));
         } else {
             CALL(cheap_fail_struct(&f, WIRE_STATE));
         }
     }
 
-    for (kind = 1; kind <= 5; kind++) {
+    for (kind = 1; kind <= 6; kind++) {
         fill_valid(&f);
         store16(f.payload + 0, (uint16_t)kind);
         store64(f.payload + 8, 0);
@@ -1294,6 +1342,12 @@ static int test_bounds(void)
     CALL(api_fail_struct(&f, WIRE_RESERVED, NULL, 0));
 
     fill_valid(&f);
+    store16(f.payload + 0, 7);
+    store16(f.payload + 2, 1);
+    store32(f.payload + 4, 1);
+    CALL(api_fail_struct(&f, WIRE_STATE, NULL, 0));
+
+    fill_valid(&f);
     CALL(fail_onehot16(&f, 2, WIRE_RESERVED));
     fill_valid(&f);
     CALL(fail_onehot32(&f, 4, WIRE_RESERVED));
@@ -1430,6 +1484,80 @@ static int test_bounds(void)
     return 0;
 }
 
+static int test_policy_separation(void)
+{
+    struct spp_diag_trace_frame f;
+    struct spp_diag_trace_header h;
+    struct spp_diag_trace_stream_summary sum;
+    uint8_t header_wire[192];
+    uint8_t frame_wire[60];
+    uint8_t stream[4 + 192 + 4 + 60];
+    size_t written, required, consumed;
+
+    memset(&h, 0, sizeof h);
+    memcpy(h.magic, "SPPTRC1", 7);
+    h.magic[7] = 0;
+    h.wire_version = SPP_DIAG_TRACE_WIRE_VERSION;
+    h.header_length = SPP_DIAG_TRACE_HEADER_SIZE;
+    h.policy_version = SPP_DIAG_TRACE_POLICY_VERSION_PROVENANCE;
+    h.hash_algorithm = SPP_DIAG_TRACE_HASH_SHA256;
+    h.max_frames = SPP_DIAG_TRACE_MAX_FRAMES;
+    h.max_stream_bytes = SPP_DIAG_TRACE_MAX_STREAM_BYTES;
+    h.max_frame_bytes = SPP_DIAG_TRACE_MAX_FRAME_BYTES;
+    memcpy(h.source_commit, SPP_DIAG_TRACE_SOURCE_COMMIT,
+           SPP_DIAG_TRACE_SOURCE_COMMIT_LEN);
+    h.required_hook_mask = SPP_DIAG_TRACE_HOOK_MASK_PROVENANCE;
+    EXPECT_EQ(spp_diag_trace_header_encode(&h, header_wire, sizeof header_wire,
+                                           &written, &required),
+              WIRE_OK);
+
+    fill_valid(&f);
+    store16(f.payload + 0, SPP_DIAG_TRACE_OPERATION_EXEC);
+    EXPECT_EQ(spp_diag_trace_provenance_frame_encode(&f, frame_wire,
+                                                     sizeof frame_wire, &written,
+                                                     &required),
+              WIRE_OK);
+
+    store32(stream, 192);
+    memcpy(stream + 4, header_wire, 192);
+    store32(stream + 196, 60);
+    memcpy(stream + 200, frame_wire, 60);
+    consumed = (size_t)-1;
+    EXPECT_EQ(spp_diag_trace_stream_validate(stream, sizeof stream, &sum,
+                                             &consumed),
+              WIRE_OK);
+
+    stream[200 + 45] = 7;
+    consumed = (size_t)-1;
+    EXPECT_EQ(spp_diag_trace_stream_validate(stream, sizeof stream, &sum,
+                                             &consumed),
+              WIRE_STATE);
+    EXPECT_EQ(consumed, 0);
+
+    h.policy_version = SPP_DIAG_TRACE_POLICY_VERSION;
+    h.required_hook_mask = SPP_DIAG_TRACE_HOOK_MASK;
+    EXPECT_EQ(spp_diag_trace_header_encode(&h, header_wire, sizeof header_wire,
+                                           &written, &required),
+              WIRE_OK);
+    memcpy(stream + 4, header_wire, 192);
+
+    stream[200 + 45] = SPP_DIAG_TRACE_OPERATION_EXEC;
+    consumed = (size_t)-1;
+    EXPECT_EQ(spp_diag_trace_stream_validate(stream, sizeof stream, &sum,
+                                             &consumed),
+              WIRE_EVENT);
+    EXPECT_EQ(consumed, 0);
+
+    stream[200 + 45] = 7;
+    consumed = (size_t)-1;
+    EXPECT_EQ(spp_diag_trace_stream_validate(stream, sizeof stream, &sum,
+                                             &consumed),
+              WIRE_EVENT);
+    EXPECT_EQ(consumed, 0);
+
+    return 0;
+}
+
 int main(void)
 {
     if (test_compatibility() != 0) {
@@ -1442,6 +1570,9 @@ int main(void)
         return 1;
     }
     if (test_bounds() != 0) {
+        return 1;
+    }
+    if (test_policy_separation() != 0) {
         return 1;
     }
     return 0;

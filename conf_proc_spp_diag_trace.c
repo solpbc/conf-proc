@@ -1807,7 +1807,7 @@ static int payload_operation_return(const uint8_t *p, uint32_t n)
     (void)n;
     kind = load_u16be(p + 0);
     if (kind < SPP_DIAG_TRACE_OPERATION_FILE_OPEN ||
-        kind > SPP_DIAG_TRACE_OPERATION_SENDMSG) {
+        kind > SPP_DIAG_TRACE_OPERATION_EXEC) {
         return WIRE_STATE;
     }
     reserved16 = load_u16be(p + 2);
