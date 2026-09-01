@@ -911,6 +911,10 @@ static int test_compatibility(void)
                    SPP_DIAG_TRACE_PROVENANCE_EVENT_EXEC_MAPPING_POLICY_DECISION) {
             fill_valid(&f);
             CALL(expect_ok_both_paths(&f));
+#ifdef SPP_DIAG_TRACE_PROVENANCE_EVENT_NETWORK_POLICY_DECISION
+        } else if (v == SPP_DIAG_TRACE_PROVENANCE_EVENT_NETWORK_POLICY_DECISION) {
+            continue;
+#endif
         } else {
             fill_valid(&f);
             f.event_type = (uint16_t)v;

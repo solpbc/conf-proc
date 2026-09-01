@@ -1224,7 +1224,7 @@ static int test_matrix(void)
     struct spp_diag_trace_frame f;
     uint8_t extra_wire[61];
     unsigned v;
-    static const uint16_t bad_events[] = {0x0001, 0x00ff, 0x0103, 0x01ff, 0x0200,
+    static const uint16_t bad_events[] = {0x0001, 0x00ff, 0x0104, 0x01ff, 0x0200,
                                           0xffff};
 
     CALL(roundtrip_one(&k_min_f, k_min_wire, 61));
