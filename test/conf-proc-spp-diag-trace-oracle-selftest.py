@@ -2558,12 +2558,36 @@ def main() -> int:
     ):
         raise AssertionError("SENDMSG operation-return literal disagrees with prose")
 
+    operation_return_exec = bytes.fromhex(
+        "0104000000000010"
+        "0102030405060708"
+        "1112131415161718"
+        "0000000000000000"
+        "2122232425262728"
+        "000c0000"
+        "00060000"
+        "00000000"
+        "fffffffffffffff3"
+    )
+    if operation_return_exec != frame(
+        0x0104,
+        0,
+        0x0102030405060708,
+        0x1112131415161718,
+        0,
+        0x2122232425262728,
+        12,
+        operation_return_payload(6, 0xFFFFFFFFFFFFFFF3),
+    ):
+        raise AssertionError("EXEC operation-return literal disagrees with prose")
+
     operation_return_vectors = (
         operation_return_file_open,
         operation_return_mmap,
         operation_return_mprotect,
         operation_return_connect,
         operation_return_sendmsg,
+        operation_return_exec,
     )
     operation_return_preimages: list[bytes] = []
     for encoded in operation_return_vectors:
@@ -2577,10 +2601,8 @@ def main() -> int:
     operation_return_negative_frames: set[bytes] = set()
 
     for operation in range(1 << 16):
-        if operation == 6:
-            continue
         encoded = replace(operation_return_file_open, 44, be(operation, 2))
-        result = 0 if 1 <= operation <= 5 else WIRE_STATE
+        result = 0 if 1 <= operation <= 6 else WIRE_STATE
         if result != 0:
             operation_return_negative_frames.add(encoded)
         expect_provenance_encode(harness, encoded, result)
@@ -2596,7 +2618,7 @@ def main() -> int:
         expect_provenance_decode(harness, encoded, result)
         expect_provenance_preimage(harness, encoded, zero, result)
 
-    for operation in range(1, 6):
+    for operation in range(1, 7):
         base = replace(operation_return_file_open, 44, be(operation, 2))
         for raw_return in (0, maximum64):
             encoded = replace(base, 52, be(raw_return, 8))
@@ -2719,6 +2741,7 @@ def main() -> int:
         (replace(operation_return_file_open, 40, bytes(2)), WIRE_STATE),
         (replace(operation_return_file_open, 42, be(1, 2)), WIRE_RESERVED),
         (replace(operation_return_file_open, 44, bytes(2)), WIRE_STATE),
+        (replace(operation_return_file_open, 44, be(7, 2)), WIRE_STATE),
         (replace(operation_return_file_open, 44, be(0xFFFF, 2)), WIRE_STATE),
         (replace(operation_return_file_open, 46, be(1, 2)), WIRE_RESERVED),
         (replace(operation_return_file_open, 48, be(1, 4)), WIRE_RESERVED),
@@ -3119,6 +3142,16 @@ def main() -> int:
                 1,
             )
         )
+    policy2_positive_streams.append(
+        (
+            "policy2-operation-return-exec",
+            wire_stream(
+                policy2_header_literal,
+                (with_sequence(operation_return_exec, 0),),
+            ),
+            1,
+        )
+    )
 
     alternating_unsequenced = (
         by_event[0],
@@ -3205,6 +3238,21 @@ def main() -> int:
             )
 
     policy2_negative_streams: list[tuple[str, bytes, int]] = []
+    policy2_negative_streams.append(
+        (
+            "policy2-operation-return-kind-7",
+            wire_stream(
+                policy2_header_literal,
+                (
+                    with_sequence(
+                        replace(operation_return_exec, 44, be(7, 2)),
+                        0,
+                    ),
+                ),
+            ),
+            WIRE_STATE,
+        )
+    )
     for encoded in policy2_provenance_by_event:
         policy2_negative_streams.append(
             (
