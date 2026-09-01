@@ -54,6 +54,17 @@ static int parse_frame_hex(const char *text, uint8_t *out, size_t *len)
     return parse_hex(text, out, *len);
 }
 
+static int parse_stream_hex(const char *text, uint8_t *out, size_t cap,
+                            size_t *len)
+{
+    size_t text_len = strlen(text);
+
+    if (text_len % 2u != 0 || text_len / 2u > cap)
+        return 0;
+    *len = text_len / 2u;
+    return parse_hex(text, out, *len);
+}
+
 static void print_hex(const uint8_t *bytes, size_t len)
 {
     static const char digits[] = "0123456789abcdef";
@@ -340,6 +351,25 @@ static int frame_preimage(const char *frame_text, const char *chain_text)
     return print_encode(result, written, required, encoded);
 }
 
+static int stream_validate(const char *text)
+{
+    struct spp_diag_trace_stream_summary summary = {
+        UINT64_C(0x1122334455667788),
+        UINT64_C(0x99aabbccddeeff00),
+    };
+    uint8_t raw[4096];
+    size_t raw_len = 0;
+    size_t consumed = 1;
+    int result;
+
+    if (!parse_stream_hex(text, raw, sizeof(raw), &raw_len))
+        return 2;
+    result = spp_diag_trace_stream_validate(raw, raw_len, &summary, &consumed);
+    printf("%d\t%zu\t%" PRIu64 "\t%" PRIu64 "\n", result, consumed,
+           summary.frame_count, summary.stream_byte_count);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 3 && strcmp(argv[1], "header-encode") == 0)
@@ -366,6 +396,8 @@ int main(int argc, char **argv)
         return frame_decode(argv[2]);
     if (argc == 4 && strcmp(argv[1], "frame-preimage") == 0)
         return frame_preimage(argv[2], argv[3]);
+    if (argc == 3 && strcmp(argv[1], "stream-validate") == 0)
+        return stream_validate(argv[2]);
     fputs("usage: trace-oracle-harness OP [HEX ...]\n", stderr);
     return 2;
 }

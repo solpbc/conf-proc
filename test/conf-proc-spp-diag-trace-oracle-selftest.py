@@ -19,6 +19,8 @@ SOURCE_COMMIT = bytes.fromhex("91a8e826012fbb1c7f5cb2a326c08b13e390f469")
 HEADER_DOMAIN = b"sol-spp-diag-trace-header/v1"
 FRAME_DOMAIN = b"sol-spp-diag-trace-frame/v1"
 IMA_LABEL = b"sol_spp_diag_trace"
+STREAM_FAILURE_COUNT = 0x1122334455667788
+STREAM_FAILURE_BYTES = 0x99AABBCCDDEEFF00
 
 
 def be(value: int, width: int) -> bytes:
@@ -173,6 +175,20 @@ def marker_payload(previous: int, following: int) -> bytes:
     return be(previous, 2) + be(following, 2) + bytes(4)
 
 
+def with_sequence(encoded: bytes, sequence: int) -> bytes:
+    if len(encoded) < 44:
+        raise AssertionError("frame too short for sequence replacement")
+    return encoded[:8] + be(sequence, 8) + encoded[16:]
+
+
+def wire_stream(encoded_header: bytes, frames: tuple[bytes, ...]) -> bytes:
+    if len(encoded_header) != 192:
+        raise AssertionError("stream header must be 192 bytes")
+    return be(192, 4) + encoded_header + b"".join(
+        be(len(encoded), 4) + encoded for encoded in frames
+    )
+
+
 def invoke(harness: Path, operation: str, *args: object) -> list[str]:
     command_line = [str(harness), operation, *(str(value) for value in args)]
     result = subprocess.run(
@@ -203,6 +219,28 @@ def expect_decode(
     wanted = ["0", str(len(encoded)), *fields]
     if actual != wanted:
         raise AssertionError(f"{operation}: expected {wanted}, got {actual}")
+
+
+def expect_stream(
+    harness: Path,
+    encoded: bytes,
+    result: int,
+    frame_count: int | None = None,
+) -> None:
+    actual = invoke(harness, "stream-validate", encoded.hex())
+    if result == 0:
+        if frame_count is None:
+            raise AssertionError("successful stream expectation needs frame count")
+        wanted = ["0", str(len(encoded)), str(frame_count), str(len(encoded))]
+    else:
+        wanted = [
+            str(result),
+            "0",
+            str(STREAM_FAILURE_COUNT),
+            str(STREAM_FAILURE_BYTES),
+        ]
+    if actual != wanted:
+        raise AssertionError(f"stream-validate: expected {wanted}, got {actual}")
 
 
 def main() -> int:
@@ -490,11 +528,128 @@ def main() -> int:
 
     digest_set = hashlib.sha256(b"".join(frame_digests)).hexdigest()
 
+    by_event = (
+        frame_vectors[0][1],
+        frame_vectors[1][1],
+        frame_vectors[3][1],
+        frame_vectors[5][1],
+        frame_vectors[7][1],
+        frame_vectors[10][1],
+        frame_vectors[12][1],
+        frame_vectors[14][1],
+        frame_vectors[16][1],
+        frame_vectors[19][1],
+    )
+    sequential = tuple(
+        with_sequence(encoded, sequence)
+        for sequence, encoded in enumerate(by_event)
+    )
+    positive_streams: list[tuple[str, bytes, int]] = [
+        ("header-only", wire_stream(dense_header, ()), 0),
+    ]
+    for event, encoded in enumerate(by_event, start=1):
+        positive_streams.append(
+            (f"one-event-{event}", wire_stream(dense_header, (with_sequence(encoded, 0),)), 1)
+        )
+    positive_streams.extend(
+        (
+            ("all-events", wire_stream(dense_header, sequential), 10),
+            (
+                "nonsensical-order",
+                wire_stream(
+                    dense_header,
+                    (with_sequence(by_event[9], 0), with_sequence(by_event[0], 1)),
+                ),
+                2,
+            ),
+            (
+                "maximum-path",
+                wire_stream(dense_header, (with_sequence(frame_vectors[2][1], 0),)),
+                1,
+            ),
+        )
+    )
+    for name, encoded, count in positive_streams:
+        expect_stream(harness, encoded, 0, count)
+        if count and int.from_bytes(encoded[208:216], "big") != 0:
+            raise AssertionError(f"{name}: first sequence is not zero")
+
+    stream_prefix = be(192, 4) + dense_header
+    negative_streams: list[tuple[str, bytes, int]] = []
+    for short_len in range(4):
+        negative_streams.append((f"short-{short_len}", bytes(short_len), 5))
+    for prefix in (0, 1, 191, 193, 65536, maximum32):
+        negative_streams.append(
+            (f"header-prefix-{prefix}", be(prefix, 4) + dense_header, 5)
+        )
+    for length in (4, 5, 64, 127, 195):
+        negative_streams.append(
+            (f"header-truncated-{length}", stream_prefix[:length], 5)
+        )
+    bad_header = bytearray(stream_prefix)
+    bad_header[4] ^= 0x01
+    negative_streams.append(("header-magic", bytes(bad_header), 3))
+    for suffix_len in (1, 2, 3):
+        negative_streams.append(
+            (f"trailing-prefix-{suffix_len}", stream_prefix + bytes(suffix_len), 5)
+        )
+    for declared, expected_result in ((0, 5), (43, 5), (44, 5), (1088, 5), (1089, 8)):
+        negative_streams.append(
+            (f"frame-prefix-{declared}", stream_prefix + be(declared, 4), expected_result)
+        )
+
+    core_zero = sequential[0]
+    core_one = with_sequence(core_zero, 1)
+    core_two = with_sequence(core_zero, 2)
+    core_max = with_sequence(core_zero, maximum64)
+    local_bad_event = bytearray(core_one)
+    local_bad_event[0:2] = be(0, 2)
+    local_bad_reserved = bytearray(core_one)
+    local_bad_reserved[42:44] = be(1, 2)
+    negative_streams.extend(
+        (
+            ("first-sequence-one", wire_stream(dense_header, (core_one,)), 13),
+            ("first-sequence-max", wire_stream(dense_header, (core_max,)), 13),
+            ("duplicate", wire_stream(dense_header, (core_zero, core_zero)), 13),
+            ("gap", wire_stream(dense_header, (core_zero, core_two)), 13),
+            (
+                "backward",
+                wire_stream(dense_header, (core_zero, core_one, core_zero)),
+                13,
+            ),
+            (
+                "local-before-sequence-event",
+                wire_stream(dense_header, (bytes(local_bad_event),)),
+                10,
+            ),
+            (
+                "local-before-sequence-reserved",
+                wire_stream(dense_header, (bytes(local_bad_reserved),)),
+                7,
+            ),
+            ("late-prefix", wire_stream(dense_header, (core_zero,)) + b"\x00", 5),
+            (
+                "late-local",
+                wire_stream(dense_header, (core_zero, bytes(local_bad_reserved))),
+                7,
+            ),
+            ("late-sequence", wire_stream(dense_header, (core_zero, core_two)), 13),
+        )
+    )
+    for _name, encoded, result in negative_streams:
+        expect_stream(harness, encoded, result)
+
+    stream_vector_digest = hashlib.sha256(
+        b"".join(be(len(encoded), 4) + encoded for _, encoded, _ in positive_streams)
+    ).hexdigest()
+
     print(
         "ok   independent fixed-object/frame oracle "
         f"header_preimage_sha256={hashlib.sha256(HEADER_DOMAIN + be(192, 4) + dense_header).hexdigest()} "
         f"frame_vectors={len(frame_vectors)} frame_preimages={len(frame_digests)} "
-        f"frame_digest_set_sha256={digest_set}"
+        f"frame_digest_set_sha256={digest_set} "
+        f"stream_vectors={len(positive_streams)} stream_negatives={len(negative_streams)} "
+        f"stream_vector_set_sha256={stream_vector_digest}"
     )
     return 0
 
