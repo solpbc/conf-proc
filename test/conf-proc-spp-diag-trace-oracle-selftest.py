@@ -21,13 +21,16 @@ FRAME_DOMAIN = b"sol-spp-diag-trace-frame/v1"
 IMA_LABEL = b"sol_spp_diag_trace"
 STREAM_FAILURE_COUNT = 0x1122334455667788
 STREAM_FAILURE_BYTES = 0x99AABBCCDDEEFF00
+WIRE_MAGIC = 3
 WIRE_LENGTH = 5
+WIRE_VERSION = 4
 WIRE_VALUE = 6
 WIRE_RESERVED = 7
 WIRE_CAP = 8
 WIRE_EVENT = 10
 WIRE_FLAGS = 11
 WIRE_STATE = 12
+WIRE_SEQUENCE = 13
 
 
 def be(value: int, width: int) -> bytes:
@@ -36,7 +39,14 @@ def be(value: int, width: int) -> bytes:
     return value.to_bytes(width, "big")
 
 
-def header(challenge: bytes, run: bytes, control: bytes, cmdline: bytes) -> bytes:
+def header(
+    challenge: bytes,
+    run: bytes,
+    control: bytes,
+    cmdline: bytes,
+    policy_version: int = 1,
+    hook_mask: int = 15,
+) -> bytes:
     for value in (challenge, run, control, cmdline):
         if len(value) != 32:
             raise AssertionError("header opaque fields must be 32 bytes")
@@ -45,7 +55,7 @@ def header(challenge: bytes, run: bytes, control: bytes, cmdline: bytes) -> byte
             b"SPPTRC1\x00",
             be(1, 2),
             be(192, 2),
-            be(1, 2),
+            be(policy_version, 2),
             be(1, 2),
             be(524288, 4),
             be(268435456, 8),
@@ -55,7 +65,7 @@ def header(challenge: bytes, run: bytes, control: bytes, cmdline: bytes) -> byte
             run,
             control,
             cmdline,
-            be(15, 8),
+            be(hook_mask, 8),
             bytes(4),
         )
     )
@@ -95,6 +105,8 @@ def ima(
     chain: bytes,
     denied: int,
     committed: int,
+    policy_version: int = 1,
+    hook_mask: int = 15,
 ) -> bytes:
     if len(chain) != 32:
         raise AssertionError("chain must be 32 bytes")
@@ -104,7 +116,7 @@ def ima(
             be(1, 2),
             be(kind, 2),
             be(256, 4),
-            be(1, 2),
+            be(policy_version, 2),
             be(1, 2),
             be(state, 2),
             bytes(2),
@@ -116,7 +128,7 @@ def ima(
             be(frame_count, 8),
             be(stream_bytes, 8),
             chain,
-            be(15, 8),
+            be(hook_mask, 8),
             be(denied, 8),
             be(committed, 8),
             bytes(4),
@@ -248,6 +260,23 @@ def expect_stream(
         ]
     if actual != wanted:
         raise AssertionError(f"stream-validate: expected {wanted}, got {actual}")
+
+
+def expect_fixed_decode_reject(
+    harness: Path, operation: str, encoded: bytes, result: int
+) -> None:
+    actual = invoke(harness, operation, encoded.hex())
+    wanted = [str(result), "0"]
+    if actual != wanted:
+        raise AssertionError(f"{operation}: expected {wanted}, got {actual}")
+
+
+def expect_header_reject(harness: Path, encoded: bytes, result: int) -> None:
+    expect_fixed_decode_reject(harness, "header-decode", encoded, result)
+
+
+def expect_ima_reject(harness: Path, encoded: bytes, result: int) -> None:
+    expect_fixed_decode_reject(harness, "ima-decode", encoded, result)
 
 
 def provenance_payload(path: bytes, access: int, modifiers: int, dirfd_bits: int) -> bytes:
@@ -499,6 +528,72 @@ def main() -> int:
         raise AssertionError("header domain/preimage length drift")
     expect_encode(harness, "header-preimage", preimage, dense_header.hex())
 
+    policy2_header_literal = bytes.fromhex(
+        "5350505452433100000100c00002000100080000"
+        "000000001000000000000440"
+        "91a8e826012fbb1c7f5cb2a326c08b13e390f469"
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+        "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f"
+        "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f"
+        "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f"
+        "000000000000ffff00000000"
+    )
+    if policy2_header_literal != header(
+        challenge, run, control, cmdline, policy_version=2, hook_mask=0xFFFF
+    ):
+        raise AssertionError("policy-2 header literal disagrees with reviewed prose")
+    expect_encode(
+        harness, "header-encode", policy2_header_literal, policy2_header_literal.hex()
+    )
+    expect_decode(
+        harness,
+        "header-decode",
+        policy2_header_literal,
+        [challenge.hex(), run.hex(), control.hex(), cmdline.hex()],
+    )
+    policy2_header_preimage = HEADER_DOMAIN + be(192, 4) + policy2_header_literal
+    expect_encode(
+        harness,
+        "header-preimage",
+        policy2_header_preimage,
+        policy2_header_literal.hex(),
+    )
+
+    for unsupported_policy in range(1 << 16):
+        if unsupported_policy in (1, 2):
+            continue
+        expect_header_reject(
+            harness,
+            replace(policy2_header_literal, 12, be(unsupported_policy, 2)),
+            WIRE_VERSION,
+        )
+    expect_header_reject(
+        harness, replace(dense_header, 180, be(0xFFFF, 8)), WIRE_VALUE
+    )
+    expect_header_reject(
+        harness, replace(policy2_header_literal, 180, be(0x000F, 8)), WIRE_VALUE
+    )
+    for bit in range(64):
+        for mask in (1 << bit, 0x000F ^ (1 << bit)):
+            expect_header_reject(
+                harness, replace(dense_header, 180, be(mask, 8)), WIRE_VALUE
+            )
+        for mask in (1 << bit, 0xFFFF ^ (1 << bit)):
+            expect_header_reject(
+                harness,
+                replace(policy2_header_literal, 180, be(mask, 8)),
+                WIRE_VALUE,
+            )
+    expect_header_reject(
+        harness,
+        replace(
+            replace(policy2_header_literal, 16, bytes(4)),
+            180,
+            be(0x000F, 8),
+        ),
+        WIRE_CAP,
+    )
+
     commands = (
         (1, 2, challenge, run, control),
         (1, 9, zero, zero, zero),
@@ -600,6 +695,175 @@ def main() -> int:
             raise AssertionError(
                 f"IMA vocabulary {kind}: expected result 0, got {vocabulary}"
             )
+
+    policy2_ima_literal = bytes.fromhex(
+        "535050494d41310000010002000001000002000100020000"
+        "91a8e826012fbb1c7f5cb2a326c08b13e390f469"
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+        "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f"
+        "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f"
+        "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f"
+        "000000000000000700000000000001f4"
+        "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
+        "000000000000ffff00000000000000030000000000000002"
+        "000000000000000000000000"
+    )
+    if policy2_ima_literal != ima(
+        2,
+        2,
+        challenge,
+        run,
+        control,
+        cmdline,
+        7,
+        500,
+        chain_a,
+        3,
+        2,
+        policy_version=2,
+        hook_mask=0xFFFF,
+    ):
+        raise AssertionError("policy-2 IMA literal disagrees with reviewed prose")
+
+    policy2_ima_vectors: list[bytes] = []
+    for (
+        kind,
+        state,
+        ima_challenge,
+        ima_run,
+        ima_control,
+        ima_cmdline,
+        frame_count,
+        stream_bytes,
+        chain,
+        denied,
+        committed,
+        event_name,
+    ) in ima_vectors:
+        encoded = ima(
+            kind,
+            state,
+            ima_challenge,
+            ima_run,
+            ima_control,
+            ima_cmdline,
+            frame_count,
+            stream_bytes,
+            chain,
+            denied,
+            committed,
+            policy_version=2,
+            hook_mask=0xFFFF,
+        )
+        policy2_ima_vectors.append(encoded)
+        args = (
+            kind,
+            state,
+            ima_challenge.hex(),
+            ima_run.hex(),
+            ima_control.hex(),
+            ima_cmdline.hex(),
+            frame_count,
+            stream_bytes,
+            chain.hex(),
+            denied,
+            committed,
+        )
+        expect_encode(harness, "ima-encode", encoded, encoded.hex())
+        expect_decode(harness, "ima-decode", encoded, [str(value) for value in args])
+        vocabulary = invoke(harness, "ima-vocabulary", encoded.hex(), event_name.hex())
+        if vocabulary != ["0"]:
+            raise AssertionError(
+                f"policy-2 IMA vocabulary {kind}: expected result 0, got {vocabulary}"
+            )
+    if policy2_ima_vectors[1] != policy2_ima_literal:
+        raise AssertionError("policy-2 release IMA literal was not exercised")
+
+    policy1_ima_ready = ima(1, 1, zero, zero, zero, zero, 1, 244, zero, 0, 0)
+    expect_ima_reject(
+        harness, replace(policy1_ima_ready, 220, be(0xFFFF, 8)), WIRE_VALUE
+    )
+    expect_ima_reject(
+        harness, replace(policy2_ima_literal, 220, be(0x000F, 8)), WIRE_VALUE
+    )
+    for unsupported_policy in range(1 << 16):
+        if unsupported_policy in (1, 2):
+            continue
+        expect_ima_reject(
+            harness,
+            replace(policy2_ima_literal, 16, be(unsupported_policy, 2)),
+            WIRE_VERSION,
+        )
+    for bit in range(64):
+        for mask in (1 << bit, 0x000F ^ (1 << bit)):
+            expect_ima_reject(
+                harness,
+                replace(policy1_ima_ready, 220, be(mask, 8)),
+                WIRE_VALUE,
+            )
+        for mask in (1 << bit, 0xFFFF ^ (1 << bit)):
+            expect_ima_reject(
+                harness,
+                replace(policy2_ima_literal, 220, be(mask, 8)),
+                WIRE_VALUE,
+            )
+    for offset, replacement_bytes, result in (
+        (20, bytes(2), WIRE_STATE),
+        (22, be(1, 2), WIRE_RESERVED),
+        (172, bytes(8), WIRE_CAP),
+    ):
+        expect_ima_reject(
+            harness,
+            replace(
+                replace(policy2_ima_literal, offset, replacement_bytes),
+                220,
+                be(0x000F, 8),
+            ),
+            result,
+        )
+
+    policy2_ima_ready = policy2_ima_vectors[0]
+    policy2_ima_late_faults = (
+        (replace(policy2_ima_ready, 0, b"R"), WIRE_MAGIC),
+        (replace(policy2_ima_ready, 8, be(2, 2)), WIRE_VERSION),
+        (replace(policy2_ima_ready, 10, bytes(2)), WIRE_EVENT),
+        (replace(policy2_ima_ready, 12, be(255, 4)), WIRE_LENGTH),
+        (replace(policy2_ima_ready, 18, be(2, 2)), WIRE_VALUE),
+        (
+            replace(
+                policy2_ima_ready,
+                24,
+                bytes((policy2_ima_ready[24] ^ 1,)),
+            ),
+            WIRE_VALUE,
+        ),
+        (replace(policy2_ima_ready, 180, be(243, 8)), WIRE_CAP),
+        (replace(policy2_ima_ready, 228, be(2, 8)), WIRE_VALUE),
+        (replace(policy2_ima_ready, 236, be(2, 8)), WIRE_VALUE),
+        (replace(policy2_ima_ready, 244, be(1, 4)), WIRE_VALUE),
+        (replace(policy2_ima_ready, 248, be(1, 4)), WIRE_VALUE),
+        (replace(policy2_ima_ready, 252, be(1, 4)), WIRE_RESERVED),
+    )
+    for encoded, result in policy2_ima_late_faults:
+        expect_ima_reject(harness, encoded, result)
+
+    policy2_ima_event_names = (
+        b"sol-spp-diag-ready-v1",
+        b"sol-spp-diag-release-v1",
+        b"sol-spp-diag-terminal-v1",
+    )
+    for index, encoded in enumerate(policy2_ima_vectors):
+        for wrong_name in (
+            policy2_ima_event_names[(index + 1) % 3],
+            policy2_ima_event_names[index][:-1],
+            policy2_ima_event_names[index] + b"x",
+        ):
+            actual = invoke(harness, "ima-vocabulary", encoded.hex(), wrong_name.hex())
+            if actual != [str(WIRE_EVENT)]:
+                raise AssertionError(
+                    f"policy-2 IMA wrong vocabulary {index}: "
+                    f"expected {WIRE_EVENT}, got {actual}"
+                )
 
     label = invoke(harness, "ima-label")
     if label != ["0", "18", IMA_LABEL.hex()]:
@@ -2822,6 +3086,241 @@ def main() -> int:
     expect_provenance_encode(harness, task_exit_zero, result=2, capacity=51)
     expect_provenance_preimage(harness, task_exit_zero, chain_b, result=2, capacity=114)
 
+    policy2_provenance_by_event = (
+        provenance_min_literal,
+        policy_allow_regular,
+        mapping_dense_literal,
+        network_ipv4_literal,
+        operation_return_file_open,
+        task_exit_zero,
+    )
+    if tuple(int.from_bytes(item[0:2], "big") for item in policy2_provenance_by_event) != tuple(
+        range(0x0100, 0x0106)
+    ):
+        raise AssertionError("policy-2 provenance fixtures do not cover 0x0100..0x0105")
+
+    policy2_positive_streams: list[tuple[str, bytes, int]] = [
+        ("policy2-header-only", wire_stream(policy2_header_literal, ()), 0)
+    ]
+    for event, encoded in enumerate(by_event, start=1):
+        policy2_positive_streams.append(
+            (
+                f"policy2-core-{event}",
+                wire_stream(policy2_header_literal, (with_sequence(encoded, 0),)),
+                1,
+            )
+        )
+    for event, encoded in enumerate(policy2_provenance_by_event, start=0x0100):
+        policy2_positive_streams.append(
+            (
+                f"policy2-provenance-{event:04x}",
+                wire_stream(policy2_header_literal, (with_sequence(encoded, 0),)),
+                1,
+            )
+        )
+
+    alternating_unsequenced = (
+        by_event[0],
+        policy2_provenance_by_event[0],
+        by_event[1],
+        policy2_provenance_by_event[1],
+        by_event[2],
+        policy2_provenance_by_event[2],
+        by_event[3],
+        policy2_provenance_by_event[3],
+        by_event[4],
+        policy2_provenance_by_event[4],
+        by_event[5],
+        policy2_provenance_by_event[5],
+        by_event[6],
+        by_event[7],
+        by_event[8],
+        by_event[9],
+    )
+    alternating = tuple(
+        with_sequence(encoded, sequence)
+        for sequence, encoded in enumerate(alternating_unsequenced)
+    )
+    policy2_positive_streams.extend(
+        (
+            (
+                "policy2-all-alternating",
+                wire_stream(policy2_header_literal, alternating),
+                16,
+            ),
+            (
+                "policy2-nonsensical-task-exit-before-init",
+                wire_stream(
+                    policy2_header_literal,
+                    (
+                        with_sequence(task_exit_zero, 0),
+                        with_sequence(by_event[0], 1),
+                    ),
+                ),
+                2,
+            ),
+            (
+                "policy2-nonsensical-terminal-before-open",
+                wire_stream(
+                    policy2_header_literal,
+                    (
+                        with_sequence(by_event[9], 0),
+                        with_sequence(provenance_min_literal, 1),
+                    ),
+                ),
+                2,
+            ),
+            (
+                "policy2-core-provenance-core",
+                wire_stream(
+                    policy2_header_literal,
+                    (
+                        with_sequence(by_event[0], 0),
+                        with_sequence(provenance_min_literal, 1),
+                        with_sequence(by_event[1], 2),
+                    ),
+                ),
+                3,
+            ),
+        )
+    )
+    for _name, encoded, count in policy2_positive_streams:
+        expect_stream(harness, encoded, 0, count)
+
+    policy2_unknown_event_fixture = with_sequence(by_event[0], 0)
+    for event in range(1 << 16):
+        if 1 <= event <= 10:
+            encoded = with_sequence(by_event[event - 1], 0)
+            expect_stream(harness, wire_stream(policy2_header_literal, (encoded,)), 0, 1)
+        elif 0x0100 <= event <= 0x0105:
+            encoded = with_sequence(policy2_provenance_by_event[event - 0x0100], 0)
+            expect_stream(harness, wire_stream(policy2_header_literal, (encoded,)), 0, 1)
+        else:
+            encoded = replace(policy2_unknown_event_fixture, 0, be(event, 2))
+            expect_stream(
+                harness,
+                wire_stream(policy2_header_literal, (encoded,)),
+                WIRE_EVENT,
+            )
+
+    policy2_negative_streams: list[tuple[str, bytes, int]] = []
+    for encoded in policy2_provenance_by_event:
+        policy2_negative_streams.append(
+            (
+                f"policy1-rejects-{int.from_bytes(encoded[0:2], 'big'):04x}",
+                wire_stream(dense_header, (with_sequence(encoded, 0),)),
+                WIRE_EVENT,
+            )
+        )
+        policy2_negative_streams.append(
+            (
+                f"policy1-late-rejects-{int.from_bytes(encoded[0:2], 'big'):04x}",
+                wire_stream(
+                    dense_header,
+                    (with_sequence(by_event[0], 0), with_sequence(encoded, 1)),
+                ),
+                WIRE_EVENT,
+            )
+        )
+
+    policy2_stream_prefix = be(192, 4) + policy2_header_literal
+    for body_length in range(44):
+        policy2_negative_streams.append(
+            (
+                f"policy2-short-body-{body_length}",
+                policy2_stream_prefix + be(body_length, 4) + bytes(body_length),
+                WIRE_LENGTH,
+            )
+        )
+    shortest_provenance = with_sequence(task_exit_zero, 0)
+    for supplied in range(len(shortest_provenance)):
+        policy2_negative_streams.append(
+            (
+                f"policy2-shortest-provenance-truncation-{supplied}",
+                policy2_stream_prefix
+                + be(supplied, 4)
+                + shortest_provenance[:supplied],
+                WIRE_LENGTH,
+            )
+        )
+
+    core0 = with_sequence(by_event[0], 0)
+    provenance0 = with_sequence(provenance_min_literal, 0)
+    provenance1 = with_sequence(provenance_min_literal, 1)
+    provenance2 = with_sequence(provenance_min_literal, 2)
+    provenance_max_sequence = with_sequence(provenance_min_literal, maximum64)
+    unknown_core = replace(core0, 0, be(11, 2))
+    unknown_provenance = replace(provenance0, 0, be(0x0106, 2))
+    bad_provenance_local = replace(provenance1, 42, be(1, 2))
+    bad_policy2_header = replace(policy2_header_literal, 180, be(0x000F, 8))
+    policy2_negative_streams.extend(
+        (
+            (
+                "policy2-header-before-frame",
+                be(192, 4) + bad_policy2_header + be(maximum32, 4),
+                WIRE_VALUE,
+            ),
+            (
+                "policy2-unknown-core-adjacent",
+                wire_stream(policy2_header_literal, (unknown_core,)),
+                WIRE_EVENT,
+            ),
+            (
+                "policy2-unknown-provenance-adjacent",
+                wire_stream(policy2_header_literal, (unknown_provenance,)),
+                WIRE_EVENT,
+            ),
+            (
+                "policy2-valid-prefix-bad-family-local",
+                wire_stream(policy2_header_literal, (core0, bad_provenance_local)),
+                WIRE_RESERVED,
+            ),
+            (
+                "policy2-family-duplicate",
+                wire_stream(policy2_header_literal, (core0, provenance0)),
+                WIRE_SEQUENCE,
+            ),
+            (
+                "policy2-family-skip",
+                wire_stream(policy2_header_literal, (core0, provenance2)),
+                WIRE_SEQUENCE,
+            ),
+            (
+                "policy2-family-reset",
+                wire_stream(
+                    policy2_header_literal,
+                    (core0, provenance1, with_sequence(by_event[1], 0)),
+                ),
+                WIRE_SEQUENCE,
+            ),
+            (
+                "policy2-family-maximum",
+                wire_stream(policy2_header_literal, (core0, provenance_max_sequence)),
+                WIRE_SEQUENCE,
+            ),
+            (
+                "policy2-valid-mixed-one-byte-suffix",
+                wire_stream(policy2_header_literal, (core0, provenance1)) + b"\x00",
+                WIRE_LENGTH,
+            ),
+            (
+                "policy2-provenance-inner-one-byte-suffix",
+                policy2_stream_prefix
+                + be(len(shortest_provenance) + 1, 4)
+                + shortest_provenance
+                + b"\x00",
+                WIRE_LENGTH,
+            ),
+        )
+    )
+    for _name, encoded, result in policy2_negative_streams:
+        expect_stream(harness, encoded, result)
+
+    for encoded in policy2_provenance_by_event:
+        expect_fixed_decode_reject(harness, "frame-decode", encoded, WIRE_EVENT)
+    for encoded in by_event:
+        expect_provenance_decode(harness, encoded, WIRE_EVENT)
+
     provenance_digest = hashlib.sha256(b"".join(provenance_vectors)).hexdigest()
     provenance_preimage_digest = hashlib.sha256(
         b"".join(provenance_preimages)
@@ -2845,6 +3344,13 @@ def main() -> int:
     task_exit_digest = hashlib.sha256(b"".join(task_exit_vectors)).hexdigest()
     task_exit_preimage_digest = hashlib.sha256(
         b"".join(task_exit_preimages)
+    ).hexdigest()
+    policy2_ima_digest = hashlib.sha256(b"".join(policy2_ima_vectors)).hexdigest()
+    policy2_stream_digest = hashlib.sha256(
+        b"".join(
+            be(len(encoded), 4) + encoded
+            for _name, encoded, _count in policy2_positive_streams
+        )
     ).hexdigest()
 
     print(
@@ -2881,7 +3387,16 @@ def main() -> int:
         f"task_exit_vector_set_sha256={task_exit_digest} "
         f"task_exit_preimages={len(task_exit_preimages)} "
         f"task_exit_preimage_set_sha256={task_exit_preimage_digest} "
-        f"task_exit_negative_frames={len(task_exit_negative_frames)}"
+        f"task_exit_negative_frames={len(task_exit_negative_frames)} "
+        f"policy2_header_sha256={hashlib.sha256(policy2_header_literal).hexdigest()} "
+        f"policy2_header_preimage_sha256={hashlib.sha256(policy2_header_preimage).hexdigest()} "
+        f"policy2_ima_vectors={len(policy2_ima_vectors)} "
+        f"policy2_ima_vector_set_sha256={policy2_ima_digest} "
+        f"policy2_stream_vectors={len(policy2_positive_streams)} "
+        f"policy2_stream_vector_set_sha256={policy2_stream_digest} "
+        f"policy2_stream_negatives={len(policy2_negative_streams)} "
+        f"policy2_policy_version_sweep={1 << 16} "
+        f"policy2_event_sweep={1 << 16}"
     )
     return 0
 
