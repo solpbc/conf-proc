@@ -118,6 +118,18 @@ static int fail_encode(int err, size_t *written, size_t *required)
     return err;
 }
 
+static uint64_t hook_mask_for_policy(uint16_t policy_version)
+{
+    switch (policy_version) {
+    case SPP_DIAG_TRACE_POLICY_VERSION:
+        return SPP_DIAG_TRACE_HOOK_MASK;
+    case SPP_DIAG_TRACE_POLICY_VERSION_PROVENANCE:
+        return SPP_DIAG_TRACE_HOOK_MASK_PROVENANCE;
+    default:
+        return 0;
+    }
+}
+
 static int header_fields(const struct spp_diag_trace_header *h)
 {
     if (!eq_n(h->magic, k_magic_header, 8)) {
@@ -129,7 +141,8 @@ static int header_fields(const struct spp_diag_trace_header *h)
     if (h->header_length != SPP_DIAG_TRACE_HEADER_SIZE) {
         return WIRE_LENGTH;
     }
-    if (h->policy_version != SPP_DIAG_TRACE_POLICY_VERSION) {
+    if (h->policy_version != SPP_DIAG_TRACE_POLICY_VERSION &&
+        h->policy_version != SPP_DIAG_TRACE_POLICY_VERSION_PROVENANCE) {
         return WIRE_VERSION;
     }
     if (h->hash_algorithm != SPP_DIAG_TRACE_HASH_SHA256) {
@@ -148,7 +161,7 @@ static int header_fields(const struct spp_diag_trace_header *h)
               SPP_DIAG_TRACE_SOURCE_COMMIT_LEN)) {
         return WIRE_VALUE;
     }
-    if (h->required_hook_mask != SPP_DIAG_TRACE_HOOK_MASK) {
+    if (h->required_hook_mask != hook_mask_for_policy(h->policy_version)) {
         return WIRE_VALUE;
     }
     if (h->reserved != 0) {
@@ -265,7 +278,8 @@ static int ima_fields(const struct spp_diag_trace_ima *r)
     if (r->record_length != SPP_DIAG_TRACE_IMA_SIZE) {
         return WIRE_LENGTH;
     }
-    if (r->policy_version != SPP_DIAG_TRACE_POLICY_VERSION) {
+    if (r->policy_version != SPP_DIAG_TRACE_POLICY_VERSION &&
+        r->policy_version != SPP_DIAG_TRACE_POLICY_VERSION_PROVENANCE) {
         return WIRE_VERSION;
     }
     if (r->hash_algorithm != SPP_DIAG_TRACE_HASH_SHA256) {
@@ -289,7 +303,7 @@ static int ima_fields(const struct spp_diag_trace_ima *r)
         r->stream_byte_count > SPP_DIAG_TRACE_MAX_STREAM_BYTES) {
         return WIRE_CAP;
     }
-    if (r->required_hook_mask != SPP_DIAG_TRACE_HOOK_MASK) {
+    if (r->required_hook_mask != hook_mask_for_policy(r->policy_version)) {
         return WIRE_VALUE;
     }
     if (r->denied_exec_count > r->frame_count) {
@@ -2090,6 +2104,7 @@ int spp_diag_trace_stream_validate(const uint8_t *in, size_t len,
     size_t remaining;
     uint32_t prefix;
     uint32_t frame_length;
+    uint16_t event;
     int err;
 
     if (in == NULL || out == NULL || consumed == NULL) {
@@ -2154,9 +2169,26 @@ int spp_diag_trace_stream_validate(const uint8_t *in, size_t len,
             *consumed = 0;
             return WIRE_LENGTH;
         }
-        err = spp_diag_trace_frame_decode(
-            in + off + SPP_DIAG_TRACE_STREAM_PREFIX_SIZE, frame_length,
-            &frame_tmp, &frame_consumed);
+        if (header_tmp.policy_version ==
+            SPP_DIAG_TRACE_POLICY_VERSION_PROVENANCE) {
+            event = load_u16be(in + off + SPP_DIAG_TRACE_STREAM_PREFIX_SIZE);
+            if (frame_event_check(event) == WIRE_OK) {
+                err = spp_diag_trace_frame_decode(
+                    in + off + SPP_DIAG_TRACE_STREAM_PREFIX_SIZE, frame_length,
+                    &frame_tmp, &frame_consumed);
+            } else if (provenance_event_check(event) == WIRE_OK) {
+                err = spp_diag_trace_provenance_frame_decode(
+                    in + off + SPP_DIAG_TRACE_STREAM_PREFIX_SIZE, frame_length,
+                    &frame_tmp, &frame_consumed);
+            } else {
+                *consumed = 0;
+                return WIRE_EVENT;
+            }
+        } else {
+            err = spp_diag_trace_frame_decode(
+                in + off + SPP_DIAG_TRACE_STREAM_PREFIX_SIZE, frame_length,
+                &frame_tmp, &frame_consumed);
+        }
         if (err != WIRE_OK) {
             *consumed = 0;
             return err;

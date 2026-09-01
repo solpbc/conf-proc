@@ -532,7 +532,7 @@ static int test_header_field_errors(void)
         if (faults[i].kind == 0) {
             buf[faults[i].off] ^= 1u;
         } else if (faults[i].kind == 1) {
-            store16(buf + faults[i].off, 2);
+            store16(buf + faults[i].off, 3);
         } else if (faults[i].kind == 2) {
             store32(buf + faults[i].off, 1);
         } else {

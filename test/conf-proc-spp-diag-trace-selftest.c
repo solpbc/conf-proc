@@ -664,7 +664,7 @@ typedef void (*ima_poison_fn)(struct spp_diag_trace_ima *);
 static void hp_magic(struct spp_diag_trace_header *h) { h->magic[0] ^= 1u; }
 static void hp_wver(struct spp_diag_trace_header *h) { h->wire_version = 2; }
 static void hp_hlen(struct spp_diag_trace_header *h) { h->header_length = 191; }
-static void hp_pver(struct spp_diag_trace_header *h) { h->policy_version = 2; }
+static void hp_pver(struct spp_diag_trace_header *h) { h->policy_version = 3; }
 static void hp_hash(struct spp_diag_trace_header *h) { h->hash_algorithm = 2; }
 static void hp_frames(struct spp_diag_trace_header *h) { h->max_frames = 0; }
 static void hp_stream(struct spp_diag_trace_header *h)
@@ -696,7 +696,7 @@ static void ip_magic(struct spp_diag_trace_ima *r) { r->magic[0] ^= 1u; }
 static void ip_wver(struct spp_diag_trace_ima *r) { r->wire_version = 2; }
 static void ip_kind(struct spp_diag_trace_ima *r) { r->kind = 0; }
 static void ip_len(struct spp_diag_trace_ima *r) { r->record_length = 255; }
-static void ip_pver(struct spp_diag_trace_ima *r) { r->policy_version = 2; }
+static void ip_pver(struct spp_diag_trace_ima *r) { r->policy_version = 3; }
 static void ip_hash(struct spp_diag_trace_ima *r) { r->hash_algorithm = 2; }
 static void ip_state(struct spp_diag_trace_ima *r) { r->state = 2; }
 static void ip_res16(struct spp_diag_trace_ima *r) { r->reserved16 = 1; }

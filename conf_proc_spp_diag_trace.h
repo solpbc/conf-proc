@@ -33,6 +33,7 @@ enum spp_diag_trace_result {
 
 #define SPP_DIAG_TRACE_WIRE_VERSION 1u
 #define SPP_DIAG_TRACE_POLICY_VERSION 1u
+#define SPP_DIAG_TRACE_POLICY_VERSION_PROVENANCE 2u
 #define SPP_DIAG_TRACE_HASH_SHA256 1u
 #define SPP_DIAG_TRACE_MAX_FRAMES 524288u
 #define SPP_DIAG_TRACE_MAX_STREAM_BYTES 268435456ull
@@ -47,6 +48,23 @@ enum spp_diag_trace_result {
 #define SPP_DIAG_TRACE_FRAME_PREIMAGE_MIN_SIZE 107
 #define SPP_DIAG_TRACE_FRAME_PREIMAGE_MAX_SIZE 1151
 #define SPP_DIAG_TRACE_HOOK_MASK 0xfull
+#define SPP_DIAG_TRACE_HOOK_BPRM_CHECK_SECURITY (1ull << 0)
+#define SPP_DIAG_TRACE_HOOK_BPRM_COMMITTED_CREDS (1ull << 1)
+#define SPP_DIAG_TRACE_HOOK_TASK_ALLOC (1ull << 2)
+#define SPP_DIAG_TRACE_HOOK_TASK_CREATED (1ull << 3)
+#define SPP_DIAG_TRACE_HOOK_FILE_OPEN_ATTEMPT (1ull << 4)
+#define SPP_DIAG_TRACE_HOOK_FILE_OPEN_POLICY (1ull << 5)
+#define SPP_DIAG_TRACE_HOOK_MMAP_POLICY (1ull << 6)
+#define SPP_DIAG_TRACE_HOOK_MPROTECT_POLICY (1ull << 7)
+#define SPP_DIAG_TRACE_HOOK_CONNECT_POLICY (1ull << 8)
+#define SPP_DIAG_TRACE_HOOK_SENDMSG_POLICY (1ull << 9)
+#define SPP_DIAG_TRACE_HOOK_FILE_OPEN_RETURN (1ull << 10)
+#define SPP_DIAG_TRACE_HOOK_MMAP_RETURN (1ull << 11)
+#define SPP_DIAG_TRACE_HOOK_MPROTECT_RETURN (1ull << 12)
+#define SPP_DIAG_TRACE_HOOK_CONNECT_RETURN (1ull << 13)
+#define SPP_DIAG_TRACE_HOOK_SENDMSG_RETURN (1ull << 14)
+#define SPP_DIAG_TRACE_HOOK_TASK_EXIT (1ull << 15)
+#define SPP_DIAG_TRACE_HOOK_MASK_PROVENANCE 0xffffull
 #define SPP_DIAG_TRACE_IMA_FRAME_COUNT_MIN 1ull
 #define SPP_DIAG_TRACE_IMA_STREAM_BYTES_MIN 244ull
 
@@ -229,6 +247,33 @@ _Static_assert((unsigned long long)SPP_DIAG_TRACE_STREAM_PREFIX_SIZE +
                        SPP_DIAG_TRACE_MAX_FRAME_BYTES <=
                    SPP_DIAG_TRACE_MAX_STREAM_BYTES,
                "max frame entry fits in max stream");
+_Static_assert(SPP_DIAG_TRACE_POLICY_VERSION_PROVENANCE == 2,
+               "policy 2 version");
+_Static_assert(SPP_DIAG_TRACE_HOOK_MASK_PROVENANCE == 0xffffull,
+               "policy 2 hook mask");
+_Static_assert((SPP_DIAG_TRACE_HOOK_BPRM_CHECK_SECURITY |
+                SPP_DIAG_TRACE_HOOK_BPRM_COMMITTED_CREDS |
+                SPP_DIAG_TRACE_HOOK_TASK_ALLOC |
+                SPP_DIAG_TRACE_HOOK_TASK_CREATED |
+                SPP_DIAG_TRACE_HOOK_FILE_OPEN_ATTEMPT |
+                SPP_DIAG_TRACE_HOOK_FILE_OPEN_POLICY |
+                SPP_DIAG_TRACE_HOOK_MMAP_POLICY |
+                SPP_DIAG_TRACE_HOOK_MPROTECT_POLICY |
+                SPP_DIAG_TRACE_HOOK_CONNECT_POLICY |
+                SPP_DIAG_TRACE_HOOK_SENDMSG_POLICY |
+                SPP_DIAG_TRACE_HOOK_FILE_OPEN_RETURN |
+                SPP_DIAG_TRACE_HOOK_MMAP_RETURN |
+                SPP_DIAG_TRACE_HOOK_MPROTECT_RETURN |
+                SPP_DIAG_TRACE_HOOK_CONNECT_RETURN |
+                SPP_DIAG_TRACE_HOOK_SENDMSG_RETURN |
+                SPP_DIAG_TRACE_HOOK_TASK_EXIT) ==
+                   SPP_DIAG_TRACE_HOOK_MASK_PROVENANCE,
+               "policy 2 hook bits");
+_Static_assert((SPP_DIAG_TRACE_HOOK_BPRM_CHECK_SECURITY |
+                SPP_DIAG_TRACE_HOOK_BPRM_COMMITTED_CREDS |
+                SPP_DIAG_TRACE_HOOK_TASK_ALLOC |
+                SPP_DIAG_TRACE_HOOK_TASK_CREATED) == SPP_DIAG_TRACE_HOOK_MASK,
+               "policy 1 hook bits");
 
 /*
  * Structural byte codec only: WIRE_OK does not establish transcript order,
