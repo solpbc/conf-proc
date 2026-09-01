@@ -773,31 +773,39 @@ static int cheap_fail_struct(const struct spp_diag_trace_frame *f, int expected)
     uint8_t pre[256];
     uint8_t chain[32];
     uint8_t wire[SPP_DIAG_TRACE_MAX_FRAME_BYTES];
-    struct spp_diag_trace_frame got;
+    struct frame_box got, snap;
     size_t written, required, consumed;
     size_t n;
 
     n = decode_len_for(f);
+    memset(out, CANARY, sizeof out);
     written = required = (size_t)-1;
     EXPECT_EQ(spp_diag_trace_provenance_frame_encode(f, out, sizeof out,
                                                      &written, &required),
               expected);
     EXPECT_EQ(written, 0);
     EXPECT_EQ(required, 0);
+    CALL(expect_canary(out, sizeof out));
 
     memset(chain, 0x11, sizeof chain);
+    memset(pre, CANARY, sizeof pre);
     written = required = (size_t)-1;
     EXPECT_EQ(spp_diag_trace_provenance_frame_preimage(
                   f, chain, pre, sizeof pre, &written, &required),
               expected);
     EXPECT_EQ(written, 0);
     EXPECT_EQ(required, 0);
+    CALL(expect_canary(pre, sizeof pre));
 
     layout_frame(wire, f);
+    memset(&got, CANARY2, sizeof got);
+    snap = got;
     consumed = (size_t)-1;
-    EXPECT_EQ(spp_diag_trace_provenance_frame_decode(wire, n, &got, &consumed),
-              expected);
+    EXPECT_EQ(
+        spp_diag_trace_provenance_frame_decode(wire, n, &got.f, &consumed),
+        expected);
     EXPECT_EQ(consumed, 0);
+    EXPECT(memcmp(&got, &snap, sizeof got) == 0);
     return 0;
 }
 
@@ -1439,6 +1447,18 @@ static int test_matrix(void)
     f.payload[62] = 0x00;
     f.payload[63] = 0xff;
     CALL(expect_ok_both_paths(&f));
+    for (v = 0; v < 32; v++) {
+        apply_legal_class(&f, SPP_DIAG_TRACE_NETWORK_OPERATION_CONNECT,
+                          SPP_DIAG_TRACE_NETWORK_ENDPOINT_SOURCE_EXPLICIT,
+                          SPP_DIAG_TRACE_NETWORK_ENDPOINT_IPV4);
+        set_addr_bit(f.payload + 60, 4, v, 1);
+        CALL(expect_ok_both_paths(&f));
+        apply_legal_class(&f, SPP_DIAG_TRACE_NETWORK_OPERATION_CONNECT,
+                          SPP_DIAG_TRACE_NETWORK_ENDPOINT_SOURCE_EXPLICIT,
+                          SPP_DIAG_TRACE_NETWORK_ENDPOINT_IPV4);
+        set_addr_bit(f.payload + 60, 4, v, 0);
+        CALL(expect_ok_both_paths(&f));
+    }
 
     apply_legal_class(&f, SPP_DIAG_TRACE_NETWORK_OPERATION_CONNECT,
                       SPP_DIAG_TRACE_NETWORK_ENDPOINT_SOURCE_EXPLICIT,
