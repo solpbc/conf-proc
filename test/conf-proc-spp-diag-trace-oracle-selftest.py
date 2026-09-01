@@ -297,6 +297,47 @@ def file_policy_payload(
     return raw
 
 
+def mapping_policy_payload(
+    operation: int,
+    decision: int,
+    backing: int,
+    mode: int,
+    requested: int,
+    effective: int,
+    prior: int,
+    raw_result: int,
+    filesystem_magic: int,
+    device_major: int,
+    device_minor: int,
+    seals: int,
+    inode: int,
+    mount_identity: int,
+    observed_size: int,
+) -> bytes:
+    raw = b"".join(
+        (
+            be(operation, 2),
+            be(decision, 2),
+            be(backing, 2),
+            be(mode, 2),
+            be(requested, 4),
+            be(effective, 4),
+            be(prior, 4),
+            be(raw_result, 4),
+            be(filesystem_magic, 4),
+            be(device_major, 4),
+            be(device_minor, 4),
+            be(seals, 4),
+            be(inode, 8),
+            be(mount_identity, 8),
+            be(observed_size, 8),
+        )
+    )
+    if len(raw) != 64:
+        raise AssertionError(f"mapping-policy payload is {len(raw)} bytes")
+    return raw
+
+
 def expect_provenance_encode(
     harness: Path, encoded: bytes, result: int = 0, capacity: int | None = None
 ) -> None:
@@ -1265,12 +1306,359 @@ def main() -> int:
         expect_provenance_encode(harness, encoded, WIRE_EVENT)
         expect_provenance_preimage(harness, encoded, zero, WIRE_EVENT)
 
+    mapping_dense_literal = bytes.fromhex(
+        "0102000000000040"
+        "0fedcba987654321"
+        "0102030405060708"
+        "0000000000000000"
+        "8877665544332211"
+        "00060000"
+        "0001000200030002"
+        "0000000500000007"
+        "00000000fffffffb"
+        "1020304050607080"
+        "90a0b0c00000000f"
+        "1122334455667788"
+        "99aabbccddeeff00"
+        "0123456789abcdef"
+    )
+    if mapping_dense_literal != frame(
+        0x0102,
+        0,
+        0x0FEDCBA987654321,
+        0x0102030405060708,
+        0,
+        0x8877665544332211,
+        6,
+        mapping_policy_payload(
+            1,
+            2,
+            3,
+            2,
+            0x00000005,
+            0x00000007,
+            0,
+            0xFFFFFFFB,
+            0x10203040,
+            0x50607080,
+            0x90A0B0C0,
+            0x0000000F,
+            0x1122334455667788,
+            0x99AABBCCDDEEFF00,
+            0x0123456789ABCDEF,
+        ),
+    ):
+        raise AssertionError("dense mapping-policy literal disagrees with prose builder")
+
+    mapping_complement_literal = bytes.fromhex(
+        "0102000000000040"
+        "0000000000000000"
+        "0000000000000001"
+        "0000000000000000"
+        "0000000000000001"
+        "00010000"
+        "0002000100040001"
+        "0000000400000005"
+        "0000000300000000"
+        "a1b2c3d400000000"
+        "f0e0d0c000000000"
+        "0000000000000001"
+        "ffffffffffffffff"
+        "0000000000000000"
+    )
+    if mapping_complement_literal != frame(
+        0x0102,
+        0,
+        0,
+        1,
+        0,
+        1,
+        1,
+        mapping_policy_payload(
+            2,
+            1,
+            4,
+            1,
+            0x00000004,
+            0x00000005,
+            0x00000003,
+            0,
+            0xA1B2C3D4,
+            0,
+            0xF0E0D0C0,
+            0,
+            1,
+            0xFFFFFFFFFFFFFFFF,
+            0,
+        ),
+    ):
+        raise AssertionError(
+            "complement mapping-policy literal disagrees with prose builder"
+        )
+
+    mapping_anonymous = frame(
+        0x0102,
+        0,
+        maximum64,
+        maximum64,
+        0,
+        maximum64,
+        14,
+        mapping_policy_payload(1, 1, 1, 2, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+    )
+    mapping_regular = frame(
+        0x0102,
+        0,
+        7,
+        11,
+        0,
+        13,
+        9,
+        mapping_policy_payload(
+            2,
+            2,
+            2,
+            1,
+            7,
+            4,
+            7,
+            0x80000001,
+            maximum32,
+            maximum32,
+            maximum32,
+            0,
+            maximum64,
+            1,
+            maximum64,
+        ),
+    )
+    mapping_vectors = (
+        mapping_dense_literal,
+        mapping_complement_literal,
+        mapping_anonymous,
+        mapping_regular,
+    )
+    mapping_preimages: list[bytes] = []
+    for encoded in mapping_vectors:
+        expect_provenance_encode(harness, encoded)
+        expect_provenance_decode(harness, encoded)
+        for previous in (zero, chain_b):
+            mapping_preimages.append(
+                expect_provenance_preimage(harness, encoded, previous)
+            )
+
+    mapping_negative_frames: set[bytes] = set()
+
+    for decision in (1, 2):
+        for raw_result in (
+            0x00000000,
+            0x7FFFFFFF,
+            0x80000000,
+            0x80000001,
+            0xFFFFFFFB,
+            0xFFFFFFFF,
+        ):
+            encoded = replace(
+                replace(mapping_dense_literal, 46, be(decision, 2)),
+                64,
+                be(raw_result, 4),
+            )
+            result = (
+                0
+                if (decision == 1 and raw_result == 0)
+                or (decision == 2 and raw_result & 0x80000000)
+                else WIRE_VALUE
+            )
+            expect_provenance_encode(harness, encoded, result)
+            expect_provenance_decode(harness, encoded, result)
+            expect_provenance_preimage(harness, encoded, zero, result)
+            if result != 0:
+                mapping_negative_frames.add(encoded)
+
+    expect_provenance_encode(harness, mapping_dense_literal, result=2, capacity=107)
+    expect_provenance_preimage(
+        harness, mapping_dense_literal, chain_b, result=2, capacity=170
+    )
+
+    mapping_invalid_structs: list[tuple[bytes, int]] = [
+        (replace(mapping_dense_literal, 0, be(0x0103, 2)), WIRE_EVENT),
+        (replace(mapping_dense_literal, 2, be(1, 2)), WIRE_FLAGS),
+        (replace(mapping_dense_literal, 4, be(1045, 4)), WIRE_CAP),
+        (replace(mapping_dense_literal, 4, be(63, 4)), WIRE_LENGTH),
+        (replace(mapping_dense_literal, 16, bytes(8)), WIRE_VALUE),
+        (replace(mapping_dense_literal, 24, be(1, 8)), WIRE_VALUE),
+        (replace(mapping_dense_literal, 32, bytes(8)), WIRE_VALUE),
+        (replace(mapping_dense_literal, 40, bytes(2)), WIRE_STATE),
+        (replace(mapping_dense_literal, 42, be(1, 2)), WIRE_RESERVED),
+        (replace(mapping_dense_literal, 44, bytes(2)), WIRE_STATE),
+        (replace(mapping_dense_literal, 46, bytes(2)), WIRE_STATE),
+        (replace(mapping_dense_literal, 48, bytes(2)), WIRE_STATE),
+        (replace(mapping_dense_literal, 50, bytes(2)), WIRE_STATE),
+        (replace(mapping_dense_literal, 52, be(8, 4)), WIRE_FLAGS),
+        (replace(mapping_dense_literal, 56, be(8, 4)), WIRE_FLAGS),
+        (replace(mapping_dense_literal, 60, be(8, 4)), WIRE_FLAGS),
+        (replace(mapping_dense_literal, 56, be(3, 4)), WIRE_STATE),
+        (replace(mapping_dense_literal, 60, be(1, 4)), WIRE_STATE),
+        (replace(mapping_dense_literal, 64, bytes(4)), WIRE_VALUE),
+        (replace(mapping_dense_literal, 48, be(4, 2)), WIRE_FLAGS),
+        (replace(mapping_anonymous, 68, be(1, 4)), WIRE_VALUE),
+        (replace(mapping_anonymous, 72, be(1, 4)), WIRE_VALUE),
+        (replace(mapping_anonymous, 76, be(1, 4)), WIRE_VALUE),
+        (replace(mapping_anonymous, 80, be(1, 4)), WIRE_FLAGS),
+        (replace(mapping_anonymous, 84, be(1, 8)), WIRE_VALUE),
+        (replace(mapping_anonymous, 92, be(1, 8)), WIRE_VALUE),
+        (replace(mapping_anonymous, 100, be(1, 8)), WIRE_VALUE),
+        (replace(mapping_regular, 84, bytes(8)), WIRE_VALUE),
+        (replace(mapping_regular, 92, bytes(8)), WIRE_VALUE),
+    ]
+    for encoded, result in mapping_invalid_structs:
+        mapping_negative_frames.add(encoded)
+        expect_provenance_decode(harness, encoded, result)
+        for capacity in (0, 107):
+            expect_provenance_encode(harness, encoded, result, capacity)
+        for capacity in (0, 170):
+            expect_provenance_preimage(harness, encoded, zero, result, capacity)
+
+    for short_len in range(108):
+        encoded = mapping_dense_literal[:short_len]
+        mapping_negative_frames.add(encoded)
+        expect_provenance_decode(harness, encoded, WIRE_LENGTH)
+
+    mapping_suffix = mapping_dense_literal + b"\x00"
+    mapping_negative_frames.add(mapping_suffix)
+    expect_provenance_decode(harness, mapping_suffix, WIRE_LENGTH)
+
+    mapping_envelope_negatives: list[tuple[bytes, int]] = []
+    for payload_len in (0, 63, 65, 1044):
+        mapping_envelope_negatives.append(
+            (replace(mapping_dense_literal, 4, be(payload_len, 4)), WIRE_LENGTH)
+        )
+    for payload_len in (1045, maximum32):
+        mapping_envelope_negatives.append(
+            (replace(mapping_dense_literal, 4, be(payload_len, 4)), WIRE_CAP)
+        )
+    for encoded, result in mapping_envelope_negatives:
+        mapping_negative_frames.add(encoded)
+        expect_provenance_decode(harness, encoded, result)
+        expect_provenance_encode(harness, encoded, result)
+        expect_provenance_preimage(harness, encoded, zero, result)
+
+    mapping_precedence_negatives: tuple[tuple[bytes, int], ...] = (
+        (
+            replace(replace(mapping_dense_literal, 0, be(0x0103, 2)), 2, be(1, 2)),
+            WIRE_EVENT,
+        ),
+        (
+            replace(replace(mapping_dense_literal, 2, be(1, 2)), 4, be(63, 4)),
+            WIRE_FLAGS,
+        ),
+        (
+            replace(replace(mapping_dense_literal, 4, be(63, 4)), 16, bytes(8)),
+            WIRE_LENGTH,
+        ),
+        (
+            replace(replace(mapping_dense_literal, 16, bytes(8)), 24, be(1, 8)),
+            WIRE_VALUE,
+        ),
+        (
+            replace(replace(mapping_dense_literal, 24, be(1, 8)), 32, bytes(8)),
+            WIRE_VALUE,
+        ),
+        (
+            replace(replace(mapping_dense_literal, 32, bytes(8)), 40, bytes(2)),
+            WIRE_VALUE,
+        ),
+        (
+            replace(replace(mapping_dense_literal, 40, bytes(2)), 42, be(1, 2)),
+            WIRE_STATE,
+        ),
+        (
+            replace(replace(mapping_dense_literal, 42, be(1, 2)), 44, bytes(2)),
+            WIRE_RESERVED,
+        ),
+        (
+            replace(replace(mapping_dense_literal, 44, bytes(2)), 46, bytes(2)),
+            WIRE_STATE,
+        ),
+        (
+            replace(replace(mapping_dense_literal, 46, bytes(2)), 48, bytes(2)),
+            WIRE_STATE,
+        ),
+        (
+            replace(replace(mapping_dense_literal, 48, bytes(2)), 50, bytes(2)),
+            WIRE_STATE,
+        ),
+        (
+            replace(replace(mapping_dense_literal, 50, bytes(2)), 52, be(8, 4)),
+            WIRE_STATE,
+        ),
+        (
+            replace(replace(mapping_dense_literal, 52, be(8, 4)), 56, be(8, 4)),
+            WIRE_FLAGS,
+        ),
+        (
+            replace(replace(mapping_dense_literal, 56, be(8, 4)), 60, be(8, 4)),
+            WIRE_FLAGS,
+        ),
+        (
+            replace(replace(mapping_dense_literal, 60, be(8, 4)), 56, be(3, 4)),
+            WIRE_FLAGS,
+        ),
+        (
+            replace(replace(mapping_dense_literal, 56, be(3, 4)), 60, be(1, 4)),
+            WIRE_STATE,
+        ),
+        (
+            replace(replace(mapping_dense_literal, 60, be(1, 4)), 64, bytes(4)),
+            WIRE_STATE,
+        ),
+        (
+            replace(
+                replace(replace(mapping_dense_literal, 64, bytes(4)), 48, be(4, 2)),
+                80,
+                be(1, 4),
+            ),
+            WIRE_VALUE,
+        ),
+        (
+            replace(replace(mapping_anonymous, 80, be(1, 4)), 68, be(1, 4)),
+            WIRE_FLAGS,
+        ),
+        (
+            replace(replace(mapping_regular, 84, bytes(8)), 92, bytes(8)),
+            WIRE_VALUE,
+        ),
+    )
+    for precedence_index, (encoded, result) in enumerate(
+        mapping_precedence_negatives, start=1
+    ):
+        mapping_negative_frames.add(encoded)
+        try:
+            expect_provenance_decode(harness, encoded, result)
+            expect_provenance_encode(harness, encoded, result)
+            expect_provenance_preimage(harness, encoded, zero, result)
+        except AssertionError as error:
+            raise AssertionError(
+                f"mapping precedence vector {precedence_index}: {error}"
+            ) from error
+
+    for event in (0x0000, 0x0001, 0x00FF, 0x0103, 0x01FF, 0x0200, 0xFFFF):
+        encoded = replace(mapping_dense_literal, 0, be(event, 2))
+        mapping_negative_frames.add(encoded)
+        expect_provenance_decode(harness, encoded, WIRE_EVENT)
+        expect_provenance_encode(harness, encoded, WIRE_EVENT)
+        expect_provenance_preimage(harness, encoded, zero, WIRE_EVENT)
+
     provenance_digest = hashlib.sha256(b"".join(provenance_vectors)).hexdigest()
     provenance_preimage_digest = hashlib.sha256(
         b"".join(provenance_preimages)
     ).hexdigest()
     policy_digest = hashlib.sha256(b"".join(policy_vectors)).hexdigest()
     policy_preimage_digest = hashlib.sha256(b"".join(policy_preimages)).hexdigest()
+    mapping_digest = hashlib.sha256(b"".join(mapping_vectors)).hexdigest()
+    mapping_preimage_digest = hashlib.sha256(
+        b"".join(mapping_preimages)
+    ).hexdigest()
 
     print(
         "ok   independent fixed-object/frame oracle "
@@ -1286,7 +1674,12 @@ def main() -> int:
         f"policy_vectors={len(policy_vectors)} "
         f"policy_vector_set_sha256={policy_digest} "
         f"policy_preimage_set_sha256={policy_preimage_digest} "
-        f"policy_negatives={93 + len(policy_invalid_structs) + len(policy_envelope_negatives) + len(policy_adjacent_negatives) + len(policy_boundary_negatives) + 7}"
+        f"policy_negatives={93 + len(policy_invalid_structs) + len(policy_envelope_negatives) + len(policy_adjacent_negatives) + len(policy_boundary_negatives) + 7} "
+        f"mapping_vectors={len(mapping_vectors)} "
+        f"mapping_vector_set_sha256={mapping_digest} "
+        f"mapping_preimages={len(mapping_preimages)} "
+        f"mapping_preimage_set_sha256={mapping_preimage_digest} "
+        f"mapping_negative_frames={len(mapping_negative_frames)}"
     )
     return 0
 
