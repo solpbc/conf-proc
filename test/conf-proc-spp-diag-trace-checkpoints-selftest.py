@@ -9,6 +9,7 @@ import hashlib
 import inspect
 import io
 from pathlib import Path
+import tracemalloc
 import typing
 
 import conf_proc_spp_diag_trace_checkpoint_vectors as vectors
@@ -98,6 +99,57 @@ class OverReturnReader:
         return bytes(amount + 1)
 
 
+class NonCallableReader:
+    read = 1
+
+
+class VirtualFrameReader:
+    """Constant-state source for exact frame-count and memory tests."""
+
+    def __init__(self, frame_count: int) -> None:
+        self.header = _raw()[:196]
+        self.frame_count = frame_count
+        self.header_offset = 0
+        self.frame_index = 0
+        self.prefix_next = True
+        self.prefix_reads = 0
+        self.body_reads = 0
+        self.max_request = 0
+
+    @property
+    def logical_length(self) -> int:
+        return 196 + self.frame_count * 48
+
+    def read(self, amount: int) -> bytes:
+        self.max_request = max(self.max_request, amount)
+        if amount > 1088:
+            raise AssertionError("oversized read request")
+        if self.header_offset < len(self.header):
+            result = self.header[self.header_offset : self.header_offset + amount]
+            self.header_offset += len(result)
+            return result
+        if self.frame_index >= self.frame_count:
+            return b""
+        if self.prefix_next:
+            assert amount == 4
+            self.prefix_next = False
+            self.prefix_reads += 1
+            return b"\x00\x00\x00\x2c"
+        assert amount == 44
+        sequence = self.frame_index
+        self.frame_index += 1
+        self.prefix_next = True
+        self.body_reads += 1
+        return b"".join(
+            (
+                b"\x00\x01\x00\x00\x00\x00\x00\x00",
+                sequence.to_bytes(8, "big"),
+                bytes(24),
+                b"\x00\x00\x00\x00",
+            )
+        )
+
+
 def _raw() -> bytes:
     return bytes.fromhex(vectors.STREAM_HEX)
 
@@ -160,6 +212,22 @@ def _sequence(entries: list[bytes]) -> bytes:
         changed[12:20] = (sequence - 1).to_bytes(8, "big")
         result.append(bytes(changed))
     return b"".join(result)
+
+
+def _opaque_entry(sequence: int, frame_length: int) -> bytes:
+    payload_length = frame_length - 44
+    frame = b"".join(
+        (
+            b"\x99\x99\x00\x00",
+            payload_length.to_bytes(4, "big"),
+            sequence.to_bytes(8, "big"),
+            bytes(24),
+            b"\x00\x00\x00\x00",
+            bytes(payload_length),
+        )
+    )
+    assert len(frame) == frame_length
+    return frame_length.to_bytes(4, "big") + frame
 
 
 def _expect_error(
@@ -319,6 +387,11 @@ def test_argument_types() -> None:
         ),
     )
     _expect_error(TYPE, source=object())
+    _expect_error(TYPE, source=NonCallableReader())
+    short_expectation = dataclasses.replace(base, challenge=base.challenge[:-1])
+    _expect_error(TYPE, expectations=short_expectation)
+    short_record = _replace_input(_inputs(), 0, record=_inputs()[0].record[:-1])
+    _expect_error(LENGTH, inputs=short_record)
     _expect_error(TYPE, source=ReturnReader(bytearray()))
     _expect_error(TYPE, source=ReturnReader(BytesSubclass(b"")))
     over = OverReturnReader()
@@ -352,7 +425,9 @@ def test_framing_sequence_and_anchors() -> None:
     entries = _entries(raw)
     _expect_error(LENGTH, raw=bytes(4) + raw[4:])
     _expect_error(LENGTH, raw=b"\x00\x00\x00\x2b" + raw[4:])
-    _expect_error(CAP, raw=b"\x00\x00\x04\x41" + raw[4:])
+    _expect_error(LENGTH, raw=raw[:196] + bytes(4) + raw[200:])
+    _expect_error(LENGTH, raw=raw[:196] + b"\x00\x00\x00\x2b" + raw[200:])
+    _expect_error(CAP, raw=raw[:196] + b"\x00\x00\x04\x41" + raw[200:])
     _expect_error(LENGTH, raw=_flip(raw, vectors.ENTRY_OFFSETS[2] + 4 + 7))
     _expect_error(SEQUENCE, raw=_flip(raw, vectors.ENTRY_OFFSETS[2] + 4 + 15))
     _expect_error(FRAME, raw=_flip(raw, vectors.ENTRY_OFFSETS[3] + 4 + 23))
@@ -362,6 +437,14 @@ def test_framing_sequence_and_anchors() -> None:
     _expect_error(ANCHOR, raw=_sequence(entries[:3] + entries[4:]))
     _expect_error(ANCHOR, raw=_sequence(entries[:4] + entries[5:]))
     _expect_error(ANCHOR, raw=b"".join(entries[:-1]))
+    _expect_error(ANCHOR, raw=_sequence(entries[:3] + [entries[3]] + entries[3:]))
+    _expect_error(ANCHOR, raw=_sequence(entries[:3] + [entries[4], entries[3]] + entries[5:]))
+    _expect_error(BINDING, raw=_sequence(entries[:3] + [_opaque_entry(0, 44)] + entries[3:]))
+    _expect_error(BINDING, raw=_sequence(entries[:5] + [entries[6], entries[5]] + entries[7:]))
+    _expect_error(BINDING, raw=_flip(raw, vectors.ENTRY_OFFSETS[1] + 5))
+    max_frame_entries = entries.copy()
+    max_frame_entries[5] = _opaque_entry(4, 1088)
+    _expect_error(BINDING, raw=b"".join(max_frame_entries))
     terminal = entries[-1]
     extra = bytearray(entries[1])
     extra[4 + 8 : 4 + 16] = (7).to_bytes(8, "big")
@@ -376,8 +459,72 @@ def test_records() -> None:
         for offset in (0, 8, 10, 12, 16, 18, 20, 22, 24, 220, 244, 248, 252):
             _expect_error(RECORD, inputs=_replace_input(inputs, index, record=_flip(record, offset)))
         _expect_error(RECORD, inputs=_replace_input(inputs, index, event_name=b"wrong"))
-        for offset in (44, 76, 108, 140, 172, 180, 188, 235, 243):
+        swapped_name = vectors.CHECKPOINT_EVENT_NAMES[(index + 1) % 3]
+        _expect_error(RECORD, inputs=_replace_input(inputs, index, event_name=swapped_name))
+        for offset in (44, 76, 108, 140, 179, 187, 188, 235, 243):
             _expect_error(BINDING, inputs=_replace_input(inputs, index, record=_flip(record, offset)))
+
+
+def test_frame_count_cap_and_memory() -> None:
+    exact = VirtualFrameReader(524288)
+    _expect_error(ANCHOR, source=exact, span=exact.logical_length)
+    assert exact.prefix_reads == 524288
+    assert exact.body_reads == 524288
+    assert exact.max_request <= 192
+
+    plus_one = VirtualFrameReader(524289)
+    _expect_error(CAP, source=plus_one, span=plus_one.logical_length)
+    assert plus_one.prefix_reads == 524289
+    assert plus_one.body_reads == 524288
+    assert plus_one.frame_index == 524288
+    assert plus_one.prefix_next is False
+
+    def peak(frame_count: int) -> int:
+        reader = VirtualFrameReader(frame_count)
+        tracemalloc.start()
+        try:
+            _expect_error(ANCHOR, source=reader, span=reader.logical_length)
+            _, measured = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        return measured
+
+    short_peak = peak(8)
+    long_peak = peak(20000)
+    assert long_peak <= short_peak + 1024 * 1024
+
+
+def test_traceback_privacy() -> None:
+    exc = _expect_error(FRAME, raw=_flip(_raw(), vectors.ENTRY_OFFSETS[3] + 4 + 23))
+    forbidden = {
+        _raw(),
+        bytes.fromhex(vectors.CHALLENGE_HEX),
+        bytes.fromhex(vectors.RUN_IDENTITY_HEX),
+        bytes.fromhex(vectors.CONTROL_PLAN_ADDRESS_HEX),
+        bytes.fromhex(vectors.COMMAND_LINE_SHA256_HEX),
+        *tuple(bytes.fromhex(item) for item in vectors.CHECKPOINT_RECORD_HEX),
+    }
+    traceback = exc.__traceback__
+    product_frames = []
+    while traceback is not None:
+        if traceback.tb_frame.f_code.co_filename.endswith(
+            "conf_proc_spp_diag_trace_checkpoints.py"
+        ):
+            product_frames.append(traceback.tb_frame.f_code.co_name)
+            for value in traceback.tb_frame.f_locals.values():
+                if type(value) is bytes:
+                    assert value not in forbidden
+                    assert len(value) <= 32
+                elif type(value) is bytearray:
+                    assert len(value) == 0
+                elif callable(value):
+                    owner = getattr(value, "__self__", None)
+                    if owner is not None and hasattr(owner, "getvalue"):
+                        assert owner.getvalue() != _raw()
+                    if owner is not None and hasattr(owner, "data"):
+                        assert owner.data != _raw()
+        traceback = traceback.tb_next
+    assert product_frames == ["bind_spp_diag_trace_checkpoints", "_fail"]
 
 
 def test_static_independence() -> None:
@@ -417,6 +564,8 @@ TESTS = (
     test_header_and_expectations,
     test_framing_sequence_and_anchors,
     test_records,
+    test_frame_count_cap_and_memory,
+    test_traceback_privacy,
     test_static_independence,
 )
 
