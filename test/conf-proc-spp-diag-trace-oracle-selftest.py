@@ -392,6 +392,13 @@ def operation_return_payload(operation: int, raw_return: int) -> bytes:
     return raw
 
 
+def task_exit_payload(raw_exit: int) -> bytes:
+    raw = b"".join((be(raw_exit, 4), bytes(4)))
+    if len(raw) != 8:
+        raise AssertionError(f"task-exit payload is {len(raw)} bytes")
+    return raw
+
+
 def expect_provenance_encode(
     harness: Path, encoded: bytes, result: int = 0, capacity: int | None = None
 ) -> None:
@@ -2553,6 +2560,268 @@ def main() -> int:
         harness, operation_return_file_open, chain_b, result=2, capacity=122
     )
 
+    task_exit_zero = bytes.fromhex(
+        "0105000000000008"
+        "0000000000000000"
+        "0000000000000001"
+        "0000000000000002"
+        "0000000000000000"
+        "00010000"
+        "00000000"
+        "00000000"
+    )
+    if task_exit_zero != frame(0x0105, 0, 0, 1, 2, 0, 1, task_exit_payload(0)):
+        raise AssertionError("zero task-exit literal disagrees with prose")
+
+    task_exit_positive = bytes.fromhex(
+        "0105000000000008"
+        "ffffffffffffffff"
+        "ffffffffffffffff"
+        "0000000000000001"
+        "0000000000000000"
+        "000e0000"
+        "7fffffff"
+        "00000000"
+    )
+    if task_exit_positive != frame(
+        0x0105, 0, maximum64, maximum64, 1, 0, 14, task_exit_payload(0x7FFFFFFF)
+    ):
+        raise AssertionError("positive task-exit literal disagrees with prose")
+
+    task_exit_high = bytes.fromhex(
+        "0105000000000008"
+        "0102030405060708"
+        "0000000000000002"
+        "0000000000000003"
+        "0000000000000000"
+        "00070000"
+        "80000000"
+        "00000000"
+    )
+    if task_exit_high != frame(
+        0x0105, 0, 0x0102030405060708, 2, 3, 0, 7, task_exit_payload(0x80000000)
+    ):
+        raise AssertionError("high-bit task-exit literal disagrees with prose")
+
+    task_exit_maximum = bytes.fromhex(
+        "0105000000000008"
+        "aabbccddeeff0011"
+        "0000000000000005"
+        "ffffffffffffffff"
+        "0000000000000000"
+        "000d0000"
+        "ffffffff"
+        "00000000"
+    )
+    if task_exit_maximum != frame(
+        0x0105,
+        0,
+        0xAABBCCDDEEFF0011,
+        5,
+        maximum64,
+        0,
+        13,
+        task_exit_payload(maximum32),
+    ):
+        raise AssertionError("maximum task-exit literal disagrees with prose")
+
+    task_exit_vectors = (
+        task_exit_zero,
+        task_exit_positive,
+        task_exit_high,
+        task_exit_maximum,
+    )
+    task_exit_preimages: list[bytes] = []
+    for encoded in task_exit_vectors:
+        expect_provenance_encode(harness, encoded)
+        expect_provenance_decode(harness, encoded)
+        for previous in (zero, chain_b):
+            task_exit_preimages.append(
+                expect_provenance_preimage(harness, encoded, previous)
+            )
+
+    task_exit_negative_frames: set[bytes] = set()
+
+    for event in range(1 << 16):
+        encoded = replace(task_exit_zero, 0, be(event, 2))
+        if 0x0100 <= event <= 0x0104:
+            result = WIRE_LENGTH
+        elif event == 0x0105:
+            result = 0
+        else:
+            result = WIRE_EVENT
+        if result != 0:
+            task_exit_negative_frames.add(encoded)
+        expect_provenance_encode(harness, encoded, result)
+        expect_provenance_decode(harness, encoded, result)
+        expect_provenance_preimage(harness, encoded, zero, result)
+
+    for phase in range(1 << 16):
+        encoded = replace(task_exit_zero, 40, be(phase, 2))
+        result = 0 if 1 <= phase <= 14 else WIRE_STATE
+        if result != 0:
+            task_exit_negative_frames.add(encoded)
+        expect_provenance_encode(harness, encoded, result)
+        expect_provenance_decode(harness, encoded, result)
+        expect_provenance_preimage(harness, encoded, zero, result)
+
+    for raw_exit in (0, maximum32):
+        encoded = replace(task_exit_zero, 44, be(raw_exit, 4))
+        expect_provenance_encode(harness, encoded)
+        expect_provenance_decode(harness, encoded)
+        expect_provenance_preimage(harness, encoded, zero)
+    for bit in range(32):
+        for raw_exit in (1 << bit, maximum32 ^ (1 << bit)):
+            encoded = replace(task_exit_zero, 44, be(raw_exit, 4))
+            expect_provenance_encode(harness, encoded)
+            expect_provenance_decode(harness, encoded)
+            expect_provenance_preimage(harness, encoded, zero)
+
+    for bit in range(16):
+        encoded = replace(task_exit_zero, 2, be(1 << bit, 2))
+        task_exit_negative_frames.add(encoded)
+        expect_provenance_encode(harness, encoded, WIRE_FLAGS)
+        expect_provenance_decode(harness, encoded, WIRE_FLAGS)
+        expect_provenance_preimage(harness, encoded, zero, WIRE_FLAGS)
+    for bit in range(16):
+        encoded = replace(task_exit_zero, 42, be(1 << bit, 2))
+        task_exit_negative_frames.add(encoded)
+        expect_provenance_encode(harness, encoded, WIRE_RESERVED)
+        expect_provenance_decode(harness, encoded, WIRE_RESERVED)
+        expect_provenance_preimage(harness, encoded, zero, WIRE_RESERVED)
+    for bit in range(32):
+        encoded = replace(task_exit_zero, 48, be(1 << bit, 4))
+        task_exit_negative_frames.add(encoded)
+        expect_provenance_encode(harness, encoded, WIRE_RESERVED)
+        expect_provenance_decode(harness, encoded, WIRE_RESERVED)
+        expect_provenance_preimage(harness, encoded, zero, WIRE_RESERVED)
+
+    for task in (1, 0x0123456789ABCDEF, maximum64):
+        encoded = replace(task_exit_high, 16, be(task, 8))
+        if task == 3:
+            raise AssertionError("task boundary fixture unexpectedly equals parent")
+        expect_provenance_encode(harness, encoded)
+        expect_provenance_decode(harness, encoded)
+        expect_provenance_preimage(harness, encoded, zero)
+    for parent in (1, 0x0123456789ABCDEF, maximum64):
+        encoded = replace(task_exit_high, 24, be(parent, 8))
+        if parent == 2:
+            raise AssertionError("parent boundary fixture unexpectedly equals task")
+        expect_provenance_encode(harness, encoded)
+        expect_provenance_decode(harness, encoded)
+        expect_provenance_preimage(harness, encoded, zero)
+    for equal in (1, 0x0123456789ABCDEF, maximum64):
+        encoded = replace(replace(task_exit_zero, 16, be(equal, 8)), 24, be(equal, 8))
+        task_exit_negative_frames.add(encoded)
+        expect_provenance_encode(harness, encoded, WIRE_VALUE)
+        expect_provenance_decode(harness, encoded, WIRE_VALUE)
+        expect_provenance_preimage(harness, encoded, zero, WIRE_VALUE)
+    for bit in range(64):
+        for operation in (1 << bit, maximum64 ^ (1 << bit)):
+            if operation == 0:
+                continue
+            encoded = replace(task_exit_zero, 32, be(operation, 8))
+            task_exit_negative_frames.add(encoded)
+            expect_provenance_encode(harness, encoded, WIRE_VALUE)
+            expect_provenance_decode(harness, encoded, WIRE_VALUE)
+            expect_provenance_preimage(harness, encoded, zero, WIRE_VALUE)
+
+    sequence_task_swap = replace(
+        replace(task_exit_high, 8, task_exit_high[16:24]),
+        16,
+        task_exit_high[8:16],
+    )
+    expect_provenance_encode(harness, sequence_task_swap)
+    expect_provenance_decode(harness, sequence_task_swap)
+    expect_provenance_preimage(harness, sequence_task_swap, zero)
+    task_parent_swap = replace(
+        replace(task_exit_high, 16, task_exit_high[24:32]),
+        24,
+        task_exit_high[16:24],
+    )
+    expect_provenance_encode(harness, task_parent_swap)
+    expect_provenance_decode(harness, task_parent_swap)
+    expect_provenance_preimage(harness, task_parent_swap, zero)
+    raw_reserved_swap = replace(
+        replace(task_exit_high, 44, task_exit_high[48:52]),
+        48,
+        task_exit_high[44:48],
+    )
+    task_exit_negative_frames.add(raw_reserved_swap)
+    expect_provenance_encode(harness, raw_reserved_swap, WIRE_RESERVED)
+    expect_provenance_decode(harness, raw_reserved_swap, WIRE_RESERVED)
+    expect_provenance_preimage(harness, raw_reserved_swap, zero, WIRE_RESERVED)
+
+    task_exit_invalids: tuple[tuple[bytes, int], ...] = (
+        (replace(task_exit_zero, 0, be(0x0106, 2)), WIRE_EVENT),
+        (replace(task_exit_zero, 2, be(1, 2)), WIRE_FLAGS),
+        (replace(task_exit_zero, 4, be(1045, 4)), WIRE_CAP),
+        (replace(task_exit_zero, 4, be(7, 4)), WIRE_LENGTH),
+        (replace(task_exit_zero, 16, bytes(8)), WIRE_VALUE),
+        (replace(task_exit_zero, 24, bytes(8)), WIRE_VALUE),
+        (replace(task_exit_zero, 32, be(1, 8)), WIRE_VALUE),
+        (replace(task_exit_zero, 24, be(1, 8)), WIRE_VALUE),
+        (replace(task_exit_zero, 40, bytes(2)), WIRE_STATE),
+        (replace(task_exit_zero, 42, be(1, 2)), WIRE_RESERVED),
+        (replace(task_exit_zero, 48, be(1, 4)), WIRE_RESERVED),
+    )
+    for encoded, result in task_exit_invalids:
+        task_exit_negative_frames.add(encoded)
+        expect_provenance_decode(harness, encoded, result)
+        for capacity in (0, 51):
+            expect_provenance_encode(harness, encoded, result, capacity)
+        for capacity in (0, 114):
+            expect_provenance_preimage(harness, encoded, zero, result, capacity)
+
+    for payload_length, result in (
+        (0, WIRE_LENGTH),
+        (7, WIRE_LENGTH),
+        (9, WIRE_LENGTH),
+        (1044, WIRE_LENGTH),
+        (1045, WIRE_CAP),
+        (maximum32, WIRE_CAP),
+    ):
+        encoded = replace(task_exit_zero, 4, be(payload_length, 4))
+        task_exit_negative_frames.add(encoded)
+        expect_provenance_decode(harness, encoded, result)
+        expect_provenance_encode(harness, encoded, result)
+        expect_provenance_preimage(harness, encoded, zero, result)
+
+    for short_length in range(52):
+        encoded = task_exit_zero[:short_length]
+        task_exit_negative_frames.add(encoded)
+        expect_provenance_decode(harness, encoded, WIRE_LENGTH)
+    task_exit_suffix = task_exit_zero + b"\x00"
+    task_exit_negative_frames.add(task_exit_suffix)
+    expect_provenance_decode(harness, task_exit_suffix, WIRE_LENGTH)
+
+    task_exit_precedence: tuple[tuple[bytes, int], ...] = (
+        (replace(replace(task_exit_zero, 0, be(0x0106, 2)), 2, be(1, 2)), WIRE_EVENT),
+        (replace(replace(task_exit_zero, 2, be(1, 2)), 4, be(7, 4)), WIRE_FLAGS),
+        (replace(replace(task_exit_zero, 4, be(7, 4)), 16, bytes(8)), WIRE_LENGTH),
+        (replace(replace(task_exit_zero, 16, bytes(8)), 24, bytes(8)), WIRE_VALUE),
+        (replace(replace(task_exit_zero, 24, bytes(8)), 32, be(1, 8)), WIRE_VALUE),
+        (replace(replace(task_exit_zero, 32, be(1, 8)), 24, be(1, 8)), WIRE_VALUE),
+        (replace(replace(task_exit_zero, 24, be(1, 8)), 40, bytes(2)), WIRE_VALUE),
+        (replace(replace(task_exit_zero, 40, bytes(2)), 42, be(1, 2)), WIRE_STATE),
+        (replace(replace(task_exit_zero, 42, be(1, 2)), 48, be(1, 4)), WIRE_RESERVED),
+    )
+    for index, (encoded, result) in enumerate(task_exit_precedence, start=1):
+        task_exit_negative_frames.add(encoded)
+        try:
+            expect_provenance_decode(harness, encoded, result)
+            expect_provenance_encode(harness, encoded, result)
+            expect_provenance_preimage(harness, encoded, zero, result)
+        except AssertionError as error:
+            raise AssertionError(f"task-exit precedence vector {index}: {error}") from error
+
+    task_exit_decode_only_precedence = replace(task_exit_suffix, 16, bytes(8))
+    task_exit_negative_frames.add(task_exit_decode_only_precedence)
+    expect_provenance_decode(harness, task_exit_decode_only_precedence, WIRE_LENGTH)
+
+    expect_provenance_encode(harness, task_exit_zero, result=2, capacity=51)
+    expect_provenance_preimage(harness, task_exit_zero, chain_b, result=2, capacity=114)
+
     provenance_digest = hashlib.sha256(b"".join(provenance_vectors)).hexdigest()
     provenance_preimage_digest = hashlib.sha256(
         b"".join(provenance_preimages)
@@ -2572,6 +2841,10 @@ def main() -> int:
     ).hexdigest()
     operation_return_preimage_digest = hashlib.sha256(
         b"".join(operation_return_preimages)
+    ).hexdigest()
+    task_exit_digest = hashlib.sha256(b"".join(task_exit_vectors)).hexdigest()
+    task_exit_preimage_digest = hashlib.sha256(
+        b"".join(task_exit_preimages)
     ).hexdigest()
 
     print(
@@ -2603,7 +2876,12 @@ def main() -> int:
         f"operation_return_vector_set_sha256={operation_return_digest} "
         f"operation_return_preimages={len(operation_return_preimages)} "
         f"operation_return_preimage_set_sha256={operation_return_preimage_digest} "
-        f"operation_return_negative_frames={len(operation_return_negative_frames)}"
+        f"operation_return_negative_frames={len(operation_return_negative_frames)} "
+        f"task_exit_vectors={len(task_exit_vectors)} "
+        f"task_exit_vector_set_sha256={task_exit_digest} "
+        f"task_exit_preimages={len(task_exit_preimages)} "
+        f"task_exit_preimage_set_sha256={task_exit_preimage_digest} "
+        f"task_exit_negative_frames={len(task_exit_negative_frames)}"
     )
     return 0
 
