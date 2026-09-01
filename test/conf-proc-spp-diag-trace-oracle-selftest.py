@@ -2499,10 +2499,6 @@ def main() -> int:
             WIRE_LENGTH,
         ),
         (
-            replace(operation_return_suffix, 16, bytes(8)),
-            WIRE_LENGTH,
-        ),
-        (
             replace(replace(operation_return_file_open, 16, bytes(8)), 24, be(1, 8)),
             WIRE_VALUE,
         ),
@@ -2541,6 +2537,14 @@ def main() -> int:
             raise AssertionError(
                 f"operation-return precedence vector {index}: {error}"
             ) from error
+
+    operation_return_decode_only_precedence = replace(
+        operation_return_suffix, 16, bytes(8)
+    )
+    operation_return_negative_frames.add(operation_return_decode_only_precedence)
+    expect_provenance_decode(
+        harness, operation_return_decode_only_precedence, WIRE_LENGTH
+    )
 
     expect_provenance_encode(
         harness, operation_return_file_open, result=2, capacity=59
