@@ -61,6 +61,15 @@ _Static_assert(SPP_DIAG_TRACE_IMA_SIZE == 256, "IMA wire size");
 _Static_assert(SPP_DIAG_TRACE_IMA_LABEL_LEN == 18, "IMA label length");
 _Static_assert(SPP_DIAG_TRACE_SOURCE_COMMIT_LEN == 20, "source-commit length");
 
+/*
+ * Structural byte codec only: WIRE_OK does not establish transcript order,
+ * cross-object identity, IMA/PCR extension, attestation, or qualification.
+ *
+ * Every API requires its input, output/result, and metadata ranges to be
+ * non-overlapping. Overlap is caller error with undefined behavior; this
+ * portable reference does not attempt pointer-range detection.
+ */
+
 extern const uint8_t SPP_DIAG_TRACE_SOURCE_COMMIT[SPP_DIAG_TRACE_SOURCE_COMMIT_LEN];
 extern const uint8_t SPP_DIAG_TRACE_IMA_LABEL[SPP_DIAG_TRACE_IMA_LABEL_LEN];
 
