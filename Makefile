@@ -8,6 +8,7 @@ SPP_DIAG_TRACE_ORACLE_HARNESS := test/conf-proc-spp-diag-trace-oracle-harness.c
 SPP_DIAG_TRACE_FRAME_TEST := test/conf-proc-spp-diag-trace-frame-selftest.c
 SPP_DIAG_TRACE_STREAM_TEST := test/conf-proc-spp-diag-trace-stream-selftest.c
 SPP_DIAG_TRACE_PROVENANCE_TEST := test/conf-proc-spp-diag-trace-provenance-selftest.c
+SPP_DIAG_TRACE_FILE_POLICY_TEST := test/conf-proc-spp-diag-trace-file-policy-decision-selftest.c
 
 .PHONY: install check test ci clean ratls-contract test-spp-diag-trace test-spp-diag-trace-oracle test-spp-diag-trace-sanitized
 
@@ -89,6 +90,9 @@ test-spp-diag-trace:
 	$(CC) $(C11FLAGS) $(SPP_DIAG_TRACE_SRC) $(SPP_DIAG_TRACE_PROVENANCE_TEST) -o build/spp-diag-trace-provenance-selftest
 	./build/spp-diag-trace-provenance-selftest
 	rm -f build/spp-diag-trace-selftest build/spp-diag-trace-provenance-selftest
+	$(CC) $(C11FLAGS) $(SPP_DIAG_TRACE_SRC) $(SPP_DIAG_TRACE_FILE_POLICY_TEST) -o build/spp-diag-trace-file-policy-decision-selftest
+	./build/spp-diag-trace-file-policy-decision-selftest
+	rm -f build/spp-diag-trace-file-policy-decision-selftest
 
 test-spp-diag-trace-oracle:
 	mkdir -p build
@@ -103,6 +107,9 @@ test-spp-diag-trace-sanitized:
 	$(CC) $(C11FLAGS) -fsanitize=address,undefined -g -fno-sanitize-recover=undefined $(SPP_DIAG_TRACE_SRC) $(SPP_DIAG_TRACE_PROVENANCE_TEST) -o build/spp-diag-trace-provenance-selftest-sanitized
 	./build/spp-diag-trace-provenance-selftest-sanitized
 	rm -f build/spp-diag-trace-selftest-sanitized build/spp-diag-trace-provenance-selftest-sanitized
+	$(CC) $(C11FLAGS) -fsanitize=address,undefined -g -fno-sanitize-recover=undefined $(SPP_DIAG_TRACE_SRC) $(SPP_DIAG_TRACE_FILE_POLICY_TEST) -o build/spp-diag-trace-file-policy-decision-selftest-sanitized
+	./build/spp-diag-trace-file-policy-decision-selftest-sanitized
+	rm -f build/spp-diag-trace-file-policy-decision-selftest-sanitized
 
 ci: check test test-spp-diag-trace test-spp-diag-trace-oracle test-spp-diag-trace-sanitized
 	rm -rf build

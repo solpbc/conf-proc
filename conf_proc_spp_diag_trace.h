@@ -106,6 +106,14 @@ enum spp_diag_trace_result {
 #define SPP_DIAG_TRACE_FILE_OPEN_ATTEMPT_PREFIX_SIZE 16u
 #define SPP_DIAG_TRACE_FILE_OPEN_ATTEMPT_MIN_PAYLOAD 17u
 #define SPP_DIAG_TRACE_FILE_OPEN_ATTEMPT_MAX_PAYLOAD 1040u
+#define SPP_DIAG_TRACE_PROVENANCE_EVENT_FILE_POLICY_DECISION 0x0101u
+#define SPP_DIAG_TRACE_POLICY_ALLOW 1u
+#define SPP_DIAG_TRACE_POLICY_DENY 2u
+#define SPP_DIAG_TRACE_FILE_OBJECT_REGULAR 1u
+#define SPP_DIAG_TRACE_FILE_OBJECT_DIRECTORY 2u
+#define SPP_DIAG_TRACE_FILE_OBJECT_MEMFD 3u
+#define SPP_DIAG_TRACE_FILE_OBJECT_OTHER 4u
+#define SPP_DIAG_TRACE_FILE_POLICY_DECISION_PAYLOAD_SIZE 48u
 
 _Static_assert(SPP_DIAG_TRACE_HEADER_SIZE == 192, "header wire size");
 _Static_assert(SPP_DIAG_TRACE_PREIMAGE_SIZE == 224, "preimage size");
@@ -130,6 +138,14 @@ _Static_assert(SPP_DIAG_TRACE_FRAME_PREIMAGE_DOMAIN_LEN + SPP_DIAG_TRACE_CHAIN_L
                        4 + SPP_DIAG_TRACE_MAX_FRAME_BYTES ==
                    SPP_DIAG_TRACE_FRAME_PREIMAGE_MAX_SIZE,
                "max frame preimage size");
+_Static_assert(SPP_DIAG_TRACE_FILE_POLICY_DECISION_PAYLOAD_SIZE == 48,
+               "file-policy-decision payload size");
+_Static_assert(SPP_DIAG_TRACE_FRAME_HEADER_SIZE +
+                   SPP_DIAG_TRACE_FILE_POLICY_DECISION_PAYLOAD_SIZE == 92,
+               "file-policy-decision frame size");
+_Static_assert(SPP_DIAG_TRACE_FRAME_PREIMAGE_DOMAIN_LEN + SPP_DIAG_TRACE_CHAIN_LEN +
+                       4 + 92 == 155,
+               "file-policy-decision preimage size");
 _Static_assert(SPP_DIAG_TRACE_STREAM_PREFIX_SIZE == 4, "stream prefix size");
 _Static_assert(SPP_DIAG_TRACE_STREAM_HEADER_ENTRY_SIZE == 196,
                "stream header entry size");
@@ -259,9 +275,9 @@ int spp_diag_trace_frame_preimage(const struct spp_diag_trace_frame *in,
 
 /*
  * Structural provenance-frame codec only: WIRE_OK means one standalone
- * file-open-attempt frame is locally well formed. It does not establish
- * that an attempt occurred, kernel authorship, stream membership, IMA,
- * attestation, or qualification.
+ * file-open-attempt or file-policy-decision frame is locally well formed.
+ * It does not establish that an attempt or decision occurred, kernel
+ * authorship, stream membership, IMA, attestation, or qualification.
  *
  * Every API requires its input, output/result, previous-chain, and metadata
  * ranges to be non-overlapping. Overlap is caller error with undefined

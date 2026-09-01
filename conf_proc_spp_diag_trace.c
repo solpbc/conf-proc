@@ -1187,8 +1187,13 @@ int spp_diag_trace_frame_preimage(const struct spp_diag_trace_frame *in,
 
 static int provenance_event_check(uint16_t event)
 {
-    return event == SPP_DIAG_TRACE_PROVENANCE_EVENT_FILE_OPEN_ATTEMPT ? WIRE_OK
-                                                                     : WIRE_EVENT;
+    switch (event) {
+    case SPP_DIAG_TRACE_PROVENANCE_EVENT_FILE_OPEN_ATTEMPT:
+    case SPP_DIAG_TRACE_PROVENANCE_EVENT_FILE_POLICY_DECISION:
+        return WIRE_OK;
+    default:
+        return WIRE_EVENT;
+    }
 }
 
 static int provenance_flags_check(uint16_t flags)
@@ -1196,16 +1201,24 @@ static int provenance_flags_check(uint16_t flags)
     return flags == 0 ? WIRE_OK : WIRE_FLAGS;
 }
 
-static int provenance_payload_length_check(uint32_t n)
+static int provenance_payload_length_check(uint16_t event, uint32_t n)
 {
     if (n > SPP_DIAG_TRACE_MAX_PAYLOAD_BYTES) {
         return WIRE_CAP;
     }
-    if (n < SPP_DIAG_TRACE_FILE_OPEN_ATTEMPT_MIN_PAYLOAD ||
-        n > SPP_DIAG_TRACE_FILE_OPEN_ATTEMPT_MAX_PAYLOAD) {
-        return WIRE_LENGTH;
+    switch (event) {
+    case SPP_DIAG_TRACE_PROVENANCE_EVENT_FILE_OPEN_ATTEMPT:
+        if (n < SPP_DIAG_TRACE_FILE_OPEN_ATTEMPT_MIN_PAYLOAD ||
+            n > SPP_DIAG_TRACE_FILE_OPEN_ATTEMPT_MAX_PAYLOAD) {
+            return WIRE_LENGTH;
+        }
+        return WIRE_OK;
+    case SPP_DIAG_TRACE_PROVENANCE_EVENT_FILE_POLICY_DECISION:
+        return n == SPP_DIAG_TRACE_FILE_POLICY_DECISION_PAYLOAD_SIZE ? WIRE_OK
+                                                                    : WIRE_LENGTH;
+    default:
+        return WIRE_EVENT;
     }
-    return WIRE_OK;
 }
 
 static int provenance_task_check(uint64_t task)
@@ -1243,7 +1256,7 @@ static int provenance_header_fields(const struct spp_diag_trace_frame *f)
     if (err != WIRE_OK) {
         return err;
     }
-    err = provenance_payload_length_check(f->payload_length);
+    err = provenance_payload_length_check(f->event_type, f->payload_length);
     if (err != WIRE_OK) {
         return err;
     }
@@ -1266,43 +1279,114 @@ static int provenance_header_fields(const struct spp_diag_trace_frame *f)
     return frame_reserved_check(f->reserved);
 }
 
-static int provenance_payload_check(const uint8_t *p, uint32_t n)
+static int payload_file_policy_decision(const uint8_t *p, uint32_t n)
 {
-    uint16_t action;
-    uint16_t path_len;
     uint16_t access;
-    uint16_t modifier;
-    uint32_t dirfd_bits;
-    uint32_t reserved;
-    int err;
+    uint16_t modifiers;
+    uint16_t decision;
+    uint16_t object_kind;
+    uint32_t result;
+    uint32_t fs_magic;
+    uint32_t dev_major;
+    uint32_t dev_minor;
+    uint64_t inode;
+    uint64_t mount_identity;
+    uint64_t observed_size;
 
-    action = load_u16be(p + 0);
-    if (action != 1u) {
-        return WIRE_STATE;
-    }
-    path_len = load_u16be(p + 2);
-    err = frame_path_len_check(path_len, n,
-                               SPP_DIAG_TRACE_FILE_OPEN_ATTEMPT_PREFIX_SIZE);
-    if (err != WIRE_OK) {
-        return err;
-    }
-    access = load_u16be(p + 4);
+    (void)n;
+    access = load_u16be(p + 0);
     if (access < SPP_DIAG_TRACE_FILE_ACCESS_READ ||
         access > SPP_DIAG_TRACE_FILE_ACCESS_PATH_ONLY) {
         return WIRE_STATE;
     }
-    modifier = load_u16be(p + 6);
-    if ((modifier & ~(uint32_t)SPP_DIAG_TRACE_FILE_MOD_MASK) != 0) {
+    modifiers = load_u16be(p + 2);
+    if ((modifiers & ~(uint32_t)SPP_DIAG_TRACE_FILE_MOD_MASK) != 0) {
         return WIRE_FLAGS;
     }
-    /* dirfd: opaque 32-bit two's-complement bits, every pattern valid, never checked or cast to signed */
-    dirfd_bits = load_u32be(p + 8);
-    (void)dirfd_bits;
-    reserved = load_u32be(p + 12);
-    if (reserved != 0) {
-        return WIRE_RESERVED;
+    decision = load_u16be(p + 4);
+    if (decision != SPP_DIAG_TRACE_POLICY_ALLOW &&
+        decision != SPP_DIAG_TRACE_POLICY_DENY) {
+        return WIRE_STATE;
     }
-    return frame_path_content_check(p + 16, path_len);
+    object_kind = load_u16be(p + 6);
+    if (object_kind < SPP_DIAG_TRACE_FILE_OBJECT_REGULAR ||
+        object_kind > SPP_DIAG_TRACE_FILE_OBJECT_OTHER) {
+        return WIRE_STATE;
+    }
+    result = load_u32be(p + 8);
+    if (decision == SPP_DIAG_TRACE_POLICY_ALLOW) {
+        if (result != 0u) {
+            return WIRE_VALUE;
+        }
+    } else if (decision == SPP_DIAG_TRACE_POLICY_DENY) {
+        if ((result & 0x80000000u) == 0u) {
+            return WIRE_VALUE;
+        }
+    }
+    fs_magic = load_u32be(p + 12);
+    (void)fs_magic;
+    dev_major = load_u32be(p + 16);
+    (void)dev_major;
+    dev_minor = load_u32be(p + 20);
+    (void)dev_minor;
+    inode = load_u64be(p + 24);
+    if (inode == 0) {
+        return WIRE_VALUE;
+    }
+    mount_identity = load_u64be(p + 32);
+    if (mount_identity == 0) {
+        return WIRE_VALUE;
+    }
+    observed_size = load_u64be(p + 40);
+    (void)observed_size;
+    return WIRE_OK;
+}
+
+static int provenance_payload_check(uint16_t event, const uint8_t *p, uint32_t n)
+{
+    switch (event) {
+    case SPP_DIAG_TRACE_PROVENANCE_EVENT_FILE_OPEN_ATTEMPT: {
+        uint16_t action;
+        uint16_t path_len;
+        uint16_t access;
+        uint16_t modifier;
+        uint32_t dirfd_bits;
+        uint32_t reserved;
+        int err;
+
+        action = load_u16be(p + 0);
+        if (action != 1u) {
+            return WIRE_STATE;
+        }
+        path_len = load_u16be(p + 2);
+        err = frame_path_len_check(path_len, n,
+                                   SPP_DIAG_TRACE_FILE_OPEN_ATTEMPT_PREFIX_SIZE);
+        if (err != WIRE_OK) {
+            return err;
+        }
+        access = load_u16be(p + 4);
+        if (access < SPP_DIAG_TRACE_FILE_ACCESS_READ ||
+            access > SPP_DIAG_TRACE_FILE_ACCESS_PATH_ONLY) {
+            return WIRE_STATE;
+        }
+        modifier = load_u16be(p + 6);
+        if ((modifier & ~(uint32_t)SPP_DIAG_TRACE_FILE_MOD_MASK) != 0) {
+            return WIRE_FLAGS;
+        }
+        /* dirfd: opaque 32-bit two's-complement bits, every pattern valid, never checked or cast to signed */
+        dirfd_bits = load_u32be(p + 8);
+        (void)dirfd_bits;
+        reserved = load_u32be(p + 12);
+        if (reserved != 0) {
+            return WIRE_RESERVED;
+        }
+        return frame_path_content_check(p + 16, path_len);
+    }
+    case SPP_DIAG_TRACE_PROVENANCE_EVENT_FILE_POLICY_DECISION:
+        return payload_file_policy_decision(p, n);
+    default:
+        return WIRE_EVENT;
+    }
 }
 
 static int provenance_fields(const struct spp_diag_trace_frame *f)
@@ -1313,7 +1397,7 @@ static int provenance_fields(const struct spp_diag_trace_frame *f)
     if (err != WIRE_OK) {
         return err;
     }
-    return provenance_payload_check(f->payload, f->payload_length);
+    return provenance_payload_check(f->event_type, f->payload, f->payload_length);
 }
 
 int spp_diag_trace_provenance_frame_encode(
@@ -1388,7 +1472,7 @@ int spp_diag_trace_provenance_frame_decode(const uint8_t *in, size_t len,
         return err;
     }
     plen = load_u32be(in + 4);
-    err = provenance_payload_length_check(plen);
+    err = provenance_payload_length_check(event, plen);
     if (err != WIRE_OK) {
         *consumed = 0;
         return err;
@@ -1428,7 +1512,7 @@ int spp_diag_trace_provenance_frame_decode(const uint8_t *in, size_t len,
         *consumed = 0;
         return err;
     }
-    err = provenance_payload_check(in + 44, plen);
+    err = provenance_payload_check(event, in + 44, plen);
     if (err != WIRE_OK) {
         *consumed = 0;
         return err;
