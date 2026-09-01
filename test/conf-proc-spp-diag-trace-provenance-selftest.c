@@ -1331,6 +1331,7 @@ static int test_precedence(void)
     for (plen = 1041; plen <= 1044; plen++) {
         f = k_min_f;
         f.payload_length = plen;
+        store16(f.payload + 2, (uint16_t)(plen - 16u));
         CALL(api_fail_struct(&f, WIRE_LENGTH, NULL, 0));
     }
     f = k_min_f;
@@ -1653,7 +1654,7 @@ static int test_nulls(void)
     return 0;
 }
 
-int run_spp_diag_trace_provenance_tests(void)
+int main(void)
 {
     init_vectors();
     if (test_compatibility() != 0) {

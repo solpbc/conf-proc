@@ -1739,7 +1739,6 @@ static int test_null_pointers(void)
 
 int run_spp_diag_trace_frame_tests(void);
 int run_spp_diag_trace_stream_tests(void);
-int run_spp_diag_trace_provenance_tests(void);
 
 int main(void)
 {
@@ -1789,9 +1788,6 @@ int main(void)
         return 1;
     }
     if (run_spp_diag_trace_stream_tests() != 0) {
-        return 1;
-    }
-    if (run_spp_diag_trace_provenance_tests() != 0) {
         return 1;
     }
     return 0;

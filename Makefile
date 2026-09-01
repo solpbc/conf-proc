@@ -84,9 +84,11 @@ test:
 
 test-spp-diag-trace:
 	mkdir -p build
-	$(CC) $(C11FLAGS) $(SPP_DIAG_TRACE_SRC) $(SPP_DIAG_TRACE_TEST) $(SPP_DIAG_TRACE_FRAME_TEST) $(SPP_DIAG_TRACE_STREAM_TEST) $(SPP_DIAG_TRACE_PROVENANCE_TEST) -o build/spp-diag-trace-selftest
+	$(CC) $(C11FLAGS) $(SPP_DIAG_TRACE_SRC) $(SPP_DIAG_TRACE_TEST) $(SPP_DIAG_TRACE_FRAME_TEST) $(SPP_DIAG_TRACE_STREAM_TEST) -o build/spp-diag-trace-selftest
 	./build/spp-diag-trace-selftest
-	rm -f build/spp-diag-trace-selftest
+	$(CC) $(C11FLAGS) $(SPP_DIAG_TRACE_SRC) $(SPP_DIAG_TRACE_PROVENANCE_TEST) -o build/spp-diag-trace-provenance-selftest
+	./build/spp-diag-trace-provenance-selftest
+	rm -f build/spp-diag-trace-selftest build/spp-diag-trace-provenance-selftest
 
 test-spp-diag-trace-oracle:
 	mkdir -p build
@@ -96,9 +98,11 @@ test-spp-diag-trace-oracle:
 
 test-spp-diag-trace-sanitized:
 	mkdir -p build
-	$(CC) $(C11FLAGS) -fsanitize=address,undefined -g -fno-sanitize-recover=undefined $(SPP_DIAG_TRACE_SRC) $(SPP_DIAG_TRACE_TEST) $(SPP_DIAG_TRACE_FRAME_TEST) $(SPP_DIAG_TRACE_STREAM_TEST) $(SPP_DIAG_TRACE_PROVENANCE_TEST) -o build/spp-diag-trace-selftest-sanitized
+	$(CC) $(C11FLAGS) -fsanitize=address,undefined -g -fno-sanitize-recover=undefined $(SPP_DIAG_TRACE_SRC) $(SPP_DIAG_TRACE_TEST) $(SPP_DIAG_TRACE_FRAME_TEST) $(SPP_DIAG_TRACE_STREAM_TEST) -o build/spp-diag-trace-selftest-sanitized
 	./build/spp-diag-trace-selftest-sanitized
-	rm -f build/spp-diag-trace-selftest-sanitized
+	$(CC) $(C11FLAGS) -fsanitize=address,undefined -g -fno-sanitize-recover=undefined $(SPP_DIAG_TRACE_SRC) $(SPP_DIAG_TRACE_PROVENANCE_TEST) -o build/spp-diag-trace-provenance-selftest-sanitized
+	./build/spp-diag-trace-provenance-selftest-sanitized
+	rm -f build/spp-diag-trace-selftest-sanitized build/spp-diag-trace-provenance-selftest-sanitized
 
 ci: check test test-spp-diag-trace test-spp-diag-trace-oracle test-spp-diag-trace-sanitized
 	rm -rf build

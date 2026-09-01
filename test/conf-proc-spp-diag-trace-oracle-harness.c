@@ -351,6 +351,147 @@ static int frame_preimage(const char *frame_text, const char *chain_text)
     return print_encode(result, written, required, encoded);
 }
 
+static uint16_t load_be16(const uint8_t *bytes)
+{
+    return (uint16_t)(((uint16_t)bytes[0] << 8) | (uint16_t)bytes[1]);
+}
+
+static uint32_t load_be32(const uint8_t *bytes)
+{
+    return ((uint32_t)bytes[0] << 24) | ((uint32_t)bytes[1] << 16) |
+           ((uint32_t)bytes[2] << 8) | (uint32_t)bytes[3];
+}
+
+static uint64_t load_be64(const uint8_t *bytes)
+{
+    return ((uint64_t)load_be32(bytes) << 32) | load_be32(bytes + 4);
+}
+
+static int load_provenance_object(const char *text,
+                                  struct spp_diag_trace_frame *object)
+{
+    uint8_t raw[SPP_DIAG_TRACE_MAX_FRAME_BYTES];
+    size_t raw_len = 0;
+    size_t payload_available;
+    size_t payload_copy;
+
+    if (!parse_frame_hex(text, raw, &raw_len) || raw_len < 44u)
+        return 0;
+    memset(object, 0, sizeof(*object));
+    object->event_type = load_be16(raw);
+    object->flags = load_be16(raw + 2);
+    object->payload_length = load_be32(raw + 4);
+    object->sequence = load_be64(raw + 8);
+    object->task_ordinal = load_be64(raw + 16);
+    object->parent_task_ordinal = load_be64(raw + 24);
+    object->operation_ordinal = load_be64(raw + 32);
+    object->phase = load_be16(raw + 40);
+    object->reserved = load_be16(raw + 42);
+    payload_available = raw_len - 44u;
+    payload_copy = payload_available < sizeof(object->payload)
+                       ? payload_available
+                       : sizeof(object->payload);
+    memcpy(object->payload, raw + 44, payload_copy);
+    return 1;
+}
+
+static int parse_capacity(const char *text, size_t maximum, size_t *capacity)
+{
+    size_t parsed = 0;
+    char trailing = '\0';
+
+    if (sscanf(text, "%zu%c", &parsed, &trailing) != 1 || parsed > maximum)
+        return 0;
+    *capacity = parsed;
+    return 1;
+}
+
+static int provenance_encode(const char *text, const char *capacity_text)
+{
+    struct spp_diag_trace_frame object;
+    uint8_t encoded[SPP_DIAG_TRACE_MAX_FRAME_BYTES];
+    uint8_t before[SPP_DIAG_TRACE_MAX_FRAME_BYTES];
+    size_t capacity = 0;
+    size_t written = 777u;
+    size_t required = 888u;
+    int result;
+
+    if (!load_provenance_object(text, &object) ||
+        !parse_capacity(capacity_text, sizeof(encoded), &capacity))
+        return 2;
+    memset(encoded, 0xa5, sizeof(encoded));
+    memcpy(before, encoded, sizeof(before));
+    result = spp_diag_trace_provenance_frame_encode(
+        &object, encoded, capacity, &written, &required);
+    printf("%d\t%zu\t%zu\t%d\t", result, written, required,
+           memcmp(encoded, before, sizeof(encoded)) == 0);
+    if (result == WIRE_OK)
+        print_hex(encoded, written);
+    putchar('\n');
+    return 0;
+}
+
+static int provenance_decode(const char *text)
+{
+    struct spp_diag_trace_frame object;
+    struct spp_diag_trace_frame before;
+    uint8_t raw[SPP_DIAG_TRACE_MAX_FRAME_BYTES];
+    size_t raw_len = 0;
+    size_t consumed = 777u;
+    int result;
+
+    if (!parse_frame_hex(text, raw, &raw_len))
+        return 2;
+    memset(&object, 0xa5, sizeof(object));
+    memcpy(&before, &object, sizeof(before));
+    result = spp_diag_trace_provenance_frame_decode(raw, raw_len, &object,
+                                                     &consumed);
+    printf("%d\t%zu\t%d", result, consumed,
+           memcmp(&object, &before, sizeof(object)) == 0);
+    if (result == WIRE_OK) {
+        printf("\t%u\t%u\t%" PRIu32 "\t%" PRIu64 "\t%" PRIu64
+               "\t%" PRIu64 "\t%" PRIu64 "\t%u\t",
+               (unsigned)object.event_type, (unsigned)object.flags,
+               object.payload_length, object.sequence, object.task_ordinal,
+               object.parent_task_ordinal, object.operation_ordinal,
+               (unsigned)object.phase);
+        print_hex(object.payload, object.payload_length);
+        putchar('\t');
+        print_hex(object.payload + object.payload_length,
+                  sizeof(object.payload) - object.payload_length);
+    }
+    putchar('\n');
+    return 0;
+}
+
+static int provenance_preimage(const char *frame_text, const char *chain_text,
+                               const char *capacity_text)
+{
+    struct spp_diag_trace_frame object;
+    uint8_t chain[SPP_DIAG_TRACE_CHAIN_LEN];
+    uint8_t encoded[SPP_DIAG_TRACE_FRAME_PREIMAGE_MAX_SIZE];
+    uint8_t before[SPP_DIAG_TRACE_FRAME_PREIMAGE_MAX_SIZE];
+    size_t capacity = 0;
+    size_t written = 777u;
+    size_t required = 888u;
+    int result;
+
+    if (!load_provenance_object(frame_text, &object) ||
+        !parse_hex(chain_text, chain, sizeof(chain)) ||
+        !parse_capacity(capacity_text, sizeof(encoded), &capacity))
+        return 2;
+    memset(encoded, 0xa5, sizeof(encoded));
+    memcpy(before, encoded, sizeof(before));
+    result = spp_diag_trace_provenance_frame_preimage(
+        &object, chain, encoded, capacity, &written, &required);
+    printf("%d\t%zu\t%zu\t%d\t", result, written, required,
+           memcmp(encoded, before, sizeof(encoded)) == 0);
+    if (result == WIRE_OK)
+        print_hex(encoded, written);
+    putchar('\n');
+    return 0;
+}
+
 static int stream_validate(const char *text)
 {
     struct spp_diag_trace_stream_summary summary = {
@@ -396,6 +537,12 @@ int main(int argc, char **argv)
         return frame_decode(argv[2]);
     if (argc == 4 && strcmp(argv[1], "frame-preimage") == 0)
         return frame_preimage(argv[2], argv[3]);
+    if (argc == 4 && strcmp(argv[1], "provenance-encode") == 0)
+        return provenance_encode(argv[2], argv[3]);
+    if (argc == 3 && strcmp(argv[1], "provenance-decode") == 0)
+        return provenance_decode(argv[2]);
+    if (argc == 5 && strcmp(argv[1], "provenance-preimage") == 0)
+        return provenance_preimage(argv[2], argv[3], argv[4]);
     if (argc == 3 && strcmp(argv[1], "stream-validate") == 0)
         return stream_validate(argv[2]);
     fputs("usage: trace-oracle-harness OP [HEX ...]\n", stderr);
