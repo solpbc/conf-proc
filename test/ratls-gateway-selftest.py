@@ -24,6 +24,51 @@ from cryptography import x509
 from OpenSSL import SSL, crypto
 
 
+def _require_ec_capable_pyopenssl() -> None:
+    """Fail fast, with one clear message, instead of 16 cryptic per-test
+    SSL EOF errors.
+
+    Every live-handshake test in this file depends on the gateway's server
+    process generating an EC key (`ratls_gateway.py`'s `_tls_context`) and
+    converting it via `OpenSSL.crypto.PKey.from_cryptography_key()`. That
+    conversion only accepts RSA/DSA keys before pyOpenSSL 23.3 and raises
+    `TypeError: Unsupported key type` for EC keys, which the gateway's
+    handler (by design, so collector/evidence diagnostics never reach the
+    log) reports only as `reason=internal_error` -- the client then sees a
+    bare `SSL routines: unexpected eof while reading` with no indication
+    the cause is version skew, not TLS/port/hardware contention.
+
+    This repo's own requirements.txt already pins `pyOpenSSL>=23.2,<27`;
+    a bare system interpreter (no project `.venv`, and on the spp-engine
+    box specifically, not the deployed service's `gwenv`) commonly carries
+    an older distro-packaged pyOpenSSL instead. Verified 2026-09-01: distro
+    pyOpenSSL 21.0.0 fails every RoutedRelayTest/RatlsGatewayTest live
+    handshake this way; `gwenv`'s pinned pyOpenSSL 26.2.0 passes all 28.
+    """
+    try:
+        major, minor = (int(part) for part in OpenSSL_version.split(".")[:2])
+    except (ValueError, IndexError):
+        return
+    if (major, minor) < (23, 2):
+        raise RuntimeError(
+            f"pyOpenSSL {OpenSSL_version} lacks EC key support in "
+            "PKey.from_cryptography_key() (added 23.3; this repo pins "
+            ">=23.2,<27 in requirements.txt) -- every live RA-TLS handshake "
+            "test below will fail with a misleading 'unexpected eof while "
+            "reading'. Run this suite with the project's pinned "
+            "interpreter, e.g. `.venv/bin/python` per README.md's "
+            "Development section, or (on a host already running the "
+            "deployed service) its service venv -- not the bare system "
+            "python3."
+        )
+
+
+import OpenSSL as _OpenSSL_module  # noqa: E402
+
+OpenSSL_version = _OpenSSL_module.__version__
+_require_ec_capable_pyopenssl()
+
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
