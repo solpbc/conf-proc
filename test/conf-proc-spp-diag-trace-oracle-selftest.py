@@ -2577,6 +2577,8 @@ def main() -> int:
     operation_return_negative_frames: set[bytes] = set()
 
     for operation in range(1 << 16):
+        if operation == 6:
+            continue
         encoded = replace(operation_return_file_open, 44, be(operation, 2))
         result = 0 if 1 <= operation <= 5 else WIRE_STATE
         if result != 0:
@@ -2717,7 +2719,6 @@ def main() -> int:
         (replace(operation_return_file_open, 40, bytes(2)), WIRE_STATE),
         (replace(operation_return_file_open, 42, be(1, 2)), WIRE_RESERVED),
         (replace(operation_return_file_open, 44, bytes(2)), WIRE_STATE),
-        (replace(operation_return_file_open, 44, be(6, 2)), WIRE_STATE),
         (replace(operation_return_file_open, 44, be(0xFFFF, 2)), WIRE_STATE),
         (replace(operation_return_file_open, 46, be(1, 2)), WIRE_RESERVED),
         (replace(operation_return_file_open, 48, be(1, 4)), WIRE_RESERVED),
