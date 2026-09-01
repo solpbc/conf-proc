@@ -338,6 +338,53 @@ def mapping_policy_payload(
     return raw
 
 
+def network_policy_payload(
+    operation: int,
+    decision: int,
+    endpoint_kind: int,
+    endpoint_source: int,
+    socket_kind: int,
+    protocol: int,
+    observed_family: int,
+    address_length: int,
+    raw_result: int,
+    message_flags: int,
+    message_size: int,
+    socket_cookie: int,
+    port: int,
+    reserved: int,
+    scope_id: int,
+    flow_information: int,
+    address: bytes,
+) -> bytes:
+    if len(address) != 16:
+        raise AssertionError("network-policy address must be 16 bytes")
+    raw = b"".join(
+        (
+            be(operation, 2),
+            be(decision, 2),
+            be(endpoint_kind, 2),
+            be(endpoint_source, 2),
+            be(socket_kind, 2),
+            be(protocol, 2),
+            be(observed_family, 2),
+            be(address_length, 2),
+            be(raw_result, 4),
+            be(message_flags, 4),
+            be(message_size, 4),
+            be(socket_cookie, 8),
+            be(port, 2),
+            be(reserved, 2),
+            be(scope_id, 4),
+            be(flow_information, 4),
+            address,
+        )
+    )
+    if len(raw) != 64:
+        raise AssertionError(f"network-policy payload is {len(raw)} bytes")
+    return raw
+
+
 def expect_provenance_encode(
     harness: Path, encoded: bytes, result: int = 0, capacity: int | None = None
 ) -> None:
@@ -1649,6 +1696,482 @@ def main() -> int:
         expect_provenance_encode(harness, encoded, WIRE_EVENT)
         expect_provenance_preimage(harness, encoded, zero, WIRE_EVENT)
 
+    network_ipv4_literal = bytes.fromhex(
+        "0103000000000040"
+        "0fedcba987654321"
+        "0102030405060708"
+        "0000000000000000"
+        "8877665544332211"
+        "00030000"
+        "0001000200010001"
+        "0001000600020010"
+        "fffffffb00000000"
+        "00000000"
+        "1122334455667788"
+        "01bb0000"
+        "0000000000000000"
+        "000000000000000000000000cb007107"
+    )
+    if network_ipv4_literal != frame(
+        0x0103,
+        0,
+        0x0FEDCBA987654321,
+        0x0102030405060708,
+        0,
+        0x8877665544332211,
+        3,
+        network_policy_payload(
+            1,
+            2,
+            1,
+            1,
+            1,
+            6,
+            2,
+            16,
+            0xFFFFFFFB,
+            0,
+            0,
+            0x1122334455667788,
+            443,
+            0,
+            0,
+            0,
+            bytes(12) + bytes.fromhex("cb007107"),
+        ),
+    ):
+        raise AssertionError("IPv4 network-policy literal disagrees with prose builder")
+
+    network_ipv6_literal = bytes.fromhex(
+        "0103000000000040"
+        "ffffffffffffffff"
+        "ffffffffffffffff"
+        "0000000000000000"
+        "ffffffffffffffff"
+        "000e0000"
+        "0002000100020002"
+        "00020011000a0000"
+        "0000000010203040"
+        "7fffffff"
+        "ffffffffffffffff"
+        "00350000"
+        "89abcdef01234567"
+        "20010db8000000000000000000000001"
+    )
+    if network_ipv6_literal != frame(
+        0x0103,
+        0,
+        maximum64,
+        maximum64,
+        0,
+        maximum64,
+        14,
+        network_policy_payload(
+            2,
+            1,
+            2,
+            2,
+            2,
+            17,
+            10,
+            0,
+            0,
+            0x10203040,
+            0x7FFFFFFF,
+            maximum64,
+            53,
+            0,
+            0x89ABCDEF,
+            0x01234567,
+            bytes.fromhex("20010db8000000000000000000000001"),
+        ),
+    ):
+        raise AssertionError("IPv6 network-policy literal disagrees with prose builder")
+
+    network_unsupported_literal = bytes.fromhex(
+        "0103000000000040"
+        "0000000000000001"
+        "0000000000000001"
+        "0000000000000000"
+        "0000000000000001"
+        "00010000"
+        "0002000200030001"
+        "0005ffff0001006e"
+        "80000001ffffffff"
+        "12345678"
+        "0102030405060708"
+        "00000000"
+        "0000000000000000"
+        "00000000000000000000000000000000"
+    )
+    if network_unsupported_literal != frame(
+        0x0103,
+        0,
+        1,
+        1,
+        0,
+        1,
+        1,
+        network_policy_payload(
+            2,
+            2,
+            3,
+            1,
+            5,
+            0xFFFF,
+            1,
+            110,
+            0x80000001,
+            maximum32,
+            0x12345678,
+            0x0102030405060708,
+            0,
+            0,
+            0,
+            0,
+            bytes(16),
+        ),
+    ):
+        raise AssertionError(
+            "unsupported network-policy literal disagrees with prose builder"
+        )
+
+    network_unresolved_literal = bytes.fromhex(
+        "0103000000000040"
+        "0000000000000000"
+        "0000000000000001"
+        "0000000000000000"
+        "0000000000000001"
+        "00010000"
+        "0002000100050002"
+        "0003000000000000"
+        "0000000000000000"
+        "00000000"
+        "0000000000000001"
+        "00000000"
+        "0000000000000000"
+        "00000000000000000000000000000000"
+    )
+    if network_unresolved_literal != frame(
+        0x0103,
+        0,
+        0,
+        1,
+        0,
+        1,
+        1,
+        network_policy_payload(
+            2, 1, 5, 2, 3, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, bytes(16)
+        ),
+    ):
+        raise AssertionError(
+            "unresolved network-policy literal disagrees with prose builder"
+        )
+
+    network_malformed = frame(
+        0x0103,
+        0,
+        7,
+        11,
+        0,
+        13,
+        9,
+        network_policy_payload(
+            1,
+            1,
+            4,
+            1,
+            4,
+            0x1234,
+            0,
+            1,
+            0,
+            0,
+            0,
+            0x8877665544332211,
+            0,
+            0,
+            0,
+            0,
+            bytes(16),
+        ),
+    )
+    network_cross_axis = frame(
+        0x0103,
+        0,
+        42,
+        42,
+        0,
+        42,
+        8,
+        network_policy_payload(
+            2, 1, 3, 1, 1, 6, 42, 37, 0, 1, 1, 42, 0, 0, 0, 0, bytes(16)
+        ),
+    )
+    network_vectors = (
+        network_ipv4_literal,
+        network_ipv6_literal,
+        network_unsupported_literal,
+        network_unresolved_literal,
+        network_malformed,
+        network_cross_axis,
+    )
+    network_preimages: list[bytes] = []
+    for encoded in network_vectors:
+        expect_provenance_encode(harness, encoded)
+        expect_provenance_decode(harness, encoded)
+        for previous in (zero, chain_b):
+            network_preimages.append(
+                expect_provenance_preimage(harness, encoded, previous)
+            )
+
+    def relation_fixture(operation: int, source: int, kind: int, sequence: int) -> bytes:
+        family = 0
+        address_length = 0
+        port = 0
+        scope = 0
+        flow = 0
+        address = bytes(16)
+        if kind == 1:
+            family = 2
+            address_length = 16 if source == 1 else 0
+            port = 1
+            address = bytes(12) + b"\x01\x02\x03\x04"
+        elif kind == 2:
+            family = 10
+            address_length = 28 if source == 1 else 0
+            port = 2
+            scope = 3
+            flow = 4
+            address = bytes(range(16))
+        elif kind == 3:
+            family = 1
+            address_length = 2 if source == 1 else 0
+        elif kind == 4:
+            if source != 1:
+                raise AssertionError("malformed fixture requires explicit source")
+            address_length = 1
+        elif kind == 5:
+            if operation != 2 or source != 2:
+                raise AssertionError("unresolved fixture requires connected sendmsg")
+        else:
+            raise AssertionError("unknown relation fixture kind")
+        return frame(
+            0x0103,
+            0,
+            sequence,
+            1,
+            0,
+            1,
+            1,
+            network_policy_payload(
+                operation,
+                1,
+                kind,
+                source,
+                1,
+                6,
+                family,
+                address_length,
+                0,
+                0 if operation == 1 else 1,
+                0 if operation == 1 else 1,
+                sequence + 1,
+                port,
+                0,
+                scope,
+                flow,
+                address,
+            ),
+        )
+
+    connect_class_frames = tuple(
+        relation_fixture(1, 1, kind, kind) for kind in (1, 2, 3, 4)
+    )
+    all_class_frames = connect_class_frames + tuple(
+        relation_fixture(2, 1, kind, 10 + kind) for kind in (1, 2, 3, 4)
+    ) + tuple(
+        relation_fixture(2, 2, kind, 20 + kind) for kind in (1, 2, 3, 5)
+    )
+    if len(all_class_frames) != 12:
+        raise AssertionError("network relation fixture class count drift")
+
+    network_negative_frames: set[bytes] = set()
+
+    for decision in (1, 2):
+        for raw_result in (
+            0x00000000,
+            0x7FFFFFFF,
+            0x80000000,
+            0x80000001,
+            0xFFFFFFFB,
+            0xFFFFFFFF,
+        ):
+            encoded = replace(
+                replace(network_ipv4_literal, 46, be(decision, 2)),
+                60,
+                be(raw_result, 4),
+            )
+            result = (
+                0
+                if (decision == 1 and raw_result == 0)
+                or (decision == 2 and raw_result & 0x80000000)
+                else WIRE_VALUE
+            )
+            expect_provenance_encode(harness, encoded, result)
+            expect_provenance_decode(harness, encoded, result)
+            expect_provenance_preimage(harness, encoded, zero, result)
+            if result != 0:
+                network_negative_frames.add(encoded)
+
+    for base in connect_class_frames:
+        for bit in range(32):
+            for offset in (64, 68):
+                encoded = replace(base, offset, be(1 << bit, 4))
+                network_negative_frames.add(encoded)
+                expect_provenance_encode(harness, encoded, WIRE_STATE)
+                expect_provenance_decode(harness, encoded, WIRE_STATE)
+                expect_provenance_preimage(harness, encoded, zero, WIRE_STATE)
+
+    for base in all_class_frames:
+        for bit in range(16):
+            encoded = replace(base, 82, be(1 << bit, 2))
+            network_negative_frames.add(encoded)
+            expect_provenance_encode(harness, encoded, WIRE_RESERVED)
+            expect_provenance_decode(harness, encoded, WIRE_RESERVED)
+            expect_provenance_preimage(harness, encoded, zero, WIRE_RESERVED)
+
+    for low_bits in (
+        0,
+        0x3FFFFFFF,
+        0x7FFFFFFF,
+        *(1 << bit for bit in range(31)),
+        *(0x7FFFFFFF ^ (1 << bit) for bit in range(31)),
+    ):
+        encoded = replace(network_ipv6_literal, 68, be(0x80000000 | low_bits, 4))
+        network_negative_frames.add(encoded)
+        expect_provenance_encode(harness, encoded, WIRE_VALUE)
+        expect_provenance_decode(harness, encoded, WIRE_VALUE)
+        expect_provenance_preimage(harness, encoded, zero, WIRE_VALUE)
+
+    expect_provenance_encode(harness, network_ipv4_literal, result=2, capacity=107)
+    expect_provenance_preimage(
+        harness, network_ipv4_literal, chain_b, result=2, capacity=170
+    )
+
+    network_invalid_structs: list[tuple[bytes, int]] = [
+        (replace(network_ipv4_literal, 0, be(0x0104, 2)), WIRE_EVENT),
+        (replace(network_ipv4_literal, 2, be(1, 2)), WIRE_FLAGS),
+        (replace(network_ipv4_literal, 4, be(1045, 4)), WIRE_CAP),
+        (replace(network_ipv4_literal, 4, be(63, 4)), WIRE_LENGTH),
+        (replace(network_ipv4_literal, 16, bytes(8)), WIRE_VALUE),
+        (replace(network_ipv4_literal, 24, be(1, 8)), WIRE_VALUE),
+        (replace(network_ipv4_literal, 32, bytes(8)), WIRE_VALUE),
+        (replace(network_ipv4_literal, 40, bytes(2)), WIRE_STATE),
+        (replace(network_ipv4_literal, 42, be(1, 2)), WIRE_RESERVED),
+        (replace(network_ipv4_literal, 44, bytes(2)), WIRE_STATE),
+        (replace(network_ipv4_literal, 46, bytes(2)), WIRE_STATE),
+        (replace(network_ipv4_literal, 48, bytes(2)), WIRE_STATE),
+        (replace(network_ipv4_literal, 50, bytes(2)), WIRE_STATE),
+        (replace(network_ipv4_literal, 52, bytes(2)), WIRE_STATE),
+        (replace(network_ipv4_literal, 58, be(129, 2)), WIRE_LENGTH),
+        (replace(network_ipv4_literal, 72, bytes(8)), WIRE_VALUE),
+        (replace(network_ipv4_literal, 50, be(2, 2)), WIRE_STATE),
+        (replace(network_ipv4_literal, 64, be(1, 4)), WIRE_STATE),
+        (replace(network_ipv4_literal, 68, be(1, 4)), WIRE_STATE),
+        (replace(network_ipv6_literal, 68, be(0x80000000, 4)), WIRE_VALUE),
+        (
+            replace(replace(network_ipv4_literal, 46, be(1, 2)), 60, be(0x7FFFFFFF, 4)),
+            WIRE_VALUE,
+        ),
+        (replace(network_ipv4_literal, 60, bytes(4)), WIRE_VALUE),
+        (replace(network_ipv4_literal, 56, be(10, 2)), WIRE_STATE),
+        (replace(network_ipv4_literal, 58, be(28, 2)), WIRE_STATE),
+        (replace(network_ipv4_literal, 84, be(1, 4)), WIRE_VALUE),
+        (replace(network_ipv4_literal, 88, be(1, 4)), WIRE_VALUE),
+        (replace(network_ipv4_literal, 92, b"\x01"), WIRE_VALUE),
+        (replace(network_unsupported_literal, 80, be(1, 2)), WIRE_VALUE),
+        (replace(network_unsupported_literal, 84, be(1, 4)), WIRE_VALUE),
+        (replace(network_unsupported_literal, 88, be(1, 4)), WIRE_VALUE),
+        (replace(network_unsupported_literal, 107, b"\x01"), WIRE_VALUE),
+        (replace(network_unresolved_literal, 56, be(1, 2)), WIRE_STATE),
+        (replace(network_unresolved_literal, 50, be(1, 2)), WIRE_STATE),
+        (replace(network_unresolved_literal, 48, be(3, 2)), WIRE_STATE),
+        (replace(network_malformed, 50, be(2, 2)), WIRE_STATE),
+    ]
+    for encoded, result in network_invalid_structs:
+        network_negative_frames.add(encoded)
+        expect_provenance_decode(harness, encoded, result)
+        for capacity in (0, 107):
+            expect_provenance_encode(harness, encoded, result, capacity)
+        for capacity in (0, 170):
+            expect_provenance_preimage(harness, encoded, zero, result, capacity)
+
+    for short_len in range(108):
+        encoded = network_ipv4_literal[:short_len]
+        network_negative_frames.add(encoded)
+        expect_provenance_decode(harness, encoded, WIRE_LENGTH)
+
+    network_suffix = network_ipv4_literal + b"\x00"
+    network_negative_frames.add(network_suffix)
+    expect_provenance_decode(harness, network_suffix, WIRE_LENGTH)
+
+    network_envelope_negatives: list[tuple[bytes, int]] = []
+    for payload_len in (0, 63, 65, 1044):
+        network_envelope_negatives.append(
+            (replace(network_ipv4_literal, 4, be(payload_len, 4)), WIRE_LENGTH)
+        )
+    for payload_len in (1045, maximum32):
+        network_envelope_negatives.append(
+            (replace(network_ipv4_literal, 4, be(payload_len, 4)), WIRE_CAP)
+        )
+    for encoded, result in network_envelope_negatives:
+        network_negative_frames.add(encoded)
+        expect_provenance_decode(harness, encoded, result)
+        expect_provenance_encode(harness, encoded, result)
+        expect_provenance_preimage(harness, encoded, zero, result)
+
+    network_precedence_negatives: tuple[tuple[bytes, int], ...] = (
+        (replace(replace(network_ipv4_literal, 0, be(0x0104, 2)), 2, be(1, 2)), WIRE_EVENT),
+        (replace(replace(network_ipv4_literal, 2, be(1, 2)), 4, be(63, 4)), WIRE_FLAGS),
+        (replace(replace(network_ipv4_literal, 4, be(63, 4)), 16, bytes(8)), WIRE_LENGTH),
+        (replace(replace(network_ipv4_literal, 16, bytes(8)), 24, be(1, 8)), WIRE_VALUE),
+        (replace(replace(network_ipv4_literal, 24, be(1, 8)), 32, bytes(8)), WIRE_VALUE),
+        (replace(replace(network_ipv4_literal, 32, bytes(8)), 40, bytes(2)), WIRE_VALUE),
+        (replace(replace(network_ipv4_literal, 40, bytes(2)), 42, be(1, 2)), WIRE_STATE),
+        (replace(replace(network_ipv4_literal, 42, be(1, 2)), 44, bytes(2)), WIRE_RESERVED),
+        (replace(replace(network_ipv4_literal, 44, bytes(2)), 46, bytes(2)), WIRE_STATE),
+        (replace(replace(network_ipv4_literal, 46, bytes(2)), 48, bytes(2)), WIRE_STATE),
+        (replace(replace(network_ipv4_literal, 48, bytes(2)), 50, bytes(2)), WIRE_STATE),
+        (replace(replace(network_ipv4_literal, 50, bytes(2)), 52, bytes(2)), WIRE_STATE),
+        (replace(replace(network_ipv4_literal, 52, bytes(2)), 58, be(129, 2)), WIRE_STATE),
+        (replace(replace(network_ipv4_literal, 58, be(129, 2)), 72, bytes(8)), WIRE_LENGTH),
+        (replace(replace(network_ipv4_literal, 72, bytes(8)), 82, be(1, 2)), WIRE_VALUE),
+        (replace(replace(network_ipv4_literal, 82, be(1, 2)), 50, be(2, 2)), WIRE_RESERVED),
+        (replace(replace(network_ipv4_literal, 50, be(2, 2)), 60, bytes(4)), WIRE_STATE),
+        (replace(replace(network_ipv4_literal, 60, bytes(4)), 56, be(10, 2)), WIRE_VALUE),
+        (replace(replace(network_ipv4_literal, 56, be(10, 2)), 84, be(1, 4)), WIRE_STATE),
+    )
+    for precedence_index, (encoded, result) in enumerate(
+        network_precedence_negatives, start=1
+    ):
+        network_negative_frames.add(encoded)
+        try:
+            expect_provenance_decode(harness, encoded, result)
+            expect_provenance_encode(harness, encoded, result)
+            expect_provenance_preimage(harness, encoded, zero, result)
+        except AssertionError as error:
+            raise AssertionError(
+                f"network precedence vector {precedence_index}: {error}"
+            ) from error
+
+    for event in (0x0000, 0x0001, 0x00FF, 0x0104, 0x01FF, 0x0200, 0xFFFF):
+        encoded = replace(network_ipv4_literal, 0, be(event, 2))
+        network_negative_frames.add(encoded)
+        expect_provenance_decode(harness, encoded, WIRE_EVENT)
+        expect_provenance_encode(harness, encoded, WIRE_EVENT)
+        expect_provenance_preimage(harness, encoded, zero, WIRE_EVENT)
+
     provenance_digest = hashlib.sha256(b"".join(provenance_vectors)).hexdigest()
     provenance_preimage_digest = hashlib.sha256(
         b"".join(provenance_preimages)
@@ -1658,6 +2181,10 @@ def main() -> int:
     mapping_digest = hashlib.sha256(b"".join(mapping_vectors)).hexdigest()
     mapping_preimage_digest = hashlib.sha256(
         b"".join(mapping_preimages)
+    ).hexdigest()
+    network_digest = hashlib.sha256(b"".join(network_vectors)).hexdigest()
+    network_preimage_digest = hashlib.sha256(
+        b"".join(network_preimages)
     ).hexdigest()
 
     print(
@@ -1679,7 +2206,12 @@ def main() -> int:
         f"mapping_vector_set_sha256={mapping_digest} "
         f"mapping_preimages={len(mapping_preimages)} "
         f"mapping_preimage_set_sha256={mapping_preimage_digest} "
-        f"mapping_negative_frames={len(mapping_negative_frames)}"
+        f"mapping_negative_frames={len(mapping_negative_frames)} "
+        f"network_vectors={len(network_vectors)} "
+        f"network_vector_set_sha256={network_digest} "
+        f"network_preimages={len(network_preimages)} "
+        f"network_preimage_set_sha256={network_preimage_digest} "
+        f"network_negative_frames={len(network_negative_frames)}"
     )
     return 0
 
