@@ -44,6 +44,16 @@ static int parse_hex(const char *text, uint8_t *out, size_t len)
     return 1;
 }
 
+static int parse_frame_hex(const char *text, uint8_t *out, size_t *len)
+{
+    size_t text_len = strlen(text);
+
+    if (text_len % 2u != 0 || text_len / 2u > SPP_DIAG_TRACE_MAX_FRAME_BYTES)
+        return 0;
+    *len = text_len / 2u;
+    return parse_hex(text, out, *len);
+}
+
 static void print_hex(const uint8_t *bytes, size_t len)
 {
     static const char digits[] = "0123456789abcdef";
@@ -260,6 +270,76 @@ static int ima_label(void)
     return 0;
 }
 
+static int frame_encode(const char *text)
+{
+    struct spp_diag_trace_frame object;
+    uint8_t raw[SPP_DIAG_TRACE_MAX_FRAME_BYTES];
+    uint8_t encoded[SPP_DIAG_TRACE_MAX_FRAME_BYTES];
+    size_t raw_len = 0;
+    size_t consumed = 0;
+    size_t written = 0;
+    size_t required = 0;
+    int result;
+
+    if (!parse_frame_hex(text, raw, &raw_len))
+        return 2;
+    result = spp_diag_trace_frame_decode(raw, raw_len, &object, &consumed);
+    if (result != WIRE_OK)
+        return print_encode(result, 0, 0, encoded);
+    result = spp_diag_trace_frame_encode(&object, encoded, sizeof(encoded),
+                                         &written, &required);
+    return print_encode(result, written, required, encoded);
+}
+
+static int frame_decode(const char *text)
+{
+    struct spp_diag_trace_frame object;
+    uint8_t raw[SPP_DIAG_TRACE_MAX_FRAME_BYTES];
+    size_t raw_len = 0;
+    size_t consumed = 0;
+    int result;
+
+    if (!parse_frame_hex(text, raw, &raw_len))
+        return 2;
+    result = spp_diag_trace_frame_decode(raw, raw_len, &object, &consumed);
+    printf("%d\t%zu", result, consumed);
+    if (result == WIRE_OK) {
+        printf("\t%u\t%u\t%" PRIu32 "\t%" PRIu64 "\t%" PRIu64
+               "\t%" PRIu64 "\t%" PRIu64 "\t%u\t",
+               (unsigned)object.event_type, (unsigned)object.flags,
+               object.payload_length, object.sequence, object.task_ordinal,
+               object.parent_task_ordinal, object.operation_ordinal,
+               (unsigned)object.phase);
+        print_hex(object.payload, object.payload_length);
+    }
+    putchar('\n');
+    return 0;
+}
+
+static int frame_preimage(const char *frame_text, const char *chain_text)
+{
+    struct spp_diag_trace_frame object;
+    uint8_t raw[SPP_DIAG_TRACE_MAX_FRAME_BYTES];
+    uint8_t chain[SPP_DIAG_TRACE_CHAIN_LEN];
+    uint8_t encoded[SPP_DIAG_TRACE_FRAME_PREIMAGE_MAX_SIZE];
+    size_t raw_len = 0;
+    size_t consumed = 0;
+    size_t written = 0;
+    size_t required = 0;
+    int result;
+
+    if (!parse_frame_hex(frame_text, raw, &raw_len) ||
+        !parse_hex(chain_text, chain, sizeof(chain)))
+        return 2;
+    result = spp_diag_trace_frame_decode(raw, raw_len, &object, &consumed);
+    if (result != WIRE_OK)
+        return print_encode(result, 0, 0, encoded);
+    result = spp_diag_trace_frame_preimage(&object, chain, encoded,
+                                           sizeof(encoded), &written,
+                                           &required);
+    return print_encode(result, written, required, encoded);
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 3 && strcmp(argv[1], "header-encode") == 0)
@@ -280,6 +360,12 @@ int main(int argc, char **argv)
         return ima_vocabulary(argv[2], argv[3]);
     if (argc == 2 && strcmp(argv[1], "ima-label") == 0)
         return ima_label();
+    if (argc == 3 && strcmp(argv[1], "frame-encode") == 0)
+        return frame_encode(argv[2]);
+    if (argc == 3 && strcmp(argv[1], "frame-decode") == 0)
+        return frame_decode(argv[2]);
+    if (argc == 4 && strcmp(argv[1], "frame-preimage") == 0)
+        return frame_preimage(argv[2], argv[3]);
     fputs("usage: trace-oracle-harness OP [HEX ...]\n", stderr);
     return 2;
 }

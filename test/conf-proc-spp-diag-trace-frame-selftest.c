@@ -416,6 +416,29 @@ static void init_vectors(void)
     init_vec(&k_vecs[20], "terminal_hi", &f);
 }
 
+enum { EXTRA_VEC_COUNT = 3 };
+
+static void init_extra_vectors(struct frame_vec extra[EXTRA_VEC_COUNT])
+{
+    struct spp_diag_trace_frame f;
+
+    f = k_vecs[2].f;
+    set_denied_payload(&f, 64, 1, 1, 0);
+    init_vec(&extra[0], "denied_path64", &f);
+
+    f = k_vecs[8].f;
+    f.flags = 0;
+    f.phase = SPP_DIAG_TRACE_PHASE_INIT;
+    set_attempt_payload(&f, 1, 64, 1, 1);
+    init_vec(&extra[1], "attempt_path64", &f);
+
+    f = k_vecs[17].f;
+    store16(f.payload + 0, 7);
+    store16(f.payload + 2, 8);
+    f.phase = 8;
+    init_vec(&extra[2], "marker_interior", &f);
+}
+
 static const uint8_t k_core_init_lo_literal[44] = {[1] = 0x01};
 
 static const uint8_t k_core_init_hi_literal[44] = {
@@ -429,13 +452,23 @@ struct frame_box {
     uint8_t post[8];
 };
 
+static int expect_canary(const uint8_t *bytes, size_t len)
+{
+    size_t i;
+
+    for (i = 0; i < len; i++) {
+        EXPECT_EQ(bytes[i], CANARY);
+    }
+    return 0;
+}
+
 static int expect_fail_meta(int result, int expected, size_t written,
-                            size_t required, const uint8_t *out)
+                            size_t required, const uint8_t *out, size_t out_len)
 {
     EXPECT_EQ(result, expected);
     EXPECT_EQ(written, 0);
     EXPECT_EQ(required, 0);
-    EXPECT_EQ(out[0], CANARY);
+    CALL(expect_canary(out, out_len));
     return 0;
 }
 
@@ -468,7 +501,8 @@ static int api_fail_struct(const struct spp_diag_trace_frame *f, int expected,
     {
         int result = spp_diag_trace_frame_encode(f, out, sizeof out, &written,
                                                  &required);
-        CALL(expect_fail_meta(result, expected, written, required, out));
+        CALL(expect_fail_meta(result, expected, written, required, out,
+                              sizeof out));
     }
 
     memset(pre, CANARY, sizeof pre);
@@ -476,7 +510,17 @@ static int api_fail_struct(const struct spp_diag_trace_frame *f, int expected,
     {
         int result = spp_diag_trace_frame_preimage(f, chain, pre, sizeof pre,
                                                    &written, &required);
-        CALL(expect_fail_meta(result, expected, written, required, pre));
+        CALL(expect_fail_meta(result, expected, written, required, pre,
+                              sizeof pre));
+    }
+
+    memset(pre, CANARY, sizeof pre);
+    written = required = (size_t)-1;
+    {
+        int result = spp_diag_trace_frame_preimage(f, chain, pre, 0, &written,
+                                                   &required);
+        CALL(expect_fail_meta(result, expected, written, required, pre,
+                              sizeof pre));
     }
 
     if (later_n > 0) {
@@ -601,6 +645,14 @@ static void pp_path1025(struct spp_diag_trace_frame *f)
         store16(f->payload + 2, 1025);
     } else {
         store16(f->payload + 4, 1025);
+    }
+}
+static void pp_path_mismatch(struct spp_diag_trace_frame *f)
+{
+    if (f->event_type == SPP_DIAG_TRACE_EVENT_PRE_RELEASE_EXEC_DENIED) {
+        store16(f->payload + 2, 2);
+    } else {
+        store16(f->payload + 4, 2);
     }
 }
 static void pp_denied_pid(struct spp_diag_trace_frame *f)
@@ -754,7 +806,8 @@ static int roundtrip_one(const struct frame_vec *v)
 {
     uint8_t got[SPP_DIAG_TRACE_MAX_FRAME_BYTES];
     uint8_t layout[SPP_DIAG_TRACE_MAX_FRAME_BYTES];
-    struct spp_diag_trace_frame decoded, expect;
+    struct frame_box decoded;
+    struct spp_diag_trace_frame expect;
     size_t written, required, consumed;
     size_t i;
 
@@ -771,14 +824,154 @@ static int roundtrip_one(const struct frame_vec *v)
 
     memset(&decoded, CANARY2, sizeof decoded);
     consumed = 0;
-    EXPECT_EQ(spp_diag_trace_frame_decode(got, v->wire_len, &decoded, &consumed),
-              WIRE_OK);
+    EXPECT_EQ(
+        spp_diag_trace_frame_decode(got, v->wire_len, &decoded.f, &consumed),
+        WIRE_OK);
     EXPECT_EQ(consumed, v->wire_len);
     expect = v->f;
     zero_unused(&expect);
-    EXPECT(frame_eq(&decoded, &expect));
-    for (i = decoded.payload_length; i < SPP_DIAG_TRACE_MAX_PAYLOAD_BYTES; i++) {
-        EXPECT_EQ(decoded.payload[i], 0);
+    EXPECT(frame_eq(&decoded.f, &expect));
+    for (i = 0; i < sizeof decoded.pre; i++) {
+        EXPECT_EQ(decoded.pre[i], CANARY2);
+        EXPECT_EQ(decoded.post[i], CANARY2);
+    }
+    for (i = decoded.f.payload_length; i < SPP_DIAG_TRACE_MAX_PAYLOAD_BYTES;
+         i++) {
+        EXPECT_EQ(decoded.f.payload[i], 0);
+    }
+    return 0;
+}
+
+static int expect_literal_u16(const uint8_t *p, uint16_t value)
+{
+    EXPECT_EQ(p[0], (uint8_t)(value >> 8));
+    EXPECT_EQ(p[1], (uint8_t)value);
+    return 0;
+}
+
+static int expect_literal_u32(const uint8_t *p, uint32_t value)
+{
+    EXPECT_EQ(p[0], (uint8_t)(value >> 24));
+    EXPECT_EQ(p[1], (uint8_t)(value >> 16));
+    EXPECT_EQ(p[2], (uint8_t)(value >> 8));
+    EXPECT_EQ(p[3], (uint8_t)value);
+    return 0;
+}
+
+static int expect_literal_u64(const uint8_t *p, uint64_t value)
+{
+    EXPECT_EQ(p[0], (uint8_t)(value >> 56));
+    EXPECT_EQ(p[1], (uint8_t)(value >> 48));
+    EXPECT_EQ(p[2], (uint8_t)(value >> 40));
+    EXPECT_EQ(p[3], (uint8_t)(value >> 32));
+    EXPECT_EQ(p[4], (uint8_t)(value >> 24));
+    EXPECT_EQ(p[5], (uint8_t)(value >> 16));
+    EXPECT_EQ(p[6], (uint8_t)(value >> 8));
+    EXPECT_EQ(p[7], (uint8_t)value);
+    return 0;
+}
+
+static int expect_literal_path(const uint8_t *p, size_t len)
+{
+    size_t i;
+
+    for (i = 0; i < len; i++) {
+        EXPECT_EQ(p[i], (uint8_t)((i % 255) + 1));
+    }
+    return 0;
+}
+
+static int expect_literal_wire(size_t index)
+{
+    static const uint16_t events[VEC_COUNT] = {
+        1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10};
+    static const uint16_t flags[VEC_COUNT] = {
+        0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    static const uint32_t payload_lengths[VEC_COUNT] = {
+        0, 0, 21, 1044, 8, 8, 16, 16, 17, 17, 1040, 16, 16, 8, 8, 16,
+        16, 8, 8, 0, 0};
+    static const uint64_t sequences[VEC_COUNT] = {
+        0, UINT64_MAX, 0, UINT64_MAX, 0, UINT64_MAX, 0, UINT64_MAX, 0, 0,
+        UINT64_MAX, 0, UINT64_MAX, 0, UINT64_MAX, 0, UINT64_MAX, 0,
+        UINT64_MAX, 0, UINT64_MAX};
+    static const uint64_t tasks[VEC_COUNT] = {
+        0, 0, 0, UINT64_MAX, 0, 0, 1, UINT64_MAX, 1, 1, UINT64_MAX, 1,
+        UINT64_MAX, 1, UINT64_MAX, 1, UINT64_MAX, 1, UINT64_MAX, 0, 0};
+    static const uint64_t parents[VEC_COUNT] = {
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, UINT64_MAX - 1u, 2,
+        1, 0, 0, 0, 0};
+    static const uint64_t operations[VEC_COUNT] = {
+        0, 0, 1, UINT64_MAX, 0, 0, 0, 0, 1, 1, UINT64_MAX, 1, UINT64_MAX,
+        1, UINT64_MAX, 1, UINT64_MAX, 0, 0, 0, 0};
+    static const uint16_t phases[VEC_COUNT] = {
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 14, 1, 14, 1, 14, 1, 14, 2, 14,
+        15, 15};
+    const uint8_t *w = k_vecs[index].wire;
+    uint16_t path_len;
+
+    EXPECT_EQ(k_vecs[index].wire_len,
+              (size_t)44 + payload_lengths[index]);
+    CALL(expect_literal_u16(w + 0, events[index]));
+    CALL(expect_literal_u16(w + 2, flags[index]));
+    CALL(expect_literal_u32(w + 4, payload_lengths[index]));
+    CALL(expect_literal_u64(w + 8, sequences[index]));
+    CALL(expect_literal_u64(w + 16, tasks[index]));
+    CALL(expect_literal_u64(w + 24, parents[index]));
+    CALL(expect_literal_u64(w + 32, operations[index]));
+    CALL(expect_literal_u16(w + 40, phases[index]));
+    CALL(expect_literal_u16(w + 42, 0));
+
+    switch (events[index]) {
+    case 1:
+    case 10:
+        break;
+    case 2:
+        path_len = index == 2 ? 1u : 1024u;
+        CALL(expect_literal_u16(w + 44, 13));
+        CALL(expect_literal_u16(w + 46, path_len));
+        CALL(expect_literal_u32(w + 48, index == 2 ? 1u : UINT32_MAX));
+        CALL(expect_literal_u32(w + 52, index == 2 ? 1u : UINT32_MAX));
+        CALL(expect_literal_u64(w + 56, index == 2 ? 0u : UINT64_MAX));
+        CALL(expect_literal_path(w + 64, path_len));
+        break;
+    case 3:
+        CALL(expect_literal_u64(w + 44, index == 4 ? 0u : UINT64_MAX));
+        break;
+    case 4:
+        CALL(expect_literal_u32(w + 44, index == 6 ? 1u : UINT32_MAX));
+        CALL(expect_literal_u32(w + 48, index == 6 ? 1u : UINT32_MAX));
+        CALL(expect_literal_u64(w + 52, index == 6 ? 0u : UINT64_MAX));
+        break;
+    case 5:
+        path_len = index == 10 ? 1024u : 1u;
+        CALL(expect_literal_u32(w + 44, index == 10 ? UINT32_MAX : 1u));
+        CALL(expect_literal_u16(w + 48, path_len));
+        CALL(expect_literal_u16(w + 50, 0));
+        CALL(expect_literal_u32(w + 52, index == 10 ? UINT32_MAX : 1u));
+        CALL(expect_literal_u32(w + 56, index == 10 ? UINT32_MAX : 1u));
+        CALL(expect_literal_path(w + 60, path_len));
+        break;
+    case 6:
+        CALL(expect_literal_u32(w + 44, index == 11 ? 1u : UINT32_MAX));
+        CALL(expect_literal_u32(w + 48, index == 11 ? 1u : UINT32_MAX));
+        CALL(expect_literal_u32(w + 52, index == 11 ? 1u : UINT32_MAX));
+        CALL(expect_literal_u32(w + 56, 0));
+        break;
+    case 7:
+        CALL(expect_literal_u64(w + 44, index == 13 ? 0u : UINT64_MAX));
+        break;
+    case 8:
+        CALL(expect_literal_u32(w + 44, index == 15 ? 1u : UINT32_MAX));
+        CALL(expect_literal_u32(w + 48, index == 15 ? 1u : UINT32_MAX));
+        CALL(expect_literal_u64(w + 52, index == 15 ? 0u : UINT64_MAX));
+        break;
+    case 9:
+        CALL(expect_literal_u16(w + 44, index == 17 ? 1u : 13u));
+        CALL(expect_literal_u16(w + 46, index == 17 ? 2u : 14u));
+        CALL(expect_literal_u32(w + 48, 0));
+        break;
+    default:
+        EXPECT(0);
     }
     return 0;
 }
@@ -787,6 +980,7 @@ static int test_literals(void)
 {
     size_t i;
     for (i = 0; i < VEC_COUNT; i++) {
+        CALL(expect_literal_wire(i));
         CALL(roundtrip_one(&k_vecs[i]));
     }
     return 0;
@@ -859,41 +1053,23 @@ static int test_unknown_and_cap(void)
 static int test_path_nuls_and_lens(void)
 {
     struct spp_diag_trace_frame f;
-    size_t lens[4] = {1, 5, 64, 1024};
+    size_t lens[3] = {1, 64, 1024};
     size_t i, j;
     uint8_t wire[SPP_DIAG_TRACE_MAX_FRAME_BYTES + 8];
     size_t n;
 
-    for (i = 0; i < 4; i++) {
-        f = k_vecs[2].f;
-        set_denied_payload(&f, (uint16_t)lens[i], 1, 1, 0);
-        if (lens[i] == 1) {
-            f.payload[20] = 0;
-            CALL(api_fail_struct(&f, WIRE_VALUE, NULL, 0));
-        } else {
-            f.payload[20] = 0;
-            CALL(api_fail_struct(&f, WIRE_VALUE, NULL, 0));
+    for (i = 0; i < 3; i++) {
+        for (j = 0; j < lens[i]; j++) {
+            f = k_vecs[2].f;
             set_denied_payload(&f, (uint16_t)lens[i], 1, 1, 0);
-            f.payload[20 + lens[i] / 2] = 0;
-            CALL(api_fail_struct(&f, WIRE_VALUE, NULL, 0));
-            set_denied_payload(&f, (uint16_t)lens[i], 1, 1, 0);
-            f.payload[20 + lens[i] - 1] = 0;
+            f.payload[20 + j] = 0;
             CALL(api_fail_struct(&f, WIRE_VALUE, NULL, 0));
         }
 
-        f = k_vecs[9].f;
-        set_attempt_payload(&f, 1, (uint16_t)lens[i], 1, 1);
-        if (lens[i] == 1) {
-            f.payload[16] = 0;
-            CALL(api_fail_struct(&f, WIRE_VALUE, NULL, 0));
-        } else {
-            f.payload[16] = 0;
-            CALL(api_fail_struct(&f, WIRE_VALUE, NULL, 0));
+        for (j = 0; j < lens[i]; j++) {
+            f = k_vecs[9].f;
             set_attempt_payload(&f, 1, (uint16_t)lens[i], 1, 1);
-            f.payload[16 + lens[i] / 2] = 0;
-            CALL(api_fail_struct(&f, WIRE_VALUE, NULL, 0));
-            set_attempt_payload(&f, 1, (uint16_t)lens[i], 1, 1);
-            f.payload[16 + lens[i] - 1] = 0;
+            f.payload[16 + j] = 0;
             CALL(api_fail_struct(&f, WIRE_VALUE, NULL, 0));
         }
     }
@@ -1226,6 +1402,65 @@ static int test_precedence(void)
         pp_path1025(&f);
         CALL(api_fail_struct(&f, WIRE_CAP, NULL, 0));
     }
+    {
+        struct spp_diag_trace_frame f = k_vecs[2].f;
+        uint8_t wire[SPP_DIAG_TRACE_MAX_FRAME_BYTES + 8];
+        size_t len;
+
+        pp_path_mismatch(&f);
+        CALL(api_fail_struct(
+            &f, WIRE_LENGTH, f.payload + 4,
+            sizeof f - (SOFF(payload) + 4u)));
+        memset(wire, CANARY, sizeof wire);
+        layout_frame(wire, &f);
+        len = 44u + f.payload_length;
+        CALL(api_fail_decode_wire(wire, len, WIRE_LENGTH, wire + 48,
+                                  sizeof wire - 48u));
+
+        f = k_vecs[9].f;
+        pp_path_mismatch(&f);
+        CALL(api_fail_struct(
+            &f, WIRE_LENGTH, f.payload + 6,
+            sizeof f - (SOFF(payload) + 6u)));
+        memset(wire, CANARY, sizeof wire);
+        layout_frame(wire, &f);
+        len = 44u + f.payload_length;
+        CALL(api_fail_decode_wire(wire, len, WIRE_LENGTH, wire + 50,
+                                  sizeof wire - 50u));
+    }
+    {
+        uint8_t wire[SPP_DIAG_TRACE_MAX_FRAME_BYTES + 8];
+        static const size_t event_vectors[10] = {0, 2, 4, 6, 9,
+                                                  11, 13, 15, 17, 19};
+        size_t i;
+
+        for (i = 0; i < 10; i++) {
+            const struct frame_vec *v = &k_vecs[event_vectors[i]];
+
+            memset(wire, CANARY, sizeof wire);
+            memcpy(wire, v->wire, v->wire_len);
+            wire[42] = 1;
+            CALL(api_fail_decode_wire(wire, v->wire_len - 1, WIRE_LENGTH,
+                                      NULL, 0));
+            CALL(api_fail_decode_wire(wire, v->wire_len + 1, WIRE_LENGTH,
+                                      NULL, 0));
+        }
+    }
+    {
+        uint8_t wire[SPP_DIAG_TRACE_MAX_FRAME_BYTES];
+        struct spp_diag_trace_frame f = k_vecs[10].f;
+        uint32_t payload_length;
+
+        for (payload_length = 1041; payload_length <= 1044;
+             payload_length++) {
+            f.payload_length = payload_length;
+            CALL(api_fail_struct(&f, WIRE_LENGTH, NULL, 0));
+            memset(wire, CANARY, sizeof wire);
+            layout_frame(wire, &f);
+            CALL(api_fail_decode_wire(wire, 44u + payload_length, WIRE_LENGTH,
+                                      NULL, 0));
+        }
+    }
     return 0;
 }
 
@@ -1235,6 +1470,16 @@ static int test_decoder_bounds(void)
     uint8_t buf[SPP_DIAG_TRACE_MAX_FRAME_BYTES + 16];
     _Alignas(8) uint8_t sentinel[8];
     struct frame_box box, snap;
+    struct frame_vec extra[EXTRA_VEC_COUNT];
+    const struct frame_vec *vectors[VEC_COUNT + EXTRA_VEC_COUNT];
+
+    init_extra_vectors(extra);
+    for (vi = 0; vi < VEC_COUNT; vi++) {
+        vectors[vi] = &k_vecs[vi];
+    }
+    for (vi = 0; vi < EXTRA_VEC_COUNT; vi++) {
+        vectors[VEC_COUNT + vi] = &extra[vi];
+    }
 
     memset(sentinel, 0x5a, sizeof sentinel);
     test_asan_poison(sentinel, sizeof sentinel);
@@ -1250,8 +1495,8 @@ static int test_decoder_bounds(void)
     }
     test_asan_unpoison(sentinel, sizeof sentinel);
 
-    for (vi = 0; vi < VEC_COUNT; vi++) {
-        const struct frame_vec *v = &k_vecs[vi];
+    for (vi = 0; vi < VEC_COUNT + EXTRA_VEC_COUNT; vi++) {
+        const struct frame_vec *v = vectors[vi];
         for (len = 1; len < 44; len++) {
             memset(buf, CANARY, sizeof buf);
             memcpy(buf + 8, v->wire, len);
@@ -1334,8 +1579,8 @@ static int check_encode_cap(const struct spp_diag_trace_frame *f,
     EXPECT_EQ(written, n);
     EXPECT_EQ(required, n);
     EXPECT_MEM_EQ(buf + 8, expected, n);
-    EXPECT_EQ(buf[7], CANARY);
-    EXPECT_EQ(buf[8 + n], CANARY);
+    CALL(expect_canary(buf, 8));
+    CALL(expect_canary(buf + 8 + n, sizeof buf - 8 - n));
 
     memset(buf, CANARY, sizeof buf);
     written = required = (size_t)-1;
@@ -1384,7 +1629,8 @@ static int check_encode_cap(const struct spp_diag_trace_frame *f,
     EXPECT_EQ(written, n);
     EXPECT_EQ(required, n);
     EXPECT_MEM_EQ(buf + 8, expected, n);
-    EXPECT_EQ(buf[8 + n], CANARY);
+    CALL(expect_canary(buf, 8));
+    CALL(expect_canary(buf + 8 + n, sizeof buf - 8 - n));
     return 0;
 }
 
@@ -1404,22 +1650,31 @@ static int test_all_or_nothing(void)
     uint8_t pre_exp[SPP_DIAG_TRACE_FRAME_PREIMAGE_MAX_SIZE];
     uint8_t zchain[SPP_DIAG_TRACE_CHAIN_LEN];
     struct spp_diag_trace_frame local;
+    struct frame_vec extra[EXTRA_VEC_COUNT];
+    const struct frame_vec *vectors[VEC_COUNT + EXTRA_VEC_COUNT];
     size_t tail;
 
-    memset(zchain, 0, sizeof zchain);
+    init_extra_vectors(extra);
     for (vi = 0; vi < VEC_COUNT; vi++) {
-        CALL(check_encode_cap(&k_vecs[vi].f, k_vecs[vi].wire, k_vecs[vi].wire_len,
-                              0));
-        layout_preimage(pre_exp, &k_vecs[vi].f, zchain);
-        CALL(check_encode_cap(&k_vecs[vi].f, pre_exp,
-                              63 + k_vecs[vi].wire_len, 1));
+        vectors[vi] = &k_vecs[vi];
+    }
+    for (vi = 0; vi < EXTRA_VEC_COUNT; vi++) {
+        vectors[VEC_COUNT + vi] = &extra[vi];
+    }
+    memset(zchain, 0, sizeof zchain);
+    for (vi = 0; vi < VEC_COUNT + EXTRA_VEC_COUNT; vi++) {
+        const struct frame_vec *v = vectors[vi];
 
-        tail = SPP_DIAG_TRACE_MAX_PAYLOAD_BYTES - k_vecs[vi].f.payload_length;
+        CALL(check_encode_cap(&v->f, v->wire, v->wire_len, 0));
+        layout_preimage(pre_exp, &v->f, zchain);
+        CALL(check_encode_cap(&v->f, pre_exp, 63 + v->wire_len, 1));
+
+        tail = SPP_DIAG_TRACE_MAX_PAYLOAD_BYTES - v->f.payload_length;
         if (tail > 0) {
             uint8_t got[SPP_DIAG_TRACE_MAX_FRAME_BYTES];
             uint8_t pre[SPP_DIAG_TRACE_FRAME_PREIMAGE_MAX_SIZE];
             size_t written, required;
-            local = k_vecs[vi].f;
+            local = v->f;
             test_asan_poison(local.payload + local.payload_length, tail);
             EXPECT_ASAN_POISONED(local.payload + local.payload_length, 1);
             EXPECT_ASAN_POISONED(local.payload + 1043, 1);
@@ -1427,12 +1682,12 @@ static int test_all_or_nothing(void)
             EXPECT_EQ(spp_diag_trace_frame_encode(&local, got, sizeof got,
                                                   &written, &required),
                       WIRE_OK);
-            EXPECT_MEM_EQ(got, k_vecs[vi].wire, k_vecs[vi].wire_len);
+            EXPECT_MEM_EQ(got, v->wire, v->wire_len);
             EXPECT_EQ(spp_diag_trace_frame_preimage(&local, zchain, pre,
                                                     sizeof pre, &written,
                                                     &required),
                       WIRE_OK);
-            EXPECT_MEM_EQ(pre, pre_exp, 63 + k_vecs[vi].wire_len);
+            EXPECT_MEM_EQ(pre, pre_exp, 63 + v->wire_len);
             test_asan_unpoison(local.payload + local.payload_length, tail);
         }
     }
@@ -1461,14 +1716,18 @@ static int test_preimage(void)
     uint8_t exp[SPP_DIAG_TRACE_FRAME_PREIMAGE_MAX_SIZE];
     uint8_t with_nul[SPP_DIAG_TRACE_FRAME_PREIMAGE_MAX_SIZE + 1];
     size_t written, required, need;
-    struct spp_diag_trace_frame extra;
-    struct frame_vec xv;
+    struct frame_vec extra[EXTRA_VEC_COUNT];
+    const uint8_t *chains[2];
+    size_t ei, ci;
 
     memset(zchain, 0, sizeof zchain);
     fill_path_bytes(nchain, sizeof nchain);
+    chains[0] = zchain;
+    chains[1] = nchain;
 
     for (vi = 0; vi < VEC_COUNT; vi++) {
         need = 63 + k_vecs[vi].wire_len;
+        CALL(expect_literal_wire(vi));
         layout_preimage(exp, &k_vecs[vi].f, zchain);
         written = required = 0;
         EXPECT_EQ(spp_diag_trace_frame_preimage(&k_vecs[vi].f, zchain, got,
@@ -1479,6 +1738,8 @@ static int test_preimage(void)
         EXPECT_MEM_EQ(got, exp, need);
         EXPECT_MEM_EQ(got, k_frame_domain, 27);
         EXPECT_MEM_EQ(got + 27, zchain, 32);
+        CALL(expect_literal_u32(got + 59, (uint32_t)k_vecs[vi].wire_len));
+        EXPECT_MEM_EQ(got + 63, k_vecs[vi].wire, k_vecs[vi].wire_len);
 
         layout_preimage(exp, &k_vecs[vi].f, nchain);
         EXPECT_EQ(spp_diag_trace_frame_preimage(&k_vecs[vi].f, nchain, got,
@@ -1486,6 +1747,8 @@ static int test_preimage(void)
                   WIRE_OK);
         EXPECT_MEM_EQ(got, exp, need);
         EXPECT_MEM_EQ(got + 27, nchain, 32);
+        CALL(expect_literal_u32(got + 59, (uint32_t)k_vecs[vi].wire_len));
+        EXPECT_MEM_EQ(got + 63, k_vecs[vi].wire, k_vecs[vi].wire_len);
         EXPECT(memcmp(got + 27, zchain, 32) != 0);
 
         memcpy(with_nul, k_frame_domain, 27);
@@ -1498,26 +1761,21 @@ static int test_preimage(void)
         EXPECT(got[27] != 0);
     }
 
-    extra = k_vecs[17].f;
-    store16(extra.payload + 0, 7);
-    store16(extra.payload + 2, 8);
-    extra.phase = 8;
-    init_vec(&xv, "marker_interior_pre", &extra);
-    layout_preimage(exp, &xv.f, nchain);
-    written = required = 0;
-    EXPECT_EQ(spp_diag_trace_frame_preimage(&xv.f, nchain, got, sizeof got,
-                                            &written, &required),
-              WIRE_OK);
-    EXPECT_MEM_EQ(got, exp, 63 + xv.wire_len);
-
-    extra = k_vecs[2].f;
-    set_denied_payload(&extra, 64, 1, 1, 0);
-    init_vec(&xv, "denied_path64_pre", &extra);
-    layout_preimage(exp, &xv.f, zchain);
-    EXPECT_EQ(spp_diag_trace_frame_preimage(&xv.f, zchain, got, sizeof got,
-                                            &written, &required),
-              WIRE_OK);
-    EXPECT_MEM_EQ(got, exp, 63 + xv.wire_len);
+    init_extra_vectors(extra);
+    for (ei = 0; ei < EXTRA_VEC_COUNT; ei++) {
+        need = 63 + extra[ei].wire_len;
+        for (ci = 0; ci < 2; ci++) {
+            layout_preimage(exp, &extra[ei].f, chains[ci]);
+            written = required = 0;
+            EXPECT_EQ(spp_diag_trace_frame_preimage(
+                          &extra[ei].f, chains[ci], got, sizeof got, &written,
+                          &required),
+                      WIRE_OK);
+            EXPECT_EQ(written, need);
+            EXPECT_EQ(required, need);
+            EXPECT_MEM_EQ(got, exp, need);
+        }
+    }
     return 0;
 }
 
@@ -1538,7 +1796,7 @@ static int test_nulls(void)
               WIRE_NULL);
     EXPECT_EQ(written, 0);
     EXPECT_EQ(required, 0);
-    EXPECT_EQ(out[0], CANARY);
+    CALL(expect_canary(out, sizeof out));
 
     written = required = (size_t)-1;
     EXPECT_EQ(spp_diag_trace_frame_encode(&f, NULL, 44, &written, &required),
@@ -1551,29 +1809,53 @@ static int test_nulls(void)
     EXPECT_EQ(spp_diag_trace_frame_encode(&f, out, 44, NULL, &required),
               WIRE_NULL);
     EXPECT_EQ(required, 0);
-    EXPECT_EQ(out[0], CANARY);
+    CALL(expect_canary(out, sizeof out));
 
+    memset(out, CANARY, sizeof out);
     written = (size_t)-1;
     EXPECT_EQ(spp_diag_trace_frame_encode(&f, out, 44, &written, NULL),
               WIRE_NULL);
     EXPECT_EQ(written, 0);
+    CALL(expect_canary(out, sizeof out));
 
+    memset(out, CANARY, sizeof out);
     written = required = (size_t)-1;
     EXPECT_EQ(spp_diag_trace_frame_preimage(NULL, chain, out, 64, &written,
                                             &required),
               WIRE_NULL);
     EXPECT_EQ(written, 0);
     EXPECT_EQ(required, 0);
+    CALL(expect_canary(out, sizeof out));
+
+    memset(out, CANARY, sizeof out);
+    written = required = (size_t)-1;
     EXPECT_EQ(spp_diag_trace_frame_preimage(&f, NULL, out, 64, &written,
                                             &required),
               WIRE_NULL);
+    EXPECT_EQ(written, 0);
+    EXPECT_EQ(required, 0);
+    CALL(expect_canary(out, sizeof out));
+
+    written = required = (size_t)-1;
     EXPECT_EQ(spp_diag_trace_frame_preimage(&f, chain, NULL, 64, &written,
                                             &required),
               WIRE_NULL);
+    EXPECT_EQ(written, 0);
+    EXPECT_EQ(required, 0);
+
+    memset(out, CANARY, sizeof out);
+    required = (size_t)-1;
     EXPECT_EQ(spp_diag_trace_frame_preimage(&f, chain, out, 64, NULL, &required),
               WIRE_NULL);
+    EXPECT_EQ(required, 0);
+    CALL(expect_canary(out, sizeof out));
+
+    memset(out, CANARY, sizeof out);
+    written = (size_t)-1;
     EXPECT_EQ(spp_diag_trace_frame_preimage(&f, chain, out, 64, &written, NULL),
               WIRE_NULL);
+    EXPECT_EQ(written, 0);
+    CALL(expect_canary(out, sizeof out));
 
     memset(&box, CANARY2, sizeof box);
     snap = box;
@@ -1582,8 +1864,11 @@ static int test_nulls(void)
               WIRE_NULL);
     EXPECT_EQ(consumed, 0);
     EXPECT(memcmp(&box, &snap, sizeof box) == 0);
+    consumed = (size_t)-1;
     EXPECT_EQ(spp_diag_trace_frame_decode(out, 0, NULL, &consumed), WIRE_NULL);
     EXPECT_EQ(consumed, 0);
+    memset(&box, CANARY2, sizeof box);
+    snap = box;
     EXPECT_EQ(spp_diag_trace_frame_decode(out, 0, &box.f, NULL), WIRE_NULL);
     EXPECT(memcmp(&box, &snap, sizeof box) == 0);
     return 0;

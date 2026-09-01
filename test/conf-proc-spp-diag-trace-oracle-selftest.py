@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Independent literal oracle for the SPP diagnostic fixed-object C ABI.
+"""Independent literal oracle for the SPP diagnostic structural C ABI.
 
 This file is derived only from the reviewed wire prose.  It does not import,
 parse, or generate values from the production C header, implementation, or
@@ -17,6 +17,7 @@ from pathlib import Path
 
 SOURCE_COMMIT = bytes.fromhex("91a8e826012fbb1c7f5cb2a326c08b13e390f469")
 HEADER_DOMAIN = b"sol-spp-diag-trace-header/v1"
+FRAME_DOMAIN = b"sol-spp-diag-trace-frame/v1"
 IMA_LABEL = b"sol_spp_diag_trace"
 
 
@@ -117,6 +118,59 @@ def ima(
     if len(raw) != 256:
         raise AssertionError(f"oracle IMA record is {len(raw)} bytes")
     return raw
+
+
+def frame(
+    event: int,
+    flags: int,
+    sequence: int,
+    task: int,
+    parent: int,
+    operation: int,
+    phase: int,
+    payload: bytes,
+) -> bytes:
+    raw = b"".join(
+        (
+            be(event, 2),
+            be(flags, 2),
+            be(len(payload), 4),
+            be(sequence, 8),
+            be(task, 8),
+            be(parent, 8),
+            be(operation, 8),
+            be(phase, 2),
+            bytes(2),
+            payload,
+        )
+    )
+    if len(raw) != 44 + len(payload) or len(raw) > 1088:
+        raise AssertionError(f"oracle frame is {len(raw)} bytes")
+    return raw
+
+
+def denied_payload(path: bytes, pid: int, tgid: int, task_flags: int) -> bytes:
+    return b"".join((be(13, 2), be(len(path), 2), be(pid, 4), be(tgid, 4), be(task_flags, 8), path))
+
+
+def release_payload(pid: int, tgid: int, denied: int) -> bytes:
+    return be(pid, 4) + be(tgid, 4) + be(denied, 8)
+
+
+def attempt_payload(pass_index: int, path: bytes, pid: int, tgid: int) -> bytes:
+    return b"".join((be(pass_index, 4), be(len(path), 2), bytes(2), be(pid, 4), be(tgid, 4), path))
+
+
+def commit_payload(pass_count: int, pid: int, tgid: int) -> bytes:
+    return be(pass_count, 4) + be(pid, 4) + be(tgid, 4) + bytes(4)
+
+
+def created_payload(pid: int, tgid: int, clone_flags: int) -> bytes:
+    return be(pid, 4) + be(tgid, 4) + be(clone_flags, 8)
+
+
+def marker_payload(previous: int, following: int) -> bytes:
+    return be(previous, 2) + be(following, 2) + bytes(4)
 
 
 def invoke(harness: Path, operation: str, *args: object) -> list[str]:
@@ -286,9 +340,161 @@ def main() -> int:
     if label != ["0", "18", IMA_LABEL.hex()]:
         raise AssertionError(f"IMA label mismatch: {label}")
 
+    path_one = b"/"
+    path_inner = b"/usr/lib/sol/diagnostic"
+    path_max = b"P" * 1024
+    maximum32 = (1 << 32) - 1
+    maximum64 = (1 << 64) - 1
+    frame_vectors = (
+        ("core-init", frame(1, 0, 0, 0, 0, 0, 0, b"")),
+        (
+            "denied-min",
+            frame(2, 0, 1, 0, 0, 1, 0, denied_payload(path_one, 1, 1, 0)),
+        ),
+        (
+            "denied-max",
+            frame(
+                2,
+                0,
+                maximum64,
+                maximum64,
+                0,
+                maximum64,
+                0,
+                denied_payload(path_max, maximum32, maximum32, maximum64),
+            ),
+        ),
+        ("ima-ready-zero", frame(3, 0, 2, 0, 0, 0, 0, be(0, 8))),
+        ("ima-ready-max", frame(3, 0, 3, 0, 0, 0, 0, be(maximum64, 8))),
+        (
+            "userspace-release-min",
+            frame(4, 0, 4, 1, 0, 0, 0, release_payload(1, 1, 0)),
+        ),
+        (
+            "userspace-release-max",
+            frame(
+                4,
+                0,
+                5,
+                maximum64,
+                0,
+                0,
+                0,
+                release_payload(maximum32, maximum32, maximum64),
+            ),
+        ),
+        (
+            "exec-attempt-prerelease",
+            frame(5, 1, 6, 1, 0, 1, 0, attempt_payload(1, path_one, 1, 1)),
+        ),
+        (
+            "exec-attempt-init",
+            frame(
+                5,
+                0,
+                7,
+                2,
+                0,
+                2,
+                1,
+                attempt_payload(2, path_inner, 2, 3),
+            ),
+        ),
+        (
+            "exec-attempt-finalize",
+            frame(
+                5,
+                0,
+                8,
+                maximum64,
+                0,
+                maximum64,
+                14,
+                attempt_payload(maximum32, path_max, maximum32, maximum32),
+            ),
+        ),
+        ("exec-commit-min", frame(6, 0, 9, 1, 0, 1, 1, commit_payload(1, 1, 1))),
+        (
+            "exec-commit-max",
+            frame(
+                6,
+                0,
+                10,
+                maximum64,
+                0,
+                maximum64,
+                14,
+                commit_payload(maximum32, maximum32, maximum32),
+            ),
+        ),
+        ("task-alloc-zero", frame(7, 0, 11, 2, 1, 1, 1, be(0, 8))),
+        (
+            "task-alloc-max",
+            frame(7, 0, 12, maximum64, maximum64 - 1, maximum64, 14, be(maximum64, 8)),
+        ),
+        (
+            "task-created-zero",
+            frame(8, 0, 13, 2, 1, 1, 1, created_payload(1, 1, 0)),
+        ),
+        (
+            "task-created-max",
+            frame(
+                8,
+                0,
+                14,
+                maximum64,
+                maximum64 - 1,
+                maximum64,
+                14,
+                created_payload(maximum32, maximum32, maximum64),
+            ),
+        ),
+        ("phase-marker-min", frame(9, 0, 15, 1, 0, 0, 2, marker_payload(1, 2))),
+        ("phase-marker-mid", frame(9, 0, 16, 2, 0, 0, 8, marker_payload(7, 8))),
+        (
+            "phase-marker-max",
+            frame(9, 0, 17, maximum64, 0, 0, 14, marker_payload(13, 14)),
+        ),
+        ("terminal", frame(10, 0, maximum64, 0, 0, 0, 15, b"")),
+    )
+    if len(FRAME_DOMAIN) != 27:
+        raise AssertionError("frame domain length drift")
+    frame_digests: list[bytes] = []
+    for name, encoded in frame_vectors:
+        payload = encoded[44:]
+        fields = [
+            str(int.from_bytes(encoded[0:2], "big")),
+            str(int.from_bytes(encoded[2:4], "big")),
+            str(len(payload)),
+            str(int.from_bytes(encoded[8:16], "big")),
+            str(int.from_bytes(encoded[16:24], "big")),
+            str(int.from_bytes(encoded[24:32], "big")),
+            str(int.from_bytes(encoded[32:40], "big")),
+            str(int.from_bytes(encoded[40:42], "big")),
+            payload.hex(),
+        ]
+        expect_encode(harness, "frame-encode", encoded, encoded.hex())
+        expect_decode(harness, "frame-decode", encoded, fields)
+        for previous in (zero, chain_a):
+            preimage = FRAME_DOMAIN + previous + be(len(encoded), 4) + encoded
+            expect_encode(
+                harness,
+                "frame-preimage",
+                preimage,
+                encoded.hex(),
+                previous.hex(),
+            )
+            frame_digests.append(hashlib.sha256(preimage).digest())
+        if frame_digests[-1] == frame_digests[-2]:
+            raise AssertionError(f"{name}: previous chain did not change digest")
+
+    digest_set = hashlib.sha256(b"".join(frame_digests)).hexdigest()
+
     print(
-        "ok   independent fixed-object oracle "
-        f"header_preimage_sha256={hashlib.sha256(preimage).hexdigest()}"
+        "ok   independent fixed-object/frame oracle "
+        f"header_preimage_sha256={hashlib.sha256(HEADER_DOMAIN + be(192, 4) + dense_header).hexdigest()} "
+        f"frame_vectors={len(frame_vectors)} frame_preimages={len(frame_digests)} "
+        f"frame_digest_set_sha256={digest_set}"
     )
     return 0
 
