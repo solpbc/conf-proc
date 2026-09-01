@@ -1185,6 +1185,316 @@ int spp_diag_trace_frame_preimage(const struct spp_diag_trace_frame *in,
     return WIRE_OK;
 }
 
+static int provenance_event_check(uint16_t event)
+{
+    return event == SPP_DIAG_TRACE_PROVENANCE_EVENT_FILE_OPEN_ATTEMPT ? WIRE_OK
+                                                                     : WIRE_EVENT;
+}
+
+static int provenance_flags_check(uint16_t flags)
+{
+    return flags == 0 ? WIRE_OK : WIRE_FLAGS;
+}
+
+static int provenance_payload_length_check(uint32_t n)
+{
+    if (n > SPP_DIAG_TRACE_MAX_PAYLOAD_BYTES) {
+        return WIRE_CAP;
+    }
+    if (n < SPP_DIAG_TRACE_FILE_OPEN_ATTEMPT_MIN_PAYLOAD ||
+        n > SPP_DIAG_TRACE_FILE_OPEN_ATTEMPT_MAX_PAYLOAD) {
+        return WIRE_LENGTH;
+    }
+    return WIRE_OK;
+}
+
+static int provenance_task_check(uint64_t task)
+{
+    return task != 0 ? WIRE_OK : WIRE_VALUE;
+}
+
+static int provenance_parent_check(uint64_t parent)
+{
+    return parent == 0 ? WIRE_OK : WIRE_VALUE;
+}
+
+static int provenance_operation_check(uint64_t operation)
+{
+    return operation != 0 ? WIRE_OK : WIRE_VALUE;
+}
+
+static int provenance_phase_check(uint16_t phase)
+{
+    return (phase >= SPP_DIAG_TRACE_PHASE_INIT &&
+            phase <= SPP_DIAG_TRACE_PHASE_EVIDENCE_FINALIZE)
+               ? WIRE_OK
+               : WIRE_STATE;
+}
+
+static int provenance_header_fields(const struct spp_diag_trace_frame *f)
+{
+    int err;
+
+    err = provenance_event_check(f->event_type);
+    if (err != WIRE_OK) {
+        return err;
+    }
+    err = provenance_flags_check(f->flags);
+    if (err != WIRE_OK) {
+        return err;
+    }
+    err = provenance_payload_length_check(f->payload_length);
+    if (err != WIRE_OK) {
+        return err;
+    }
+    err = provenance_task_check(f->task_ordinal);
+    if (err != WIRE_OK) {
+        return err;
+    }
+    err = provenance_parent_check(f->parent_task_ordinal);
+    if (err != WIRE_OK) {
+        return err;
+    }
+    err = provenance_operation_check(f->operation_ordinal);
+    if (err != WIRE_OK) {
+        return err;
+    }
+    err = provenance_phase_check(f->phase);
+    if (err != WIRE_OK) {
+        return err;
+    }
+    return frame_reserved_check(f->reserved);
+}
+
+static int provenance_payload_check(const uint8_t *p, uint32_t n)
+{
+    uint16_t action;
+    uint16_t path_len;
+    uint16_t access;
+    uint16_t modifier;
+    uint32_t dirfd_bits;
+    uint32_t reserved;
+    int err;
+
+    action = load_u16be(p + 0);
+    if (action != 1u) {
+        return WIRE_STATE;
+    }
+    path_len = load_u16be(p + 2);
+    err = frame_path_len_check(path_len, n,
+                               SPP_DIAG_TRACE_FILE_OPEN_ATTEMPT_PREFIX_SIZE);
+    if (err != WIRE_OK) {
+        return err;
+    }
+    access = load_u16be(p + 4);
+    if (access < SPP_DIAG_TRACE_FILE_ACCESS_READ ||
+        access > SPP_DIAG_TRACE_FILE_ACCESS_PATH_ONLY) {
+        return WIRE_STATE;
+    }
+    modifier = load_u16be(p + 6);
+    if ((modifier & ~(uint32_t)SPP_DIAG_TRACE_FILE_MOD_MASK) != 0) {
+        return WIRE_FLAGS;
+    }
+    dirfd_bits = load_u32be(p + 8);
+    (void)dirfd_bits;
+    reserved = load_u32be(p + 12);
+    if (reserved != 0) {
+        return WIRE_RESERVED;
+    }
+    return frame_path_content_check(p + 16, path_len);
+}
+
+static int provenance_fields(const struct spp_diag_trace_frame *f)
+{
+    int err;
+
+    err = provenance_header_fields(f);
+    if (err != WIRE_OK) {
+        return err;
+    }
+    return provenance_payload_check(f->payload, f->payload_length);
+}
+
+int spp_diag_trace_provenance_frame_encode(
+    const struct spp_diag_trace_frame *in, uint8_t *out, size_t cap,
+    size_t *written, size_t *required)
+{
+    int err;
+    size_t need;
+
+    if (in == NULL || out == NULL || written == NULL || required == NULL) {
+        if (written != NULL) {
+            *written = 0;
+        }
+        if (required != NULL) {
+            *required = 0;
+        }
+        return WIRE_NULL;
+    }
+    err = provenance_fields(in);
+    if (err != WIRE_OK) {
+        return fail_encode(err, written, required);
+    }
+    need = (size_t)SPP_DIAG_TRACE_FRAME_HEADER_SIZE + (size_t)in->payload_length;
+    if (cap < need) {
+        *written = 0;
+        *required = need;
+        return WIRE_BUFFER_TOO_SMALL;
+    }
+    frame_to_wire(in, out);
+    *written = need;
+    *required = need;
+    return WIRE_OK;
+}
+
+int spp_diag_trace_provenance_frame_decode(const uint8_t *in, size_t len,
+                                           struct spp_diag_trace_frame *out,
+                                           size_t *consumed)
+{
+    struct spp_diag_trace_frame tmp;
+    uint16_t event;
+    uint16_t flags;
+    uint16_t phase;
+    uint16_t reserved;
+    uint32_t plen;
+    uint64_t sequence;
+    uint64_t task;
+    uint64_t parent;
+    uint64_t operation;
+    int err;
+    size_t i;
+
+    if (in == NULL || out == NULL || consumed == NULL) {
+        if (consumed != NULL) {
+            *consumed = 0;
+        }
+        return WIRE_NULL;
+    }
+    if (len < SPP_DIAG_TRACE_FRAME_HEADER_SIZE) {
+        *consumed = 0;
+        return WIRE_LENGTH;
+    }
+    event = load_u16be(in + 0);
+    err = provenance_event_check(event);
+    if (err != WIRE_OK) {
+        *consumed = 0;
+        return err;
+    }
+    flags = load_u16be(in + 2);
+    err = provenance_flags_check(flags);
+    if (err != WIRE_OK) {
+        *consumed = 0;
+        return err;
+    }
+    plen = load_u32be(in + 4);
+    err = provenance_payload_length_check(plen);
+    if (err != WIRE_OK) {
+        *consumed = 0;
+        return err;
+    }
+    if (len != (size_t)SPP_DIAG_TRACE_FRAME_HEADER_SIZE + (size_t)plen) {
+        *consumed = 0;
+        return WIRE_LENGTH;
+    }
+    sequence = load_u64be(in + 8);
+    task = load_u64be(in + 16);
+    err = provenance_task_check(task);
+    if (err != WIRE_OK) {
+        *consumed = 0;
+        return err;
+    }
+    parent = load_u64be(in + 24);
+    err = provenance_parent_check(parent);
+    if (err != WIRE_OK) {
+        *consumed = 0;
+        return err;
+    }
+    operation = load_u64be(in + 32);
+    err = provenance_operation_check(operation);
+    if (err != WIRE_OK) {
+        *consumed = 0;
+        return err;
+    }
+    phase = load_u16be(in + 40);
+    err = provenance_phase_check(phase);
+    if (err != WIRE_OK) {
+        *consumed = 0;
+        return err;
+    }
+    reserved = load_u16be(in + 42);
+    err = frame_reserved_check(reserved);
+    if (err != WIRE_OK) {
+        *consumed = 0;
+        return err;
+    }
+    err = provenance_payload_check(in + 44, plen);
+    if (err != WIRE_OK) {
+        *consumed = 0;
+        return err;
+    }
+    tmp.event_type = event;
+    tmp.flags = flags;
+    tmp.payload_length = plen;
+    tmp.sequence = sequence;
+    tmp.task_ordinal = task;
+    tmp.parent_task_ordinal = parent;
+    tmp.operation_ordinal = operation;
+    tmp.phase = phase;
+    tmp.reserved = reserved;
+    copy_n(tmp.payload, in + 44, plen);
+    for (i = plen; i < SPP_DIAG_TRACE_MAX_PAYLOAD_BYTES; i++) {
+        tmp.payload[i] = 0;
+    }
+    *out = tmp;
+    *consumed = len;
+    return WIRE_OK;
+}
+
+int spp_diag_trace_provenance_frame_preimage(
+    const struct spp_diag_trace_frame *in,
+    const uint8_t previous_chain[SPP_DIAG_TRACE_CHAIN_LEN], uint8_t *out,
+    size_t cap, size_t *written, size_t *required)
+{
+    int err;
+    size_t frame_len;
+    size_t need;
+
+    if (in == NULL || previous_chain == NULL || out == NULL || written == NULL ||
+        required == NULL) {
+        if (written != NULL) {
+            *written = 0;
+        }
+        if (required != NULL) {
+            *required = 0;
+        }
+        return WIRE_NULL;
+    }
+    err = provenance_fields(in);
+    if (err != WIRE_OK) {
+        return fail_encode(err, written, required);
+    }
+    frame_len =
+        (size_t)SPP_DIAG_TRACE_FRAME_HEADER_SIZE + (size_t)in->payload_length;
+    need = (size_t)SPP_DIAG_TRACE_FRAME_PREIMAGE_DOMAIN_LEN +
+           (size_t)SPP_DIAG_TRACE_CHAIN_LEN + 4u + frame_len;
+    if (cap < need) {
+        *written = 0;
+        *required = need;
+        return WIRE_BUFFER_TOO_SMALL;
+    }
+    copy_n(out, k_frame_preimage_domain, SPP_DIAG_TRACE_FRAME_PREIMAGE_DOMAIN_LEN);
+    copy_n(out + SPP_DIAG_TRACE_FRAME_PREIMAGE_DOMAIN_LEN, previous_chain,
+           SPP_DIAG_TRACE_CHAIN_LEN);
+    store_u32be(out + SPP_DIAG_TRACE_FRAME_PREIMAGE_DOMAIN_LEN +
+                    SPP_DIAG_TRACE_CHAIN_LEN,
+                (uint32_t)frame_len);
+    frame_to_wire(in, out + SPP_DIAG_TRACE_FRAME_PREIMAGE_DOMAIN_LEN +
+                          SPP_DIAG_TRACE_CHAIN_LEN + 4);
+    *written = need;
+    *required = need;
+    return WIRE_OK;
+}
+
 int spp_diag_trace_stream_validate(const uint8_t *in, size_t len,
                                    struct spp_diag_trace_stream_summary *out,
                                    size_t *consumed)

@@ -91,6 +91,22 @@ enum spp_diag_trace_result {
 #define SPP_DIAG_TRACE_PHASE_EVIDENCE_FINALIZE 14u
 #define SPP_DIAG_TRACE_PHASE_SEALED 15u
 
+#define SPP_DIAG_TRACE_PROVENANCE_EVENT_FILE_OPEN_ATTEMPT 0x0100u
+#define SPP_DIAG_TRACE_FILE_ACCESS_READ 1u
+#define SPP_DIAG_TRACE_FILE_ACCESS_WRITE 2u
+#define SPP_DIAG_TRACE_FILE_ACCESS_READ_WRITE 3u
+#define SPP_DIAG_TRACE_FILE_ACCESS_PATH_ONLY 4u
+#define SPP_DIAG_TRACE_FILE_MOD_CREATE 0x0001u
+#define SPP_DIAG_TRACE_FILE_MOD_TRUNCATE 0x0002u
+#define SPP_DIAG_TRACE_FILE_MOD_APPEND 0x0004u
+#define SPP_DIAG_TRACE_FILE_MOD_NOFOLLOW 0x0008u
+#define SPP_DIAG_TRACE_FILE_MOD_CLOEXEC 0x0010u
+#define SPP_DIAG_TRACE_FILE_MOD_DIRECTORY 0x0020u
+#define SPP_DIAG_TRACE_FILE_MOD_MASK 0x003fu
+#define SPP_DIAG_TRACE_FILE_OPEN_ATTEMPT_PREFIX_SIZE 16u
+#define SPP_DIAG_TRACE_FILE_OPEN_ATTEMPT_MIN_PAYLOAD 17u
+#define SPP_DIAG_TRACE_FILE_OPEN_ATTEMPT_MAX_PAYLOAD 1040u
+
 _Static_assert(SPP_DIAG_TRACE_HEADER_SIZE == 192, "header wire size");
 _Static_assert(SPP_DIAG_TRACE_PREIMAGE_SIZE == 224, "preimage size");
 _Static_assert(SPP_DIAG_TRACE_COMMAND_SIZE == 128, "command wire size");
@@ -240,6 +256,27 @@ int spp_diag_trace_frame_preimage(const struct spp_diag_trace_frame *in,
                                   const uint8_t previous_chain[SPP_DIAG_TRACE_CHAIN_LEN],
                                   uint8_t *out, size_t cap, size_t *written,
                                   size_t *required);
+
+/*
+ * Structural provenance-frame codec only: WIRE_OK means one standalone
+ * file-open-attempt frame is locally well formed. It does not establish
+ * that an attempt occurred, kernel authorship, stream membership, IMA,
+ * attestation, or qualification.
+ *
+ * Every API requires its input, output/result, previous-chain, and metadata
+ * ranges to be non-overlapping. Overlap is caller error with undefined
+ * behavior; this portable reference does not attempt pointer-range detection.
+ */
+int spp_diag_trace_provenance_frame_encode(
+    const struct spp_diag_trace_frame *in,
+    uint8_t *out, size_t cap, size_t *written, size_t *required);
+int spp_diag_trace_provenance_frame_decode(
+    const uint8_t *in, size_t len,
+    struct spp_diag_trace_frame *out, size_t *consumed);
+int spp_diag_trace_provenance_frame_preimage(
+    const struct spp_diag_trace_frame *in,
+    const uint8_t previous_chain[SPP_DIAG_TRACE_CHAIN_LEN],
+    uint8_t *out, size_t cap, size_t *written, size_t *required);
 
 struct spp_diag_trace_stream_summary {
     uint64_t frame_count;
