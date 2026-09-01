@@ -1190,6 +1190,7 @@ static int provenance_event_check(uint16_t event)
     switch (event) {
     case SPP_DIAG_TRACE_PROVENANCE_EVENT_FILE_OPEN_ATTEMPT:
     case SPP_DIAG_TRACE_PROVENANCE_EVENT_FILE_POLICY_DECISION:
+    case SPP_DIAG_TRACE_PROVENANCE_EVENT_EXEC_MAPPING_POLICY_DECISION:
         return WIRE_OK;
     default:
         return WIRE_EVENT;
@@ -1216,6 +1217,10 @@ static int provenance_payload_length_check(uint16_t event, uint32_t n)
     case SPP_DIAG_TRACE_PROVENANCE_EVENT_FILE_POLICY_DECISION:
         return n == SPP_DIAG_TRACE_FILE_POLICY_DECISION_PAYLOAD_SIZE ? WIRE_OK
                                                                     : WIRE_LENGTH;
+    case SPP_DIAG_TRACE_PROVENANCE_EVENT_EXEC_MAPPING_POLICY_DECISION:
+        return n == SPP_DIAG_TRACE_EXEC_MAPPING_POLICY_DECISION_PAYLOAD_SIZE
+                   ? WIRE_OK
+                   : WIRE_LENGTH;
     default:
         return WIRE_EVENT;
     }
@@ -1342,6 +1347,130 @@ static int payload_file_policy_decision(const uint8_t *p, uint32_t n)
     return WIRE_OK;
 }
 
+static int payload_exec_mapping_policy_decision(const uint8_t *p, uint32_t n)
+{
+    uint16_t operation;
+    uint16_t decision;
+    uint16_t backing;
+    uint16_t mode;
+    uint32_t requested;
+    uint32_t effective;
+    uint32_t prior;
+    uint32_t result;
+    uint32_t fs_magic;
+    uint32_t dev_major;
+    uint32_t dev_minor;
+    uint32_t seals;
+    uint64_t inode;
+    uint64_t mount_identity;
+    uint64_t observed_size;
+
+    (void)n;
+    operation = load_u16be(p + 0);
+    if (operation != SPP_DIAG_TRACE_MAPPING_OPERATION_MMAP &&
+        operation != SPP_DIAG_TRACE_MAPPING_OPERATION_MPROTECT) {
+        return WIRE_STATE;
+    }
+    decision = load_u16be(p + 2);
+    if (decision != SPP_DIAG_TRACE_POLICY_ALLOW &&
+        decision != SPP_DIAG_TRACE_POLICY_DENY) {
+        return WIRE_STATE;
+    }
+    backing = load_u16be(p + 4);
+    if (backing < SPP_DIAG_TRACE_MAPPING_BACKING_ANONYMOUS ||
+        backing > SPP_DIAG_TRACE_MAPPING_BACKING_OTHER) {
+        return WIRE_STATE;
+    }
+    mode = load_u16be(p + 6);
+    if (mode != SPP_DIAG_TRACE_MAPPING_MODE_SHARED &&
+        mode != SPP_DIAG_TRACE_MAPPING_MODE_PRIVATE) {
+        return WIRE_STATE;
+    }
+    requested = load_u32be(p + 8);
+    if ((requested & ~SPP_DIAG_TRACE_MAPPING_PROT_MASK) != 0) {
+        return WIRE_FLAGS;
+    }
+    effective = load_u32be(p + 12);
+    if ((effective & ~SPP_DIAG_TRACE_MAPPING_PROT_MASK) != 0) {
+        return WIRE_FLAGS;
+    }
+    prior = load_u32be(p + 16);
+    if ((prior & ~SPP_DIAG_TRACE_MAPPING_PROT_MASK) != 0) {
+        return WIRE_FLAGS;
+    }
+    if ((effective & SPP_DIAG_TRACE_MAPPING_PROT_EXEC) == 0) {
+        return WIRE_STATE;
+    }
+    if (operation == SPP_DIAG_TRACE_MAPPING_OPERATION_MMAP && prior != 0) {
+        return WIRE_STATE;
+    }
+    result = load_u32be(p + 20);
+    if (decision == SPP_DIAG_TRACE_POLICY_ALLOW) {
+        if (result != 0u) {
+            return WIRE_VALUE;
+        }
+    } else if (decision == SPP_DIAG_TRACE_POLICY_DENY) {
+        if ((result & 0x80000000u) == 0u) {
+            return WIRE_VALUE;
+        }
+    }
+    fs_magic = load_u32be(p + 24);
+    if (backing == SPP_DIAG_TRACE_MAPPING_BACKING_ANONYMOUS) {
+        if (fs_magic != 0) {
+            return WIRE_VALUE;
+        }
+    } else {
+        (void)fs_magic;
+    }
+    dev_major = load_u32be(p + 28);
+    if (backing == SPP_DIAG_TRACE_MAPPING_BACKING_ANONYMOUS) {
+        if (dev_major != 0) {
+            return WIRE_VALUE;
+        }
+    } else {
+        (void)dev_major;
+    }
+    dev_minor = load_u32be(p + 32);
+    if (backing == SPP_DIAG_TRACE_MAPPING_BACKING_ANONYMOUS) {
+        if (dev_minor != 0) {
+            return WIRE_VALUE;
+        }
+    } else {
+        (void)dev_minor;
+    }
+    seals = load_u32be(p + 36);
+    if (backing != SPP_DIAG_TRACE_MAPPING_BACKING_MEMFD) {
+        if (seals != 0) {
+            return WIRE_FLAGS;
+        }
+    }
+    inode = load_u64be(p + 40);
+    if (backing == SPP_DIAG_TRACE_MAPPING_BACKING_ANONYMOUS) {
+        if (inode != 0) {
+            return WIRE_VALUE;
+        }
+    } else if (inode == 0) {
+        return WIRE_VALUE;
+    }
+    mount_identity = load_u64be(p + 48);
+    if (backing == SPP_DIAG_TRACE_MAPPING_BACKING_ANONYMOUS) {
+        if (mount_identity != 0) {
+            return WIRE_VALUE;
+        }
+    } else if (mount_identity == 0) {
+        return WIRE_VALUE;
+    }
+    observed_size = load_u64be(p + 56);
+    if (backing == SPP_DIAG_TRACE_MAPPING_BACKING_ANONYMOUS) {
+        if (observed_size != 0) {
+            return WIRE_VALUE;
+        }
+    } else {
+        (void)observed_size;
+    }
+    return WIRE_OK;
+}
+
 static int provenance_payload_check(uint16_t event, const uint8_t *p, uint32_t n)
 {
     switch (event) {
@@ -1384,6 +1513,8 @@ static int provenance_payload_check(uint16_t event, const uint8_t *p, uint32_t n
     }
     case SPP_DIAG_TRACE_PROVENANCE_EVENT_FILE_POLICY_DECISION:
         return payload_file_policy_decision(p, n);
+    case SPP_DIAG_TRACE_PROVENANCE_EVENT_EXEC_MAPPING_POLICY_DECISION:
+        return payload_exec_mapping_policy_decision(p, n);
     default:
         return WIRE_EVENT;
     }

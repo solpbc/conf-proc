@@ -114,6 +114,20 @@ enum spp_diag_trace_result {
 #define SPP_DIAG_TRACE_FILE_OBJECT_MEMFD 3u
 #define SPP_DIAG_TRACE_FILE_OBJECT_OTHER 4u
 #define SPP_DIAG_TRACE_FILE_POLICY_DECISION_PAYLOAD_SIZE 48u
+#define SPP_DIAG_TRACE_PROVENANCE_EVENT_EXEC_MAPPING_POLICY_DECISION 0x0102u
+#define SPP_DIAG_TRACE_MAPPING_OPERATION_MMAP 1u
+#define SPP_DIAG_TRACE_MAPPING_OPERATION_MPROTECT 2u
+#define SPP_DIAG_TRACE_MAPPING_BACKING_ANONYMOUS 1u
+#define SPP_DIAG_TRACE_MAPPING_BACKING_REGULAR 2u
+#define SPP_DIAG_TRACE_MAPPING_BACKING_MEMFD 3u
+#define SPP_DIAG_TRACE_MAPPING_BACKING_OTHER 4u
+#define SPP_DIAG_TRACE_MAPPING_MODE_SHARED 1u
+#define SPP_DIAG_TRACE_MAPPING_MODE_PRIVATE 2u
+#define SPP_DIAG_TRACE_MAPPING_PROT_READ 0x00000001u
+#define SPP_DIAG_TRACE_MAPPING_PROT_WRITE 0x00000002u
+#define SPP_DIAG_TRACE_MAPPING_PROT_EXEC 0x00000004u
+#define SPP_DIAG_TRACE_MAPPING_PROT_MASK 0x00000007u
+#define SPP_DIAG_TRACE_EXEC_MAPPING_POLICY_DECISION_PAYLOAD_SIZE 64u
 
 _Static_assert(SPP_DIAG_TRACE_HEADER_SIZE == 192, "header wire size");
 _Static_assert(SPP_DIAG_TRACE_PREIMAGE_SIZE == 224, "preimage size");
@@ -146,6 +160,14 @@ _Static_assert(SPP_DIAG_TRACE_FRAME_HEADER_SIZE +
 _Static_assert(SPP_DIAG_TRACE_FRAME_PREIMAGE_DOMAIN_LEN + SPP_DIAG_TRACE_CHAIN_LEN +
                        4 + 92 == 155,
                "file-policy-decision preimage size");
+_Static_assert(SPP_DIAG_TRACE_EXEC_MAPPING_POLICY_DECISION_PAYLOAD_SIZE == 64,
+               "exec-mapping-policy-decision payload size");
+_Static_assert(SPP_DIAG_TRACE_FRAME_HEADER_SIZE +
+                   SPP_DIAG_TRACE_EXEC_MAPPING_POLICY_DECISION_PAYLOAD_SIZE == 108,
+               "exec-mapping-policy-decision frame size");
+_Static_assert(SPP_DIAG_TRACE_FRAME_PREIMAGE_DOMAIN_LEN + SPP_DIAG_TRACE_CHAIN_LEN +
+                       4 + 108 == 171,
+               "exec-mapping-policy-decision preimage size");
 _Static_assert(SPP_DIAG_TRACE_STREAM_PREFIX_SIZE == 4, "stream prefix size");
 _Static_assert(SPP_DIAG_TRACE_STREAM_HEADER_ENTRY_SIZE == 196,
                "stream header entry size");
@@ -275,7 +297,7 @@ int spp_diag_trace_frame_preimage(const struct spp_diag_trace_frame *in,
 
 /*
  * Structural provenance-frame codec only: WIRE_OK means one standalone
- * file-open-attempt or file-policy-decision frame is locally well formed.
+ * frame for a supported provenance event is locally well formed.
  * It does not establish that an attempt or decision occurred, kernel
  * authorship, stream membership, IMA, attestation, or qualification.
  *
