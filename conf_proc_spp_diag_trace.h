@@ -37,6 +37,13 @@ enum spp_diag_trace_result {
 #define SPP_DIAG_TRACE_MAX_FRAMES 524288u
 #define SPP_DIAG_TRACE_MAX_STREAM_BYTES 268435456ull
 #define SPP_DIAG_TRACE_MAX_FRAME_BYTES 1088u
+#define SPP_DIAG_TRACE_FRAME_HEADER_SIZE 44
+#define SPP_DIAG_TRACE_MAX_PATH_BYTES 1024
+#define SPP_DIAG_TRACE_MAX_PAYLOAD_BYTES 1044
+#define SPP_DIAG_TRACE_CHAIN_LEN 32
+#define SPP_DIAG_TRACE_FRAME_PREIMAGE_DOMAIN_LEN 27
+#define SPP_DIAG_TRACE_FRAME_PREIMAGE_MIN_SIZE 107
+#define SPP_DIAG_TRACE_FRAME_PREIMAGE_MAX_SIZE 1151
 #define SPP_DIAG_TRACE_HOOK_MASK 0xfull
 #define SPP_DIAG_TRACE_IMA_FRAME_COUNT_MIN 1ull
 #define SPP_DIAG_TRACE_IMA_STREAM_BYTES_MIN 244ull
@@ -54,20 +61,65 @@ enum spp_diag_trace_result {
 #define SPP_DIAG_TRACE_IMA_STATE_LIST_RELEASED 2u
 #define SPP_DIAG_TRACE_IMA_STATE_LIST_SEALED 3u
 
+#define SPP_DIAG_TRACE_EVENT_CORE_INIT 1u
+#define SPP_DIAG_TRACE_EVENT_PRE_RELEASE_EXEC_DENIED 2u
+#define SPP_DIAG_TRACE_EVENT_IMA_READY 3u
+#define SPP_DIAG_TRACE_EVENT_USERSPACE_RELEASE 4u
+#define SPP_DIAG_TRACE_EVENT_EXEC_ATTEMPT 5u
+#define SPP_DIAG_TRACE_EVENT_EXEC_COMMIT 6u
+#define SPP_DIAG_TRACE_EVENT_TASK_ALLOC_ATTEMPT 7u
+#define SPP_DIAG_TRACE_EVENT_TASK_CREATED 8u
+#define SPP_DIAG_TRACE_EVENT_PHASE_MARKER 9u
+#define SPP_DIAG_TRACE_EVENT_TERMINAL 10u
+
+#define SPP_DIAG_TRACE_PHASE_PRE_RELEASE 0u
+#define SPP_DIAG_TRACE_PHASE_INIT 1u
+#define SPP_DIAG_TRACE_PHASE_COLD_START 2u
+#define SPP_DIAG_TRACE_PHASE_SYNTHETIC_INFERENCE 3u
+#define SPP_DIAG_TRACE_PHASE_POISON_IMPORT 4u
+#define SPP_DIAG_TRACE_PHASE_POISON_MODULE 5u
+#define SPP_DIAG_TRACE_PHASE_POISON_LIBRARY 6u
+#define SPP_DIAG_TRACE_PHASE_REMOTE_PACKAGE 7u
+#define SPP_DIAG_TRACE_PHASE_REMOTE_MODEL 8u
+#define SPP_DIAG_TRACE_PHASE_REMOTE_PLUGIN 9u
+#define SPP_DIAG_TRACE_PHASE_WRITABLE_EXEC 10u
+#define SPP_DIAG_TRACE_PHASE_ATTACHED_DISK_EXEC 11u
+#define SPP_DIAG_TRACE_PHASE_REMOTE_CODE 12u
+#define SPP_DIAG_TRACE_PHASE_JIT_CACHE 13u
+#define SPP_DIAG_TRACE_PHASE_EVIDENCE_FINALIZE 14u
+#define SPP_DIAG_TRACE_PHASE_SEALED 15u
+
 _Static_assert(SPP_DIAG_TRACE_HEADER_SIZE == 192, "header wire size");
 _Static_assert(SPP_DIAG_TRACE_PREIMAGE_SIZE == 224, "preimage size");
 _Static_assert(SPP_DIAG_TRACE_COMMAND_SIZE == 128, "command wire size");
 _Static_assert(SPP_DIAG_TRACE_IMA_SIZE == 256, "IMA wire size");
 _Static_assert(SPP_DIAG_TRACE_IMA_LABEL_LEN == 18, "IMA label length");
 _Static_assert(SPP_DIAG_TRACE_SOURCE_COMMIT_LEN == 20, "source-commit length");
+_Static_assert(SPP_DIAG_TRACE_FRAME_HEADER_SIZE == 44, "frame header size");
+_Static_assert(SPP_DIAG_TRACE_MAX_PATH_BYTES == 1024, "max path bytes");
+_Static_assert(SPP_DIAG_TRACE_MAX_PAYLOAD_BYTES == 1044, "max payload bytes");
+_Static_assert(SPP_DIAG_TRACE_FRAME_HEADER_SIZE + SPP_DIAG_TRACE_MAX_PAYLOAD_BYTES ==
+                   SPP_DIAG_TRACE_MAX_FRAME_BYTES,
+               "max frame bytes");
+_Static_assert(SPP_DIAG_TRACE_CHAIN_LEN == 32, "chain length");
+_Static_assert(SPP_DIAG_TRACE_FRAME_PREIMAGE_DOMAIN_LEN == 27,
+               "frame preimage domain length");
+_Static_assert(SPP_DIAG_TRACE_FRAME_PREIMAGE_DOMAIN_LEN + SPP_DIAG_TRACE_CHAIN_LEN +
+                       4 + SPP_DIAG_TRACE_FRAME_HEADER_SIZE ==
+                   SPP_DIAG_TRACE_FRAME_PREIMAGE_MIN_SIZE,
+               "min frame preimage size");
+_Static_assert(SPP_DIAG_TRACE_FRAME_PREIMAGE_DOMAIN_LEN + SPP_DIAG_TRACE_CHAIN_LEN +
+                       4 + SPP_DIAG_TRACE_MAX_FRAME_BYTES ==
+                   SPP_DIAG_TRACE_FRAME_PREIMAGE_MAX_SIZE,
+               "max frame preimage size");
 
 /*
  * Structural byte codec only: WIRE_OK does not establish transcript order,
  * cross-object identity, IMA/PCR extension, attestation, or qualification.
  *
- * Every API requires its input, output/result, and metadata ranges to be
- * non-overlapping. Overlap is caller error with undefined behavior; this
- * portable reference does not attempt pointer-range detection.
+ * Every API requires its input, output/result, previous-chain, and metadata
+ * ranges to be non-overlapping. Overlap is caller error with undefined
+ * behavior; this portable reference does not attempt pointer-range detection.
  */
 
 extern const uint8_t SPP_DIAG_TRACE_SOURCE_COMMIT[SPP_DIAG_TRACE_SOURCE_COMMIT_LEN];
@@ -152,5 +204,29 @@ int spp_diag_trace_ima_decode(const uint8_t *in, size_t len,
 int spp_diag_trace_ima_validate(const struct spp_diag_trace_ima *record,
                                 const uint8_t *event_name,
                                 size_t event_name_len);
+
+struct spp_diag_trace_frame {
+    uint16_t event_type;
+    uint16_t flags;
+    uint32_t payload_length;
+    uint64_t sequence;
+    uint64_t task_ordinal;
+    uint64_t parent_task_ordinal;
+    uint64_t operation_ordinal;
+    uint16_t phase;
+    uint16_t reserved;
+    uint8_t payload[SPP_DIAG_TRACE_MAX_PAYLOAD_BYTES];
+};
+
+int spp_diag_trace_frame_encode(const struct spp_diag_trace_frame *in,
+                                uint8_t *out, size_t cap, size_t *written,
+                                size_t *required);
+int spp_diag_trace_frame_decode(const uint8_t *in, size_t len,
+                                struct spp_diag_trace_frame *out,
+                                size_t *consumed);
+int spp_diag_trace_frame_preimage(const struct spp_diag_trace_frame *in,
+                                  const uint8_t previous_chain[SPP_DIAG_TRACE_CHAIN_LEN],
+                                  uint8_t *out, size_t cap, size_t *written,
+                                  size_t *required);
 
 #endif

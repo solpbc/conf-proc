@@ -5,6 +5,7 @@ SPP_DIAG_TRACE_SRC := conf_proc_spp_diag_trace.c
 SPP_DIAG_TRACE_TEST := test/conf-proc-spp-diag-trace-selftest.c
 SPP_DIAG_TRACE_ORACLE := test/conf-proc-spp-diag-trace-oracle-selftest.py
 SPP_DIAG_TRACE_ORACLE_HARNESS := test/conf-proc-spp-diag-trace-oracle-harness.c
+SPP_DIAG_TRACE_FRAME_TEST := test/conf-proc-spp-diag-trace-frame-selftest.c
 
 .PHONY: install check test ci clean ratls-contract test-spp-diag-trace test-spp-diag-trace-oracle test-spp-diag-trace-sanitized
 
@@ -81,7 +82,7 @@ test:
 
 test-spp-diag-trace:
 	mkdir -p build
-	$(CC) $(C11FLAGS) $(SPP_DIAG_TRACE_SRC) $(SPP_DIAG_TRACE_TEST) -o build/spp-diag-trace-selftest
+	$(CC) $(C11FLAGS) $(SPP_DIAG_TRACE_SRC) $(SPP_DIAG_TRACE_TEST) $(SPP_DIAG_TRACE_FRAME_TEST) -o build/spp-diag-trace-selftest
 	./build/spp-diag-trace-selftest
 	rm -f build/spp-diag-trace-selftest
 
@@ -93,7 +94,7 @@ test-spp-diag-trace-oracle:
 
 test-spp-diag-trace-sanitized:
 	mkdir -p build
-	$(CC) $(C11FLAGS) -fsanitize=address,undefined -g $(SPP_DIAG_TRACE_SRC) $(SPP_DIAG_TRACE_TEST) -o build/spp-diag-trace-selftest-sanitized
+	$(CC) $(C11FLAGS) -fsanitize=address,undefined -g $(SPP_DIAG_TRACE_SRC) $(SPP_DIAG_TRACE_TEST) $(SPP_DIAG_TRACE_FRAME_TEST) -o build/spp-diag-trace-selftest-sanitized
 	./build/spp-diag-trace-selftest-sanitized
 	rm -f build/spp-diag-trace-selftest-sanitized
 

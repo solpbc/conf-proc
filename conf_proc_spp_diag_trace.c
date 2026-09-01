@@ -22,6 +22,10 @@ static const uint8_t k_preimage_domain[28] = {
     's', 'o', 'l', '-', 's', 'p', 'p', '-', 'd', 'i', 'a', 'g', '-', 't',
     'r', 'a', 'c', 'e', '-', 'h', 'e', 'a', 'd', 'e', 'r', '/', 'v', '1'};
 
+static const uint8_t k_frame_preimage_domain[27] = {
+    's', 'o', 'l', '-', 's', 'p', 'p', '-', 'd', 'i', 'a', 'g', '-', 't',
+    'r', 'a', 'c', 'e', '-', 'f', 'r', 'a', 'm', 'e', '/', 'v', '1'};
+
 static const uint8_t k_ima_event_ready[21] = {
     's', 'o', 'l', '-', 's', 'p', 'p', '-', 'd', 'i', 'a',
     'g', '-', 'r', 'e', 'a', 'd', 'y', '-', 'v', '1'};
@@ -597,4 +601,586 @@ int spp_diag_trace_ima_validate(const struct spp_diag_trace_ima *record,
         return err;
     }
     return ima_event_name_check(record->kind, event_name, event_name_len);
+}
+
+static int frame_event_check(uint16_t event)
+{
+    if (event < SPP_DIAG_TRACE_EVENT_CORE_INIT ||
+        event > SPP_DIAG_TRACE_EVENT_TERMINAL) {
+        return WIRE_EVENT;
+    }
+    return WIRE_OK;
+}
+
+static int frame_flags_check(uint16_t event, uint16_t flags)
+{
+    if (event == SPP_DIAG_TRACE_EVENT_EXEC_ATTEMPT) {
+        if ((flags & ~1u) != 0) {
+            return WIRE_FLAGS;
+        }
+        return WIRE_OK;
+    }
+    if (flags != 0) {
+        return WIRE_FLAGS;
+    }
+    return WIRE_OK;
+}
+
+static int frame_payload_length_check(uint16_t event, uint32_t n)
+{
+    if (n > SPP_DIAG_TRACE_MAX_PAYLOAD_BYTES) {
+        return WIRE_CAP;
+    }
+    switch (event) {
+    case SPP_DIAG_TRACE_EVENT_CORE_INIT:
+    case SPP_DIAG_TRACE_EVENT_TERMINAL:
+        return n == 0 ? WIRE_OK : WIRE_LENGTH;
+    case SPP_DIAG_TRACE_EVENT_IMA_READY:
+    case SPP_DIAG_TRACE_EVENT_TASK_ALLOC_ATTEMPT:
+    case SPP_DIAG_TRACE_EVENT_PHASE_MARKER:
+        return n == 8 ? WIRE_OK : WIRE_LENGTH;
+    case SPP_DIAG_TRACE_EVENT_USERSPACE_RELEASE:
+    case SPP_DIAG_TRACE_EVENT_EXEC_COMMIT:
+    case SPP_DIAG_TRACE_EVENT_TASK_CREATED:
+        return n == 16 ? WIRE_OK : WIRE_LENGTH;
+    case SPP_DIAG_TRACE_EVENT_PRE_RELEASE_EXEC_DENIED:
+        return (n >= 21 && n <= SPP_DIAG_TRACE_MAX_PAYLOAD_BYTES) ? WIRE_OK
+                                                                 : WIRE_LENGTH;
+    case SPP_DIAG_TRACE_EVENT_EXEC_ATTEMPT:
+        return (n >= 17 && n <= 16u + SPP_DIAG_TRACE_MAX_PATH_BYTES) ? WIRE_OK
+                                                                    : WIRE_LENGTH;
+    default:
+        return WIRE_EVENT;
+    }
+}
+
+static int frame_task_check(uint16_t event, uint64_t task)
+{
+    switch (event) {
+    case SPP_DIAG_TRACE_EVENT_CORE_INIT:
+    case SPP_DIAG_TRACE_EVENT_IMA_READY:
+    case SPP_DIAG_TRACE_EVENT_TERMINAL:
+        return task == 0 ? WIRE_OK : WIRE_VALUE;
+    case SPP_DIAG_TRACE_EVENT_PRE_RELEASE_EXEC_DENIED:
+        return WIRE_OK;
+    case SPP_DIAG_TRACE_EVENT_USERSPACE_RELEASE:
+    case SPP_DIAG_TRACE_EVENT_EXEC_ATTEMPT:
+    case SPP_DIAG_TRACE_EVENT_EXEC_COMMIT:
+    case SPP_DIAG_TRACE_EVENT_TASK_ALLOC_ATTEMPT:
+    case SPP_DIAG_TRACE_EVENT_TASK_CREATED:
+    case SPP_DIAG_TRACE_EVENT_PHASE_MARKER:
+        return task != 0 ? WIRE_OK : WIRE_VALUE;
+    default:
+        return WIRE_EVENT;
+    }
+}
+
+static int frame_parent_check(uint16_t event, uint64_t task, uint64_t parent)
+{
+    switch (event) {
+    case SPP_DIAG_TRACE_EVENT_TASK_ALLOC_ATTEMPT:
+    case SPP_DIAG_TRACE_EVENT_TASK_CREATED:
+        if (parent == 0 || parent == task) {
+            return WIRE_VALUE;
+        }
+        return WIRE_OK;
+    default:
+        return parent == 0 ? WIRE_OK : WIRE_VALUE;
+    }
+}
+
+static int frame_operation_check(uint16_t event, uint64_t operation)
+{
+    switch (event) {
+    case SPP_DIAG_TRACE_EVENT_PRE_RELEASE_EXEC_DENIED:
+    case SPP_DIAG_TRACE_EVENT_EXEC_ATTEMPT:
+    case SPP_DIAG_TRACE_EVENT_EXEC_COMMIT:
+    case SPP_DIAG_TRACE_EVENT_TASK_ALLOC_ATTEMPT:
+    case SPP_DIAG_TRACE_EVENT_TASK_CREATED:
+        return operation != 0 ? WIRE_OK : WIRE_VALUE;
+    default:
+        return operation == 0 ? WIRE_OK : WIRE_VALUE;
+    }
+}
+
+static int frame_phase_check(uint16_t event, uint16_t flags, uint16_t phase)
+{
+    switch (event) {
+    case SPP_DIAG_TRACE_EVENT_CORE_INIT:
+    case SPP_DIAG_TRACE_EVENT_PRE_RELEASE_EXEC_DENIED:
+    case SPP_DIAG_TRACE_EVENT_IMA_READY:
+    case SPP_DIAG_TRACE_EVENT_USERSPACE_RELEASE:
+        return phase == SPP_DIAG_TRACE_PHASE_PRE_RELEASE ? WIRE_OK : WIRE_STATE;
+    case SPP_DIAG_TRACE_EVENT_EXEC_ATTEMPT:
+        if ((flags & 1u) != 0) {
+            return phase == SPP_DIAG_TRACE_PHASE_PRE_RELEASE ? WIRE_OK
+                                                            : WIRE_STATE;
+        }
+        return (phase >= SPP_DIAG_TRACE_PHASE_INIT &&
+                phase <= SPP_DIAG_TRACE_PHASE_EVIDENCE_FINALIZE)
+                   ? WIRE_OK
+                   : WIRE_STATE;
+    case SPP_DIAG_TRACE_EVENT_EXEC_COMMIT:
+    case SPP_DIAG_TRACE_EVENT_TASK_ALLOC_ATTEMPT:
+    case SPP_DIAG_TRACE_EVENT_TASK_CREATED:
+        return (phase >= SPP_DIAG_TRACE_PHASE_INIT &&
+                phase <= SPP_DIAG_TRACE_PHASE_EVIDENCE_FINALIZE)
+                   ? WIRE_OK
+                   : WIRE_STATE;
+    case SPP_DIAG_TRACE_EVENT_PHASE_MARKER:
+        return (phase >= SPP_DIAG_TRACE_PHASE_COLD_START &&
+                phase <= SPP_DIAG_TRACE_PHASE_EVIDENCE_FINALIZE)
+                   ? WIRE_OK
+                   : WIRE_STATE;
+    case SPP_DIAG_TRACE_EVENT_TERMINAL:
+        return phase == SPP_DIAG_TRACE_PHASE_SEALED ? WIRE_OK : WIRE_STATE;
+    default:
+        return WIRE_EVENT;
+    }
+}
+
+static int frame_reserved_check(uint16_t reserved)
+{
+    return reserved == 0 ? WIRE_OK : WIRE_RESERVED;
+}
+
+static int frame_header_fields(const struct spp_diag_trace_frame *f)
+{
+    int err;
+
+    err = frame_event_check(f->event_type);
+    if (err != WIRE_OK) {
+        return err;
+    }
+    err = frame_flags_check(f->event_type, f->flags);
+    if (err != WIRE_OK) {
+        return err;
+    }
+    err = frame_payload_length_check(f->event_type, f->payload_length);
+    if (err != WIRE_OK) {
+        return err;
+    }
+    err = frame_task_check(f->event_type, f->task_ordinal);
+    if (err != WIRE_OK) {
+        return err;
+    }
+    err = frame_parent_check(f->event_type, f->task_ordinal, f->parent_task_ordinal);
+    if (err != WIRE_OK) {
+        return err;
+    }
+    err = frame_operation_check(f->event_type, f->operation_ordinal);
+    if (err != WIRE_OK) {
+        return err;
+    }
+    err = frame_phase_check(f->event_type, f->flags, f->phase);
+    if (err != WIRE_OK) {
+        return err;
+    }
+    return frame_reserved_check(f->reserved);
+}
+
+static int frame_path_len_check(uint16_t path_len, uint32_t payload_length,
+                                uint32_t prefix)
+{
+    if (path_len == 0) {
+        return WIRE_LENGTH;
+    }
+    if (path_len > SPP_DIAG_TRACE_MAX_PATH_BYTES) {
+        return WIRE_CAP;
+    }
+    if (payload_length != prefix + path_len) {
+        return WIRE_LENGTH;
+    }
+    return WIRE_OK;
+}
+
+static int frame_path_content_check(const uint8_t *path, uint16_t path_len)
+{
+    size_t i;
+
+    for (i = 0; i < path_len; i++) {
+        if (path[i] == 0) {
+            return WIRE_VALUE;
+        }
+    }
+    return WIRE_OK;
+}
+
+static int payload_pre_release_exec_denied(const uint8_t *p, uint32_t n)
+{
+    uint16_t errno_v;
+    uint16_t path_len;
+    uint32_t pid;
+    uint32_t tgid;
+    int err;
+
+    errno_v = load_u16be(p + 0);
+    if (errno_v != 13u) {
+        return WIRE_VALUE;
+    }
+    path_len = load_u16be(p + 2);
+    err = frame_path_len_check(path_len, n, 20u);
+    if (err != WIRE_OK) {
+        return err;
+    }
+    pid = load_u32be(p + 4);
+    if (pid == 0) {
+        return WIRE_VALUE;
+    }
+    tgid = load_u32be(p + 8);
+    if (tgid == 0) {
+        return WIRE_VALUE;
+    }
+    return frame_path_content_check(p + 20, path_len);
+}
+
+static int payload_userspace_release(const uint8_t *p, uint32_t n)
+{
+    uint32_t pid;
+    uint32_t tgid;
+
+    (void)n;
+    pid = load_u32be(p + 0);
+    if (pid == 0) {
+        return WIRE_VALUE;
+    }
+    tgid = load_u32be(p + 4);
+    if (tgid == 0) {
+        return WIRE_VALUE;
+    }
+    return WIRE_OK;
+}
+
+static int payload_exec_attempt(const uint8_t *p, uint32_t n)
+{
+    uint32_t pass_index;
+    uint16_t path_len;
+    uint16_t reserved;
+    uint32_t pid;
+    uint32_t tgid;
+    int err;
+
+    pass_index = load_u32be(p + 0);
+    if (pass_index == 0) {
+        return WIRE_VALUE;
+    }
+    path_len = load_u16be(p + 4);
+    err = frame_path_len_check(path_len, n, 16u);
+    if (err != WIRE_OK) {
+        return err;
+    }
+    reserved = load_u16be(p + 6);
+    if (reserved != 0) {
+        return WIRE_RESERVED;
+    }
+    pid = load_u32be(p + 8);
+    if (pid == 0) {
+        return WIRE_VALUE;
+    }
+    tgid = load_u32be(p + 12);
+    if (tgid == 0) {
+        return WIRE_VALUE;
+    }
+    return frame_path_content_check(p + 16, path_len);
+}
+
+static int payload_exec_commit(const uint8_t *p, uint32_t n)
+{
+    uint32_t pass_count;
+    uint32_t pid;
+    uint32_t tgid;
+    uint32_t reserved;
+
+    (void)n;
+    pass_count = load_u32be(p + 0);
+    if (pass_count == 0) {
+        return WIRE_VALUE;
+    }
+    pid = load_u32be(p + 4);
+    if (pid == 0) {
+        return WIRE_VALUE;
+    }
+    tgid = load_u32be(p + 8);
+    if (tgid == 0) {
+        return WIRE_VALUE;
+    }
+    reserved = load_u32be(p + 12);
+    if (reserved != 0) {
+        return WIRE_RESERVED;
+    }
+    return WIRE_OK;
+}
+
+static int payload_task_created(const uint8_t *p, uint32_t n)
+{
+    uint32_t pid;
+    uint32_t tgid;
+
+    (void)n;
+    pid = load_u32be(p + 0);
+    if (pid == 0) {
+        return WIRE_VALUE;
+    }
+    tgid = load_u32be(p + 4);
+    if (tgid == 0) {
+        return WIRE_VALUE;
+    }
+    return WIRE_OK;
+}
+
+static int payload_phase_marker(const uint8_t *p, uint32_t n, uint16_t frame_phase)
+{
+    uint16_t prev;
+    uint16_t next;
+    uint32_t reserved;
+
+    (void)n;
+    prev = load_u16be(p + 0);
+    if (prev < SPP_DIAG_TRACE_PHASE_INIT || prev > SPP_DIAG_TRACE_PHASE_JIT_CACHE) {
+        return WIRE_STATE;
+    }
+    next = load_u16be(p + 2);
+    if (next != (uint16_t)(prev + 1u) || frame_phase != next) {
+        return WIRE_STATE;
+    }
+    reserved = load_u32be(p + 4);
+    if (reserved != 0) {
+        return WIRE_RESERVED;
+    }
+    return WIRE_OK;
+}
+
+static int frame_payload_check(uint16_t event_type, const uint8_t *payload,
+                               uint32_t n, uint16_t frame_phase)
+{
+    switch (event_type) {
+    case SPP_DIAG_TRACE_EVENT_CORE_INIT:
+    case SPP_DIAG_TRACE_EVENT_IMA_READY:
+    case SPP_DIAG_TRACE_EVENT_TASK_ALLOC_ATTEMPT:
+    case SPP_DIAG_TRACE_EVENT_TERMINAL:
+        (void)payload;
+        (void)n;
+        (void)frame_phase;
+        return WIRE_OK;
+    case SPP_DIAG_TRACE_EVENT_PRE_RELEASE_EXEC_DENIED:
+        return payload_pre_release_exec_denied(payload, n);
+    case SPP_DIAG_TRACE_EVENT_USERSPACE_RELEASE:
+        return payload_userspace_release(payload, n);
+    case SPP_DIAG_TRACE_EVENT_EXEC_ATTEMPT:
+        return payload_exec_attempt(payload, n);
+    case SPP_DIAG_TRACE_EVENT_EXEC_COMMIT:
+        return payload_exec_commit(payload, n);
+    case SPP_DIAG_TRACE_EVENT_TASK_CREATED:
+        return payload_task_created(payload, n);
+    case SPP_DIAG_TRACE_EVENT_PHASE_MARKER:
+        return payload_phase_marker(payload, n, frame_phase);
+    default:
+        return WIRE_EVENT;
+    }
+}
+
+static int frame_fields(const struct spp_diag_trace_frame *f)
+{
+    int err;
+
+    err = frame_header_fields(f);
+    if (err != WIRE_OK) {
+        return err;
+    }
+    return frame_payload_check(f->event_type, f->payload, f->payload_length,
+                               f->phase);
+}
+
+static void frame_to_wire(const struct spp_diag_trace_frame *f, uint8_t *out)
+{
+    store_u16be(out + 0, f->event_type);
+    store_u16be(out + 2, f->flags);
+    store_u32be(out + 4, f->payload_length);
+    store_u64be(out + 8, f->sequence);
+    store_u64be(out + 16, f->task_ordinal);
+    store_u64be(out + 24, f->parent_task_ordinal);
+    store_u64be(out + 32, f->operation_ordinal);
+    store_u16be(out + 40, f->phase);
+    store_u16be(out + 42, f->reserved);
+    copy_n(out + 44, f->payload, f->payload_length);
+}
+
+int spp_diag_trace_frame_encode(const struct spp_diag_trace_frame *in,
+                                uint8_t *out, size_t cap, size_t *written,
+                                size_t *required)
+{
+    int err;
+    size_t need;
+
+    if (in == NULL || out == NULL || written == NULL || required == NULL) {
+        if (written != NULL) {
+            *written = 0;
+        }
+        if (required != NULL) {
+            *required = 0;
+        }
+        return WIRE_NULL;
+    }
+    err = frame_fields(in);
+    if (err != WIRE_OK) {
+        return fail_encode(err, written, required);
+    }
+    need = (size_t)SPP_DIAG_TRACE_FRAME_HEADER_SIZE + (size_t)in->payload_length;
+    if (cap < need) {
+        *written = 0;
+        *required = need;
+        return WIRE_BUFFER_TOO_SMALL;
+    }
+    frame_to_wire(in, out);
+    *written = need;
+    *required = need;
+    return WIRE_OK;
+}
+
+int spp_diag_trace_frame_decode(const uint8_t *in, size_t len,
+                                struct spp_diag_trace_frame *out,
+                                size_t *consumed)
+{
+    struct spp_diag_trace_frame tmp;
+    uint16_t event;
+    uint16_t flags;
+    uint16_t phase;
+    uint16_t reserved;
+    uint32_t plen;
+    uint64_t sequence;
+    uint64_t task;
+    uint64_t parent;
+    uint64_t operation;
+    int err;
+    size_t i;
+
+    if (in == NULL || out == NULL || consumed == NULL) {
+        if (consumed != NULL) {
+            *consumed = 0;
+        }
+        return WIRE_NULL;
+    }
+    if (len < SPP_DIAG_TRACE_FRAME_HEADER_SIZE) {
+        *consumed = 0;
+        return WIRE_LENGTH;
+    }
+    event = load_u16be(in + 0);
+    err = frame_event_check(event);
+    if (err != WIRE_OK) {
+        *consumed = 0;
+        return err;
+    }
+    flags = load_u16be(in + 2);
+    err = frame_flags_check(event, flags);
+    if (err != WIRE_OK) {
+        *consumed = 0;
+        return err;
+    }
+    plen = load_u32be(in + 4);
+    err = frame_payload_length_check(event, plen);
+    if (err != WIRE_OK) {
+        *consumed = 0;
+        return err;
+    }
+    if (len != (size_t)SPP_DIAG_TRACE_FRAME_HEADER_SIZE + (size_t)plen) {
+        *consumed = 0;
+        return WIRE_LENGTH;
+    }
+    sequence = load_u64be(in + 8);
+    task = load_u64be(in + 16);
+    err = frame_task_check(event, task);
+    if (err != WIRE_OK) {
+        *consumed = 0;
+        return err;
+    }
+    parent = load_u64be(in + 24);
+    err = frame_parent_check(event, task, parent);
+    if (err != WIRE_OK) {
+        *consumed = 0;
+        return err;
+    }
+    operation = load_u64be(in + 32);
+    err = frame_operation_check(event, operation);
+    if (err != WIRE_OK) {
+        *consumed = 0;
+        return err;
+    }
+    phase = load_u16be(in + 40);
+    err = frame_phase_check(event, flags, phase);
+    if (err != WIRE_OK) {
+        *consumed = 0;
+        return err;
+    }
+    reserved = load_u16be(in + 42);
+    err = frame_reserved_check(reserved);
+    if (err != WIRE_OK) {
+        *consumed = 0;
+        return err;
+    }
+    err = frame_payload_check(event, in + 44, plen, phase);
+    if (err != WIRE_OK) {
+        *consumed = 0;
+        return err;
+    }
+    tmp.event_type = event;
+    tmp.flags = flags;
+    tmp.payload_length = plen;
+    tmp.sequence = sequence;
+    tmp.task_ordinal = task;
+    tmp.parent_task_ordinal = parent;
+    tmp.operation_ordinal = operation;
+    tmp.phase = phase;
+    tmp.reserved = reserved;
+    copy_n(tmp.payload, in + 44, plen);
+    for (i = plen; i < SPP_DIAG_TRACE_MAX_PAYLOAD_BYTES; i++) {
+        tmp.payload[i] = 0;
+    }
+    *out = tmp;
+    *consumed = len;
+    return WIRE_OK;
+}
+
+int spp_diag_trace_frame_preimage(const struct spp_diag_trace_frame *in,
+                                  const uint8_t previous_chain[SPP_DIAG_TRACE_CHAIN_LEN],
+                                  uint8_t *out, size_t cap, size_t *written,
+                                  size_t *required)
+{
+    int err;
+    size_t frame_len;
+    size_t need;
+
+    if (in == NULL || previous_chain == NULL || out == NULL || written == NULL ||
+        required == NULL) {
+        if (written != NULL) {
+            *written = 0;
+        }
+        if (required != NULL) {
+            *required = 0;
+        }
+        return WIRE_NULL;
+    }
+    err = frame_fields(in);
+    if (err != WIRE_OK) {
+        return fail_encode(err, written, required);
+    }
+    frame_len =
+        (size_t)SPP_DIAG_TRACE_FRAME_HEADER_SIZE + (size_t)in->payload_length;
+    need = (size_t)SPP_DIAG_TRACE_FRAME_PREIMAGE_DOMAIN_LEN +
+           (size_t)SPP_DIAG_TRACE_CHAIN_LEN + 4u + frame_len;
+    if (cap < need) {
+        *written = 0;
+        *required = need;
+        return WIRE_BUFFER_TOO_SMALL;
+    }
+    copy_n(out, k_frame_preimage_domain, SPP_DIAG_TRACE_FRAME_PREIMAGE_DOMAIN_LEN);
+    copy_n(out + SPP_DIAG_TRACE_FRAME_PREIMAGE_DOMAIN_LEN, previous_chain,
+           SPP_DIAG_TRACE_CHAIN_LEN);
+    store_u32be(out + SPP_DIAG_TRACE_FRAME_PREIMAGE_DOMAIN_LEN +
+                    SPP_DIAG_TRACE_CHAIN_LEN,
+                (uint32_t)frame_len);
+    frame_to_wire(in, out + SPP_DIAG_TRACE_FRAME_PREIMAGE_DOMAIN_LEN +
+                          SPP_DIAG_TRACE_CHAIN_LEN + 4);
+    *written = need;
+    *required = need;
+    return WIRE_OK;
 }

@@ -1737,6 +1737,8 @@ static int test_null_pointers(void)
     return 0;
 }
 
+int run_spp_diag_trace_frame_tests(void);
+
 int main(void)
 {
     if (test_result_constants() != 0) {
@@ -1779,6 +1781,9 @@ int main(void)
         return 1;
     }
     if (test_null_pointers() != 0) {
+        return 1;
+    }
+    if (run_spp_diag_trace_frame_tests() != 0) {
         return 1;
     }
     return 0;
