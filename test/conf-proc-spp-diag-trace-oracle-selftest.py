@@ -385,6 +385,13 @@ def network_policy_payload(
     return raw
 
 
+def operation_return_payload(operation: int, raw_return: int) -> bytes:
+    raw = b"".join((be(operation, 2), bytes(2), bytes(4), be(raw_return, 8)))
+    if len(raw) != 16:
+        raise AssertionError(f"operation-return payload is {len(raw)} bytes")
+    return raw
+
+
 def expect_provenance_encode(
     harness: Path, encoded: bytes, result: int = 0, capacity: int | None = None
 ) -> None:
@@ -2172,6 +2179,376 @@ def main() -> int:
         expect_provenance_encode(harness, encoded, WIRE_EVENT)
         expect_provenance_preimage(harness, encoded, zero, WIRE_EVENT)
 
+    operation_return_file_open = bytes.fromhex(
+        "0104000000000010"
+        "0000000000000000"
+        "0000000000000001"
+        "0000000000000000"
+        "0000000000000001"
+        "00010000"
+        "00010000"
+        "00000000"
+        "0000000000000000"
+    )
+    if operation_return_file_open != frame(
+        0x0104, 0, 0, 1, 0, 1, 1, operation_return_payload(1, 0)
+    ):
+        raise AssertionError("FILE_OPEN operation-return literal disagrees with prose")
+
+    operation_return_mmap = bytes.fromhex(
+        "0104000000000010"
+        "ffffffffffffffff"
+        "ffffffffffffffff"
+        "0000000000000000"
+        "ffffffffffffffff"
+        "000e0000"
+        "00020000"
+        "00000000"
+        "0000000000000001"
+    )
+    if operation_return_mmap != frame(
+        0x0104,
+        0,
+        maximum64,
+        maximum64,
+        0,
+        maximum64,
+        14,
+        operation_return_payload(2, 1),
+    ):
+        raise AssertionError("MMAP operation-return literal disagrees with prose")
+
+    operation_return_mprotect = bytes.fromhex(
+        "0104000000000010"
+        "0102030405060708"
+        "0000000000000002"
+        "0000000000000000"
+        "0000000000000003"
+        "00070000"
+        "00030000"
+        "00000000"
+        "0123456789abcdef"
+    )
+    if operation_return_mprotect != frame(
+        0x0104,
+        0,
+        0x0102030405060708,
+        2,
+        0,
+        3,
+        7,
+        operation_return_payload(3, 0x0123456789ABCDEF),
+    ):
+        raise AssertionError("MPROTECT operation-return literal disagrees with prose")
+
+    operation_return_connect = bytes.fromhex(
+        "0104000000000010"
+        "1111111111111111"
+        "2222222222222222"
+        "0000000000000000"
+        "4444444444444444"
+        "00040000"
+        "00040000"
+        "00000000"
+        "7fffffffffffffff"
+    )
+    if operation_return_connect != frame(
+        0x0104,
+        0,
+        0x1111111111111111,
+        0x2222222222222222,
+        0,
+        0x4444444444444444,
+        4,
+        operation_return_payload(4, 0x7FFFFFFFFFFFFFFF),
+    ):
+        raise AssertionError("CONNECT operation-return literal disagrees with prose")
+
+    operation_return_sendmsg = bytes.fromhex(
+        "0104000000000010"
+        "aabbccddeeff0011"
+        "0000000000000005"
+        "0000000000000000"
+        "0000000000000005"
+        "000d0000"
+        "00050000"
+        "00000000"
+        "ffffffff80000000"
+    )
+    if operation_return_sendmsg != frame(
+        0x0104,
+        0,
+        0xAABBCCDDEEFF0011,
+        5,
+        0,
+        5,
+        13,
+        operation_return_payload(5, 0xFFFFFFFF80000000),
+    ):
+        raise AssertionError("SENDMSG operation-return literal disagrees with prose")
+
+    operation_return_vectors = (
+        operation_return_file_open,
+        operation_return_mmap,
+        operation_return_mprotect,
+        operation_return_connect,
+        operation_return_sendmsg,
+    )
+    operation_return_preimages: list[bytes] = []
+    for encoded in operation_return_vectors:
+        expect_provenance_encode(harness, encoded)
+        expect_provenance_decode(harness, encoded)
+        for previous in (zero, chain_b):
+            operation_return_preimages.append(
+                expect_provenance_preimage(harness, encoded, previous)
+            )
+
+    operation_return_negative_frames: set[bytes] = set()
+
+    for operation in range(1 << 16):
+        encoded = replace(operation_return_file_open, 44, be(operation, 2))
+        result = 0 if 1 <= operation <= 5 else WIRE_STATE
+        if result != 0:
+            operation_return_negative_frames.add(encoded)
+        expect_provenance_encode(harness, encoded, result)
+        expect_provenance_decode(harness, encoded, result)
+        expect_provenance_preimage(harness, encoded, zero, result)
+
+    for phase in range(1 << 16):
+        encoded = replace(operation_return_file_open, 40, be(phase, 2))
+        result = 0 if 1 <= phase <= 14 else WIRE_STATE
+        if result != 0:
+            operation_return_negative_frames.add(encoded)
+        expect_provenance_encode(harness, encoded, result)
+        expect_provenance_decode(harness, encoded, result)
+        expect_provenance_preimage(harness, encoded, zero, result)
+
+    for operation in range(1, 6):
+        base = replace(operation_return_file_open, 44, be(operation, 2))
+        for raw_return in (0, maximum64):
+            encoded = replace(base, 52, be(raw_return, 8))
+            expect_provenance_encode(harness, encoded)
+            expect_provenance_decode(harness, encoded)
+            expect_provenance_preimage(harness, encoded, zero)
+        for bit in range(64):
+            for raw_return in (1 << bit, maximum64 ^ (1 << bit)):
+                encoded = replace(base, 52, be(raw_return, 8))
+                expect_provenance_encode(harness, encoded)
+                expect_provenance_decode(harness, encoded)
+                expect_provenance_preimage(harness, encoded, zero)
+
+    for bit in range(16):
+        encoded = replace(operation_return_file_open, 2, be(1 << bit, 2))
+        operation_return_negative_frames.add(encoded)
+        expect_provenance_encode(harness, encoded, WIRE_FLAGS)
+        expect_provenance_decode(harness, encoded, WIRE_FLAGS)
+        expect_provenance_preimage(harness, encoded, zero, WIRE_FLAGS)
+    for bit in range(16):
+        encoded = replace(operation_return_file_open, 42, be(1 << bit, 2))
+        operation_return_negative_frames.add(encoded)
+        expect_provenance_encode(harness, encoded, WIRE_RESERVED)
+        expect_provenance_decode(harness, encoded, WIRE_RESERVED)
+        expect_provenance_preimage(harness, encoded, zero, WIRE_RESERVED)
+    for bit in range(16):
+        encoded = replace(operation_return_file_open, 46, be(1 << bit, 2))
+        operation_return_negative_frames.add(encoded)
+        expect_provenance_encode(harness, encoded, WIRE_RESERVED)
+        expect_provenance_decode(harness, encoded, WIRE_RESERVED)
+        expect_provenance_preimage(harness, encoded, zero, WIRE_RESERVED)
+    for bit in range(32):
+        encoded = replace(operation_return_file_open, 48, be(1 << bit, 4))
+        operation_return_negative_frames.add(encoded)
+        expect_provenance_encode(harness, encoded, WIRE_RESERVED)
+        expect_provenance_decode(harness, encoded, WIRE_RESERVED)
+        expect_provenance_preimage(harness, encoded, zero, WIRE_RESERVED)
+
+    sequence_task_crossfeed = replace(
+        replace(operation_return_mprotect, 8, operation_return_mprotect[16:24]),
+        16,
+        operation_return_mprotect[8:16],
+    )
+    expect_provenance_encode(harness, sequence_task_crossfeed)
+    expect_provenance_decode(harness, sequence_task_crossfeed)
+    expect_provenance_preimage(harness, sequence_task_crossfeed, zero)
+
+    operation_return_crossfeed_invalids: tuple[tuple[bytes, int], ...] = (
+        (
+            replace(
+                replace(operation_return_file_open, 0, operation_return_file_open[2:4]),
+                2,
+                operation_return_file_open[0:2],
+            ),
+            WIRE_EVENT,
+        ),
+        (
+            replace(
+                replace(operation_return_file_open, 16, operation_return_file_open[24:32]),
+                24,
+                operation_return_file_open[16:24],
+            ),
+            WIRE_VALUE,
+        ),
+        (
+            replace(
+                replace(operation_return_file_open, 24, operation_return_file_open[32:40]),
+                32,
+                operation_return_file_open[24:32],
+            ),
+            WIRE_VALUE,
+        ),
+        (
+            replace(
+                replace(operation_return_file_open, 32, operation_return_file_open[52:60]),
+                52,
+                operation_return_file_open[32:40],
+            ),
+            WIRE_VALUE,
+        ),
+        (
+            replace(
+                replace(operation_return_file_open, 40, operation_return_file_open[42:44]),
+                42,
+                operation_return_file_open[40:42],
+            ),
+            WIRE_STATE,
+        ),
+        (
+            replace(
+                replace(operation_return_file_open, 44, operation_return_file_open[46:48]),
+                46,
+                operation_return_file_open[44:46],
+            ),
+            WIRE_STATE,
+        ),
+        (
+            replace(
+                replace(operation_return_file_open, 4, operation_return_file_open[48:52]),
+                48,
+                operation_return_file_open[4:8],
+            ),
+            WIRE_LENGTH,
+        ),
+    )
+    for encoded, result in operation_return_crossfeed_invalids:
+        operation_return_negative_frames.add(encoded)
+        expect_provenance_encode(harness, encoded, result)
+        expect_provenance_decode(harness, encoded, result)
+        expect_provenance_preimage(harness, encoded, zero, result)
+
+    operation_return_invalids: tuple[tuple[bytes, int], ...] = (
+        (replace(operation_return_file_open, 0, be(0x0106, 2)), WIRE_EVENT),
+        (replace(operation_return_file_open, 2, be(1, 2)), WIRE_FLAGS),
+        (replace(operation_return_file_open, 4, be(1045, 4)), WIRE_CAP),
+        (replace(operation_return_file_open, 4, be(15, 4)), WIRE_LENGTH),
+        (replace(operation_return_file_open, 16, bytes(8)), WIRE_VALUE),
+        (replace(operation_return_file_open, 24, be(1, 8)), WIRE_VALUE),
+        (replace(operation_return_file_open, 32, bytes(8)), WIRE_VALUE),
+        (replace(operation_return_file_open, 40, bytes(2)), WIRE_STATE),
+        (replace(operation_return_file_open, 42, be(1, 2)), WIRE_RESERVED),
+        (replace(operation_return_file_open, 44, bytes(2)), WIRE_STATE),
+        (replace(operation_return_file_open, 44, be(6, 2)), WIRE_STATE),
+        (replace(operation_return_file_open, 44, be(0xFFFF, 2)), WIRE_STATE),
+        (replace(operation_return_file_open, 46, be(1, 2)), WIRE_RESERVED),
+        (replace(operation_return_file_open, 48, be(1, 4)), WIRE_RESERVED),
+    )
+    for encoded, result in operation_return_invalids:
+        operation_return_negative_frames.add(encoded)
+        expect_provenance_decode(harness, encoded, result)
+        for capacity in (0, 59):
+            expect_provenance_encode(harness, encoded, result, capacity)
+        for capacity in (0, 122):
+            expect_provenance_preimage(harness, encoded, zero, result, capacity)
+
+    for payload_length, result in (
+        (0, WIRE_LENGTH),
+        (15, WIRE_LENGTH),
+        (17, WIRE_LENGTH),
+        (1044, WIRE_LENGTH),
+        (1045, WIRE_CAP),
+        (maximum32, WIRE_CAP),
+    ):
+        encoded = replace(operation_return_file_open, 4, be(payload_length, 4))
+        operation_return_negative_frames.add(encoded)
+        expect_provenance_decode(harness, encoded, result)
+        expect_provenance_encode(harness, encoded, result)
+        expect_provenance_preimage(harness, encoded, zero, result)
+
+    for short_length in range(60):
+        encoded = operation_return_file_open[:short_length]
+        operation_return_negative_frames.add(encoded)
+        expect_provenance_decode(harness, encoded, WIRE_LENGTH)
+    operation_return_suffix = operation_return_file_open + b"\x00"
+    operation_return_negative_frames.add(operation_return_suffix)
+    expect_provenance_decode(harness, operation_return_suffix, WIRE_LENGTH)
+
+    operation_return_precedence: tuple[tuple[bytes, int], ...] = (
+        (
+            replace(
+                replace(operation_return_file_open, 0, be(0x0106, 2)),
+                2,
+                be(1, 2),
+            ),
+            WIRE_EVENT,
+        ),
+        (
+            replace(replace(operation_return_file_open, 2, be(1, 2)), 4, be(15, 4)),
+            WIRE_FLAGS,
+        ),
+        (
+            replace(operation_return_file_open, 4, be(15, 4)),
+            WIRE_LENGTH,
+        ),
+        (
+            replace(operation_return_suffix, 16, bytes(8)),
+            WIRE_LENGTH,
+        ),
+        (
+            replace(replace(operation_return_file_open, 16, bytes(8)), 24, be(1, 8)),
+            WIRE_VALUE,
+        ),
+        (
+            replace(replace(operation_return_file_open, 24, be(1, 8)), 32, bytes(8)),
+            WIRE_VALUE,
+        ),
+        (
+            replace(replace(operation_return_file_open, 32, bytes(8)), 40, bytes(2)),
+            WIRE_VALUE,
+        ),
+        (
+            replace(replace(operation_return_file_open, 40, bytes(2)), 42, be(1, 2)),
+            WIRE_STATE,
+        ),
+        (
+            replace(replace(operation_return_file_open, 42, be(1, 2)), 44, bytes(2)),
+            WIRE_RESERVED,
+        ),
+        (
+            replace(replace(operation_return_file_open, 44, bytes(2)), 46, be(1, 2)),
+            WIRE_STATE,
+        ),
+        (
+            replace(replace(operation_return_file_open, 46, be(1, 2)), 48, be(1, 4)),
+            WIRE_RESERVED,
+        ),
+    )
+    for index, (encoded, result) in enumerate(operation_return_precedence, start=1):
+        operation_return_negative_frames.add(encoded)
+        try:
+            expect_provenance_decode(harness, encoded, result)
+            expect_provenance_encode(harness, encoded, result)
+            expect_provenance_preimage(harness, encoded, zero, result)
+        except AssertionError as error:
+            raise AssertionError(
+                f"operation-return precedence vector {index}: {error}"
+            ) from error
+
+    expect_provenance_encode(
+        harness, operation_return_file_open, result=2, capacity=59
+    )
+    expect_provenance_preimage(
+        harness, operation_return_file_open, chain_b, result=2, capacity=122
+    )
+
     provenance_digest = hashlib.sha256(b"".join(provenance_vectors)).hexdigest()
     provenance_preimage_digest = hashlib.sha256(
         b"".join(provenance_preimages)
@@ -2185,6 +2562,12 @@ def main() -> int:
     network_digest = hashlib.sha256(b"".join(network_vectors)).hexdigest()
     network_preimage_digest = hashlib.sha256(
         b"".join(network_preimages)
+    ).hexdigest()
+    operation_return_digest = hashlib.sha256(
+        b"".join(operation_return_vectors)
+    ).hexdigest()
+    operation_return_preimage_digest = hashlib.sha256(
+        b"".join(operation_return_preimages)
     ).hexdigest()
 
     print(
@@ -2211,7 +2594,12 @@ def main() -> int:
         f"network_vector_set_sha256={network_digest} "
         f"network_preimages={len(network_preimages)} "
         f"network_preimage_set_sha256={network_preimage_digest} "
-        f"network_negative_frames={len(network_negative_frames)}"
+        f"network_negative_frames={len(network_negative_frames)} "
+        f"operation_return_vectors={len(operation_return_vectors)} "
+        f"operation_return_vector_set_sha256={operation_return_digest} "
+        f"operation_return_preimages={len(operation_return_preimages)} "
+        f"operation_return_preimage_set_sha256={operation_return_preimage_digest} "
+        f"operation_return_negative_frames={len(operation_return_negative_frames)}"
     )
     return 0
 
