@@ -1414,6 +1414,12 @@ static int payload_exec_mapping_policy_decision(const uint8_t *p, uint32_t n)
             return WIRE_VALUE;
         }
     }
+    seals = load_u32be(p + 36);
+    if (backing != SPP_DIAG_TRACE_MAPPING_BACKING_MEMFD) {
+        if (seals != 0) {
+            return WIRE_FLAGS;
+        }
+    }
     fs_magic = load_u32be(p + 24);
     if (backing == SPP_DIAG_TRACE_MAPPING_BACKING_ANONYMOUS) {
         if (fs_magic != 0) {
@@ -1437,12 +1443,6 @@ static int payload_exec_mapping_policy_decision(const uint8_t *p, uint32_t n)
         }
     } else {
         (void)dev_minor;
-    }
-    seals = load_u32be(p + 36);
-    if (backing != SPP_DIAG_TRACE_MAPPING_BACKING_MEMFD) {
-        if (seals != 0) {
-            return WIRE_FLAGS;
-        }
     }
     inode = load_u64be(p + 40);
     if (backing == SPP_DIAG_TRACE_MAPPING_BACKING_ANONYMOUS) {

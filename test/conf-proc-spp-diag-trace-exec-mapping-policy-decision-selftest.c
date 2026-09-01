@@ -433,7 +433,7 @@ static size_t decode_len_for(const struct spp_diag_trace_frame *f)
 static int api_fail_struct(const struct spp_diag_trace_frame *f, int expected,
                            void *later, size_t later_n)
 {
-    uint8_t out[32];
+    uint8_t out[108];
     uint8_t pre[SPP_DIAG_TRACE_FRAME_PREIMAGE_MAX_SIZE];
     uint8_t chain[SPP_DIAG_TRACE_CHAIN_LEN];
     uint8_t wire[SPP_DIAG_TRACE_MAX_FRAME_BYTES + 8];
@@ -1058,6 +1058,10 @@ static int test_matrix(void)
     unsigned decision;
     unsigned backing;
     unsigned mode;
+    unsigned requested;
+    unsigned effective;
+    unsigned prior;
+    unsigned prior_max;
     unsigned v;
     unsigned bit;
     static const uint32_t results[] = {
@@ -1069,9 +1073,23 @@ static int test_matrix(void)
         for (decision = 1; decision <= 2; decision++) {
             for (backing = 1; backing <= 4; backing++) {
                 for (mode = 1; mode <= 2; mode++) {
-                    apply_legal_tuple(&f, (uint16_t)operation, (uint16_t)decision,
-                                      (uint16_t)backing, (uint16_t)mode);
-                    CALL(expect_ok_both_paths(&f));
+                    for (requested = 0; requested <= 7; requested++) {
+                        for (effective = 4; effective <= 7; effective++) {
+                            prior_max = operation ==
+                                                SPP_DIAG_TRACE_MAPPING_OPERATION_MMAP
+                                            ? 0
+                                            : 7;
+                            for (prior = 0; prior <= prior_max; prior++) {
+                                apply_legal_tuple(
+                                    &f, (uint16_t)operation, (uint16_t)decision,
+                                    (uint16_t)backing, (uint16_t)mode);
+                                store32(f.payload + 8, requested);
+                                store32(f.payload + 12, effective);
+                                store32(f.payload + 16, prior);
+                                CALL(expect_ok_both_paths(&f));
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1336,14 +1354,19 @@ static int test_bounds(void)
         {"inode", pp_inode0, WIRE_VALUE, 84, 8, SOFF(payload) + 40, 8},
         {"mount", pp_mount0, WIRE_VALUE, 92, 8, SOFF(payload) + 48, 8},
     };
+    /*
+     * Seal validation at wire offset 80 semantically precedes every anonymous
+     * identity check below.  Suffix poisoning from an identity offset would
+     * therefore poison a required earlier check; keep the dual-invalid runtime
+     * assertions but do not make a false no-read claim for these pairs.
+     */
     const struct step anon_steps[] = {
-        {"fs", pp_fs_nz, WIRE_VALUE, 68, 4, SOFF(payload) + 24, 4},
-        {"major", pp_major_nz, WIRE_VALUE, 72, 4, SOFF(payload) + 28, 4},
-        {"minor", pp_minor_nz, WIRE_VALUE, 76, 4, SOFF(payload) + 32, 4},
-        {"seals", pp_seals_nz, WIRE_FLAGS, 80, 4, SOFF(payload) + 36, 4},
-        {"inode", pp_inode_nz, WIRE_VALUE, 84, 8, SOFF(payload) + 40, 8},
-        {"mount", pp_mount_nz, WIRE_VALUE, 92, 8, SOFF(payload) + 48, 8},
-        {"size", pp_size_nz, WIRE_VALUE, 100, 8, SOFF(payload) + 56, 8},
+        {"fs", pp_fs_nz, WIRE_VALUE, 68, 0, SOFF(payload) + 24, 0},
+        {"major", pp_major_nz, WIRE_VALUE, 72, 0, SOFF(payload) + 28, 0},
+        {"minor", pp_minor_nz, WIRE_VALUE, 76, 0, SOFF(payload) + 32, 0},
+        {"inode", pp_inode_nz, WIRE_VALUE, 84, 0, SOFF(payload) + 40, 0},
+        {"mount", pp_mount_nz, WIRE_VALUE, 92, 0, SOFF(payload) + 48, 0},
+        {"size", pp_size_nz, WIRE_VALUE, 100, 0, SOFF(payload) + 56, 0},
     };
     uint8_t wire[SPP_DIAG_TRACE_MAX_FRAME_BYTES + 16];
     uint8_t buf[8 + SPP_DIAG_TRACE_MAX_FRAME_BYTES + 16];
@@ -1360,6 +1383,9 @@ static int test_bounds(void)
     CALL(run_pairs(&f, steps, sizeof steps / sizeof steps[0]));
     fill_anonymous(&f);
     CALL(run_pairs(&f, anon_steps, sizeof anon_steps / sizeof anon_steps[0]));
+    pp_seals_nz(&f);
+    pp_fs_nz(&f);
+    CALL(api_fail_struct(&f, WIRE_FLAGS, NULL, 0));
 
     for (i = 0; i < sizeof bad_len / sizeof bad_len[0]; i++) {
         fill_valid(&f);
