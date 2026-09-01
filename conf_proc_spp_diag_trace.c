@@ -1191,6 +1191,7 @@ static int provenance_event_check(uint16_t event)
     case SPP_DIAG_TRACE_PROVENANCE_EVENT_FILE_OPEN_ATTEMPT:
     case SPP_DIAG_TRACE_PROVENANCE_EVENT_FILE_POLICY_DECISION:
     case SPP_DIAG_TRACE_PROVENANCE_EVENT_EXEC_MAPPING_POLICY_DECISION:
+    case SPP_DIAG_TRACE_PROVENANCE_EVENT_NETWORK_POLICY_DECISION:
         return WIRE_OK;
     default:
         return WIRE_EVENT;
@@ -1219,6 +1220,10 @@ static int provenance_payload_length_check(uint16_t event, uint32_t n)
                                                                     : WIRE_LENGTH;
     case SPP_DIAG_TRACE_PROVENANCE_EVENT_EXEC_MAPPING_POLICY_DECISION:
         return n == SPP_DIAG_TRACE_EXEC_MAPPING_POLICY_DECISION_PAYLOAD_SIZE
+                   ? WIRE_OK
+                   : WIRE_LENGTH;
+    case SPP_DIAG_TRACE_PROVENANCE_EVENT_NETWORK_POLICY_DECISION:
+        return n == SPP_DIAG_TRACE_NETWORK_POLICY_DECISION_PAYLOAD_SIZE
                    ? WIRE_OK
                    : WIRE_LENGTH;
     default:
@@ -1471,6 +1476,290 @@ static int payload_exec_mapping_policy_decision(const uint8_t *p, uint32_t n)
     return WIRE_OK;
 }
 
+enum network_family_class {
+    NETWORK_FAMILY_ZERO,
+    NETWORK_FAMILY_AF_INET,
+    NETWORK_FAMILY_AF_INET6,
+    NETWORK_FAMILY_OTHER_NONZERO
+};
+
+enum network_length_class {
+    NETWORK_LENGTH_ZERO,
+    NETWORK_LENGTH_ONE,
+    NETWORK_LENGTH_TWO_TO_FIFTEEN,
+    NETWORK_LENGTH_SIXTEEN,
+    NETWORK_LENGTH_SEVENTEEN_TO_TWENTY_SEVEN,
+    NETWORK_LENGTH_TWENTY_EIGHT,
+    NETWORK_LENGTH_TWENTY_NINE_TO_128,
+    NETWORK_LENGTH_OVER_128
+};
+
+static enum network_family_class network_classify_family(uint16_t family)
+{
+    if (family == 0) {
+        return NETWORK_FAMILY_ZERO;
+    }
+    if (family == SPP_DIAG_TRACE_NETWORK_FAMILY_AF_INET) {
+        return NETWORK_FAMILY_AF_INET;
+    }
+    if (family == SPP_DIAG_TRACE_NETWORK_FAMILY_AF_INET6) {
+        return NETWORK_FAMILY_AF_INET6;
+    }
+    return NETWORK_FAMILY_OTHER_NONZERO;
+}
+
+static enum network_length_class network_classify_length(uint16_t length)
+{
+    if (length == 0) {
+        return NETWORK_LENGTH_ZERO;
+    }
+    if (length == 1) {
+        return NETWORK_LENGTH_ONE;
+    }
+    if (length <= 15) {
+        return NETWORK_LENGTH_TWO_TO_FIFTEEN;
+    }
+    if (length == 16) {
+        return NETWORK_LENGTH_SIXTEEN;
+    }
+    if (length <= 27) {
+        return NETWORK_LENGTH_SEVENTEEN_TO_TWENTY_SEVEN;
+    }
+    if (length == 28) {
+        return NETWORK_LENGTH_TWENTY_EIGHT;
+    }
+    if (length <= 128) {
+        return NETWORK_LENGTH_TWENTY_NINE_TO_128;
+    }
+    return NETWORK_LENGTH_OVER_128;
+}
+
+static int network_length_2_to_128(enum network_length_class len)
+{
+    return len == NETWORK_LENGTH_TWO_TO_FIFTEEN ||
+           len == NETWORK_LENGTH_SIXTEEN ||
+           len == NETWORK_LENGTH_SEVENTEEN_TO_TWENTY_SEVEN ||
+           len == NETWORK_LENGTH_TWENTY_EIGHT ||
+           len == NETWORK_LENGTH_TWENTY_NINE_TO_128;
+}
+
+static int network_endpoint_relation(uint16_t operation, uint16_t kind,
+                                    uint16_t source,
+                                    enum network_family_class fam,
+                                    enum network_length_class len)
+{
+    switch (kind) {
+    case SPP_DIAG_TRACE_NETWORK_ENDPOINT_IPV4:
+        if (fam != NETWORK_FAMILY_AF_INET) {
+            return WIRE_STATE;
+        }
+        if (source == SPP_DIAG_TRACE_NETWORK_ENDPOINT_SOURCE_EXPLICIT) {
+            return len == NETWORK_LENGTH_SIXTEEN ? WIRE_OK : WIRE_STATE;
+        }
+        return len == NETWORK_LENGTH_ZERO ? WIRE_OK : WIRE_STATE;
+    case SPP_DIAG_TRACE_NETWORK_ENDPOINT_IPV6:
+        if (fam != NETWORK_FAMILY_AF_INET6) {
+            return WIRE_STATE;
+        }
+        if (source == SPP_DIAG_TRACE_NETWORK_ENDPOINT_SOURCE_EXPLICIT) {
+            return len == NETWORK_LENGTH_TWENTY_EIGHT ? WIRE_OK : WIRE_STATE;
+        }
+        return len == NETWORK_LENGTH_ZERO ? WIRE_OK : WIRE_STATE;
+    case SPP_DIAG_TRACE_NETWORK_ENDPOINT_UNSUPPORTED:
+        if (source == SPP_DIAG_TRACE_NETWORK_ENDPOINT_SOURCE_EXPLICIT) {
+            if (fam != NETWORK_FAMILY_ZERO &&
+                fam != NETWORK_FAMILY_OTHER_NONZERO) {
+                return WIRE_STATE;
+            }
+            return network_length_2_to_128(len) ? WIRE_OK : WIRE_STATE;
+        }
+        if (fam != NETWORK_FAMILY_OTHER_NONZERO) {
+            return WIRE_STATE;
+        }
+        return len == NETWORK_LENGTH_ZERO ? WIRE_OK : WIRE_STATE;
+    case SPP_DIAG_TRACE_NETWORK_ENDPOINT_MALFORMED:
+        if (source != SPP_DIAG_TRACE_NETWORK_ENDPOINT_SOURCE_EXPLICIT) {
+            return WIRE_STATE;
+        }
+        if ((len == NETWORK_LENGTH_ZERO || len == NETWORK_LENGTH_ONE) &&
+            fam == NETWORK_FAMILY_ZERO) {
+            return WIRE_OK;
+        }
+        if (fam == NETWORK_FAMILY_AF_INET &&
+            (len == NETWORK_LENGTH_TWO_TO_FIFTEEN ||
+             len == NETWORK_LENGTH_SEVENTEEN_TO_TWENTY_SEVEN ||
+             len == NETWORK_LENGTH_TWENTY_EIGHT ||
+             len == NETWORK_LENGTH_TWENTY_NINE_TO_128)) {
+            return WIRE_OK;
+        }
+        if (fam == NETWORK_FAMILY_AF_INET6 &&
+            (len == NETWORK_LENGTH_TWO_TO_FIFTEEN ||
+             len == NETWORK_LENGTH_SIXTEEN ||
+             len == NETWORK_LENGTH_SEVENTEEN_TO_TWENTY_SEVEN ||
+             len == NETWORK_LENGTH_TWENTY_NINE_TO_128)) {
+            return WIRE_OK;
+        }
+        return WIRE_STATE;
+    case SPP_DIAG_TRACE_NETWORK_ENDPOINT_UNRESOLVED:
+        if (operation != SPP_DIAG_TRACE_NETWORK_OPERATION_SENDMSG) {
+            return WIRE_STATE;
+        }
+        if (source != SPP_DIAG_TRACE_NETWORK_ENDPOINT_SOURCE_CONNECTED) {
+            return WIRE_STATE;
+        }
+        if (fam != NETWORK_FAMILY_ZERO) {
+            return WIRE_STATE;
+        }
+        return len == NETWORK_LENGTH_ZERO ? WIRE_OK : WIRE_STATE;
+    default:
+        return WIRE_STATE;
+    }
+}
+
+static int network_endpoint_content(const uint8_t *p, uint16_t kind)
+{
+    uint16_t port;
+    uint32_t scope;
+    uint32_t flow;
+
+    switch (kind) {
+    case SPP_DIAG_TRACE_NETWORK_ENDPOINT_IPV4:
+        scope = load_u32be(p + 40);
+        if (scope != 0) {
+            return WIRE_VALUE;
+        }
+        flow = load_u32be(p + 44);
+        if (flow != 0) {
+            return WIRE_VALUE;
+        }
+        if (!is_zero_n(p + 48, 12)) {
+            return WIRE_VALUE;
+        }
+        return WIRE_OK;
+    case SPP_DIAG_TRACE_NETWORK_ENDPOINT_IPV6:
+        return WIRE_OK;
+    case SPP_DIAG_TRACE_NETWORK_ENDPOINT_UNSUPPORTED:
+    case SPP_DIAG_TRACE_NETWORK_ENDPOINT_MALFORMED:
+    case SPP_DIAG_TRACE_NETWORK_ENDPOINT_UNRESOLVED:
+        port = load_u16be(p + 36);
+        if (port != 0) {
+            return WIRE_VALUE;
+        }
+        scope = load_u32be(p + 40);
+        if (scope != 0) {
+            return WIRE_VALUE;
+        }
+        flow = load_u32be(p + 44);
+        if (flow != 0) {
+            return WIRE_VALUE;
+        }
+        if (!is_zero_n(p + 48, 16)) {
+            return WIRE_VALUE;
+        }
+        return WIRE_OK;
+    default:
+        return WIRE_STATE;
+    }
+}
+
+static int payload_network_policy_decision(const uint8_t *p, uint32_t n)
+{
+    uint16_t operation;
+    uint16_t decision;
+    uint16_t kind;
+    uint16_t source;
+    uint16_t socket_kind;
+    uint16_t protocol;
+    uint16_t family;
+    uint16_t addrlen;
+    uint16_t reserved;
+    uint32_t result;
+    uint32_t flags;
+    uint32_t size;
+    uint64_t cookie;
+    enum network_family_class fam;
+    enum network_length_class len;
+    int err;
+
+    (void)n;
+    operation = load_u16be(p + 0);
+    if (operation != SPP_DIAG_TRACE_NETWORK_OPERATION_CONNECT &&
+        operation != SPP_DIAG_TRACE_NETWORK_OPERATION_SENDMSG) {
+        return WIRE_STATE;
+    }
+    decision = load_u16be(p + 2);
+    if (decision != SPP_DIAG_TRACE_POLICY_ALLOW &&
+        decision != SPP_DIAG_TRACE_POLICY_DENY) {
+        return WIRE_STATE;
+    }
+    kind = load_u16be(p + 4);
+    if (kind < SPP_DIAG_TRACE_NETWORK_ENDPOINT_IPV4 ||
+        kind > SPP_DIAG_TRACE_NETWORK_ENDPOINT_UNRESOLVED) {
+        return WIRE_STATE;
+    }
+    source = load_u16be(p + 6);
+    if (source != SPP_DIAG_TRACE_NETWORK_ENDPOINT_SOURCE_EXPLICIT &&
+        source != SPP_DIAG_TRACE_NETWORK_ENDPOINT_SOURCE_CONNECTED) {
+        return WIRE_STATE;
+    }
+    socket_kind = load_u16be(p + 8);
+    if (socket_kind < SPP_DIAG_TRACE_NETWORK_SOCKET_STREAM ||
+        socket_kind > SPP_DIAG_TRACE_NETWORK_SOCKET_OTHER) {
+        return WIRE_STATE;
+    }
+    (void)socket_kind;
+    protocol = load_u16be(p + 10);
+    (void)protocol;
+    addrlen = load_u16be(p + 14);
+    if (addrlen > 128) {
+        return WIRE_LENGTH;
+    }
+    cookie = load_u64be(p + 28);
+    if (cookie == 0) {
+        return WIRE_VALUE;
+    }
+    reserved = load_u16be(p + 38);
+    if (reserved != 0) {
+        return WIRE_RESERVED;
+    }
+
+    flags = load_u32be(p + 20);
+    size = load_u32be(p + 24);
+    if (operation == SPP_DIAG_TRACE_NETWORK_OPERATION_CONNECT) {
+        if (source != SPP_DIAG_TRACE_NETWORK_ENDPOINT_SOURCE_EXPLICIT) {
+            return WIRE_STATE;
+        }
+        if (flags != 0) {
+            return WIRE_STATE;
+        }
+        if (size != 0) {
+            return WIRE_STATE;
+        }
+    } else if ((size & 0x80000000u) != 0) {
+        return WIRE_VALUE;
+    }
+
+    result = load_u32be(p + 16);
+    if (decision == SPP_DIAG_TRACE_POLICY_ALLOW) {
+        if (result != 0u) {
+            return WIRE_VALUE;
+        }
+    } else if (decision == SPP_DIAG_TRACE_POLICY_DENY) {
+        if ((result & 0x80000000u) == 0u) {
+            return WIRE_VALUE;
+        }
+    }
+
+    family = load_u16be(p + 12);
+    fam = network_classify_family(family);
+    len = network_classify_length(addrlen);
+    err = network_endpoint_relation(operation, kind, source, fam, len);
+    if (err != WIRE_OK) {
+        return err;
+    }
+    return network_endpoint_content(p, kind);
+}
+
 static int provenance_payload_check(uint16_t event, const uint8_t *p, uint32_t n)
 {
     switch (event) {
@@ -1515,6 +1804,8 @@ static int provenance_payload_check(uint16_t event, const uint8_t *p, uint32_t n
         return payload_file_policy_decision(p, n);
     case SPP_DIAG_TRACE_PROVENANCE_EVENT_EXEC_MAPPING_POLICY_DECISION:
         return payload_exec_mapping_policy_decision(p, n);
+    case SPP_DIAG_TRACE_PROVENANCE_EVENT_NETWORK_POLICY_DECISION:
+        return payload_network_policy_decision(p, n);
     default:
         return WIRE_EVENT;
     }
