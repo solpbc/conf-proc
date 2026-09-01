@@ -11,6 +11,7 @@ SPP_DIAG_TRACE_PROVENANCE_TEST := test/conf-proc-spp-diag-trace-provenance-selft
 SPP_DIAG_TRACE_FILE_POLICY_TEST := test/conf-proc-spp-diag-trace-file-policy-decision-selftest.c
 SPP_DIAG_TRACE_EXEC_MAPPING_TEST := test/conf-proc-spp-diag-trace-exec-mapping-policy-decision-selftest.c
 SPP_DIAG_TRACE_NETWORK_POLICY_TEST := test/conf-proc-spp-diag-trace-network-policy-decision-selftest.c
+SPP_DIAG_TRACE_OPERATION_RETURN_TEST := test/conf-proc-spp-diag-trace-operation-return-selftest.c
 
 .PHONY: install check test ci clean ratls-contract test-spp-diag-trace test-spp-diag-trace-oracle test-spp-diag-trace-sanitized
 
@@ -101,6 +102,9 @@ test-spp-diag-trace:
 	$(CC) $(C11FLAGS) $(SPP_DIAG_TRACE_SRC) $(SPP_DIAG_TRACE_NETWORK_POLICY_TEST) -o build/spp-diag-trace-network-policy-decision-selftest
 	./build/spp-diag-trace-network-policy-decision-selftest
 	rm -f build/spp-diag-trace-network-policy-decision-selftest
+	$(CC) $(C11FLAGS) $(SPP_DIAG_TRACE_SRC) $(SPP_DIAG_TRACE_OPERATION_RETURN_TEST) -o build/spp-diag-trace-operation-return-selftest
+	./build/spp-diag-trace-operation-return-selftest
+	rm -f build/spp-diag-trace-operation-return-selftest
 
 test-spp-diag-trace-oracle:
 	mkdir -p build
@@ -124,6 +128,9 @@ test-spp-diag-trace-sanitized:
 	$(CC) $(C11FLAGS) -fsanitize=address,undefined -g -fno-sanitize-recover=undefined $(SPP_DIAG_TRACE_SRC) $(SPP_DIAG_TRACE_NETWORK_POLICY_TEST) -o build/spp-diag-trace-network-policy-decision-selftest-sanitized
 	./build/spp-diag-trace-network-policy-decision-selftest-sanitized
 	rm -f build/spp-diag-trace-network-policy-decision-selftest-sanitized
+	$(CC) $(C11FLAGS) -fsanitize=address,undefined -g -fno-sanitize-recover=undefined $(SPP_DIAG_TRACE_SRC) $(SPP_DIAG_TRACE_OPERATION_RETURN_TEST) -o build/spp-diag-trace-operation-return-selftest-sanitized
+	./build/spp-diag-trace-operation-return-selftest-sanitized
+	rm -f build/spp-diag-trace-operation-return-selftest-sanitized
 
 ci: check test test-spp-diag-trace test-spp-diag-trace-oracle test-spp-diag-trace-sanitized
 	rm -rf build

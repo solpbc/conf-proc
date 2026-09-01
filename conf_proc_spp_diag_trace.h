@@ -146,6 +146,13 @@ enum spp_diag_trace_result {
 #define SPP_DIAG_TRACE_NETWORK_FAMILY_AF_INET 2u
 #define SPP_DIAG_TRACE_NETWORK_FAMILY_AF_INET6 10u
 #define SPP_DIAG_TRACE_NETWORK_POLICY_DECISION_PAYLOAD_SIZE 64u
+#define SPP_DIAG_TRACE_PROVENANCE_EVENT_OPERATION_RETURN 0x0104u
+#define SPP_DIAG_TRACE_OPERATION_FILE_OPEN 1u
+#define SPP_DIAG_TRACE_OPERATION_MMAP 2u
+#define SPP_DIAG_TRACE_OPERATION_MPROTECT 3u
+#define SPP_DIAG_TRACE_OPERATION_CONNECT 4u
+#define SPP_DIAG_TRACE_OPERATION_SENDMSG 5u
+#define SPP_DIAG_TRACE_OPERATION_RETURN_PAYLOAD_SIZE 16u
 
 _Static_assert(SPP_DIAG_TRACE_HEADER_SIZE == 192, "header wire size");
 _Static_assert(SPP_DIAG_TRACE_PREIMAGE_SIZE == 224, "preimage size");
@@ -194,6 +201,14 @@ _Static_assert(SPP_DIAG_TRACE_FRAME_HEADER_SIZE +
 _Static_assert(SPP_DIAG_TRACE_FRAME_PREIMAGE_DOMAIN_LEN + SPP_DIAG_TRACE_CHAIN_LEN +
                        4 + 108 == 171,
                "network-policy-decision preimage size");
+_Static_assert(SPP_DIAG_TRACE_OPERATION_RETURN_PAYLOAD_SIZE == 16,
+               "operation-return payload size");
+_Static_assert(SPP_DIAG_TRACE_FRAME_HEADER_SIZE +
+                   SPP_DIAG_TRACE_OPERATION_RETURN_PAYLOAD_SIZE == 60,
+               "operation-return frame size");
+_Static_assert(SPP_DIAG_TRACE_FRAME_PREIMAGE_DOMAIN_LEN + SPP_DIAG_TRACE_CHAIN_LEN +
+                       4 + 60 == 123,
+               "operation-return preimage size");
 _Static_assert(SPP_DIAG_TRACE_STREAM_PREFIX_SIZE == 4, "stream prefix size");
 _Static_assert(SPP_DIAG_TRACE_STREAM_HEADER_ENTRY_SIZE == 196,
                "stream header entry size");

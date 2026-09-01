@@ -1192,6 +1192,7 @@ static int provenance_event_check(uint16_t event)
     case SPP_DIAG_TRACE_PROVENANCE_EVENT_FILE_POLICY_DECISION:
     case SPP_DIAG_TRACE_PROVENANCE_EVENT_EXEC_MAPPING_POLICY_DECISION:
     case SPP_DIAG_TRACE_PROVENANCE_EVENT_NETWORK_POLICY_DECISION:
+    case SPP_DIAG_TRACE_PROVENANCE_EVENT_OPERATION_RETURN:
         return WIRE_OK;
     default:
         return WIRE_EVENT;
@@ -1226,6 +1227,9 @@ static int provenance_payload_length_check(uint16_t event, uint32_t n)
         return n == SPP_DIAG_TRACE_NETWORK_POLICY_DECISION_PAYLOAD_SIZE
                    ? WIRE_OK
                    : WIRE_LENGTH;
+    case SPP_DIAG_TRACE_PROVENANCE_EVENT_OPERATION_RETURN:
+        return n == SPP_DIAG_TRACE_OPERATION_RETURN_PAYLOAD_SIZE ? WIRE_OK
+                                                                : WIRE_LENGTH;
     default:
         return WIRE_EVENT;
     }
@@ -1760,6 +1764,33 @@ static int payload_network_policy_decision(const uint8_t *p, uint32_t n)
     return network_endpoint_content(p, kind);
 }
 
+static int payload_operation_return(const uint8_t *p, uint32_t n)
+{
+    uint16_t kind;
+    uint16_t reserved16;
+    uint32_t reserved32;
+    uint64_t raw_bits;
+
+    (void)n;
+    kind = load_u16be(p + 0);
+    if (kind < SPP_DIAG_TRACE_OPERATION_FILE_OPEN ||
+        kind > SPP_DIAG_TRACE_OPERATION_SENDMSG) {
+        return WIRE_STATE;
+    }
+    reserved16 = load_u16be(p + 2);
+    if (reserved16 != 0) {
+        return WIRE_RESERVED;
+    }
+    reserved32 = load_u32be(p + 4);
+    if (reserved32 != 0) {
+        return WIRE_RESERVED;
+    }
+    /* raw: opaque 64-bit wrapper-return bits, every pattern valid, never checked or cast to signed */
+    raw_bits = load_u64be(p + 8);
+    (void)raw_bits;
+    return WIRE_OK;
+}
+
 static int provenance_payload_check(uint16_t event, const uint8_t *p, uint32_t n)
 {
     switch (event) {
@@ -1806,6 +1837,8 @@ static int provenance_payload_check(uint16_t event, const uint8_t *p, uint32_t n
         return payload_exec_mapping_policy_decision(p, n);
     case SPP_DIAG_TRACE_PROVENANCE_EVENT_NETWORK_POLICY_DECISION:
         return payload_network_policy_decision(p, n);
+    case SPP_DIAG_TRACE_PROVENANCE_EVENT_OPERATION_RETURN:
+        return payload_operation_return(p, n);
     default:
         return WIRE_EVENT;
     }
