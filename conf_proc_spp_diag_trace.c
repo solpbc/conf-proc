@@ -1184,3 +1184,102 @@ int spp_diag_trace_frame_preimage(const struct spp_diag_trace_frame *in,
     *required = need;
     return WIRE_OK;
 }
+
+int spp_diag_trace_stream_validate(const uint8_t *in, size_t len,
+                                   struct spp_diag_trace_stream_summary *out,
+                                   size_t *consumed)
+{
+    struct spp_diag_trace_header header_tmp;
+    struct spp_diag_trace_frame frame_tmp;
+    struct spp_diag_trace_stream_summary summary;
+    size_t header_consumed;
+    size_t frame_consumed;
+    size_t off;
+    size_t remaining;
+    uint32_t prefix;
+    uint32_t frame_length;
+    int err;
+
+    if (in == NULL || out == NULL || consumed == NULL) {
+        if (consumed != NULL) {
+            *consumed = 0;
+        }
+        return WIRE_NULL;
+    }
+    if (len > SPP_DIAG_TRACE_MAX_STREAM_BYTES) {
+        *consumed = 0;
+        return WIRE_CAP;
+    }
+    if (len < SPP_DIAG_TRACE_STREAM_PREFIX_SIZE) {
+        *consumed = 0;
+        return WIRE_LENGTH;
+    }
+    prefix = load_u32be(in);
+    if (prefix != SPP_DIAG_TRACE_HEADER_SIZE) {
+        *consumed = 0;
+        return WIRE_LENGTH;
+    }
+    if (len < SPP_DIAG_TRACE_STREAM_HEADER_ENTRY_SIZE) {
+        *consumed = 0;
+        return WIRE_LENGTH;
+    }
+    err = spp_diag_trace_header_decode(in + SPP_DIAG_TRACE_STREAM_PREFIX_SIZE,
+                                       SPP_DIAG_TRACE_HEADER_SIZE, &header_tmp,
+                                       &header_consumed);
+    if (err != WIRE_OK) {
+        *consumed = 0;
+        return err;
+    }
+    summary.frame_count = 0;
+    summary.stream_byte_count = SPP_DIAG_TRACE_STREAM_HEADER_ENTRY_SIZE;
+    off = SPP_DIAG_TRACE_STREAM_HEADER_ENTRY_SIZE;
+    if (len == SPP_DIAG_TRACE_STREAM_HEADER_ENTRY_SIZE) {
+        *out = summary;
+        *consumed = SPP_DIAG_TRACE_STREAM_HEADER_ENTRY_SIZE;
+        return WIRE_OK;
+    }
+    for (;;) {
+        remaining = len - off;
+        if (remaining == 0) {
+            *out = summary;
+            *consumed = len;
+            return WIRE_OK;
+        }
+        if (remaining < SPP_DIAG_TRACE_STREAM_PREFIX_SIZE) {
+            *consumed = 0;
+            return WIRE_LENGTH;
+        }
+        frame_length = load_u32be(in + off);
+        if (frame_length < SPP_DIAG_TRACE_FRAME_HEADER_SIZE) {
+            *consumed = 0;
+            return WIRE_LENGTH;
+        }
+        if (frame_length > SPP_DIAG_TRACE_MAX_FRAME_BYTES) {
+            *consumed = 0;
+            return WIRE_CAP;
+        }
+        if (frame_length > remaining - SPP_DIAG_TRACE_STREAM_PREFIX_SIZE) {
+            *consumed = 0;
+            return WIRE_LENGTH;
+        }
+        err = spp_diag_trace_frame_decode(
+            in + off + SPP_DIAG_TRACE_STREAM_PREFIX_SIZE, frame_length,
+            &frame_tmp, &frame_consumed);
+        if (err != WIRE_OK) {
+            *consumed = 0;
+            return err;
+        }
+        if (frame_tmp.sequence != summary.frame_count) {
+            *consumed = 0;
+            return WIRE_SEQUENCE;
+        }
+        if (summary.frame_count == SPP_DIAG_TRACE_MAX_FRAMES) {
+            *consumed = 0;
+            return WIRE_CAP;
+        }
+        summary.frame_count++;
+        summary.stream_byte_count +=
+            (uint64_t)SPP_DIAG_TRACE_STREAM_PREFIX_SIZE + (uint64_t)frame_length;
+        off += SPP_DIAG_TRACE_STREAM_PREFIX_SIZE + (size_t)frame_length;
+    }
+}

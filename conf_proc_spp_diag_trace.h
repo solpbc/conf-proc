@@ -38,6 +38,8 @@ enum spp_diag_trace_result {
 #define SPP_DIAG_TRACE_MAX_STREAM_BYTES 268435456ull
 #define SPP_DIAG_TRACE_MAX_FRAME_BYTES 1088u
 #define SPP_DIAG_TRACE_FRAME_HEADER_SIZE 44
+#define SPP_DIAG_TRACE_STREAM_PREFIX_SIZE 4
+#define SPP_DIAG_TRACE_STREAM_HEADER_ENTRY_SIZE 196
 #define SPP_DIAG_TRACE_MAX_PATH_BYTES 1024
 #define SPP_DIAG_TRACE_MAX_PAYLOAD_BYTES 1044
 #define SPP_DIAG_TRACE_CHAIN_LEN 32
@@ -112,6 +114,16 @@ _Static_assert(SPP_DIAG_TRACE_FRAME_PREIMAGE_DOMAIN_LEN + SPP_DIAG_TRACE_CHAIN_L
                        4 + SPP_DIAG_TRACE_MAX_FRAME_BYTES ==
                    SPP_DIAG_TRACE_FRAME_PREIMAGE_MAX_SIZE,
                "max frame preimage size");
+_Static_assert(SPP_DIAG_TRACE_STREAM_PREFIX_SIZE == 4, "stream prefix size");
+_Static_assert(SPP_DIAG_TRACE_STREAM_HEADER_ENTRY_SIZE == 196,
+               "stream header entry size");
+_Static_assert(SPP_DIAG_TRACE_STREAM_PREFIX_SIZE + SPP_DIAG_TRACE_HEADER_SIZE ==
+                   SPP_DIAG_TRACE_STREAM_HEADER_ENTRY_SIZE,
+               "header entry is prefix plus header");
+_Static_assert((unsigned long long)SPP_DIAG_TRACE_STREAM_PREFIX_SIZE +
+                       SPP_DIAG_TRACE_MAX_FRAME_BYTES <=
+                   SPP_DIAG_TRACE_MAX_STREAM_BYTES,
+               "max frame entry fits in max stream");
 
 /*
  * Structural byte codec only: WIRE_OK does not establish transcript order,
@@ -228,5 +240,25 @@ int spp_diag_trace_frame_preimage(const struct spp_diag_trace_frame *in,
                                   const uint8_t previous_chain[SPP_DIAG_TRACE_CHAIN_LEN],
                                   uint8_t *out, size_t cap, size_t *written,
                                   size_t *required);
+
+struct spp_diag_trace_stream_summary {
+    uint64_t frame_count;
+    uint64_t stream_byte_count;
+};
+
+/*
+ * Structural stream walk only: WIRE_OK means the length-prefixed header
+ * and frames decoded, the sequence field increased by one from zero, and
+ * the count/byte caps held. It does not establish transcript order,
+ * previous-chain linkage, IMA/PCR extension, attestation, or
+ * qualification.
+ *
+ * Input, summary, and consumed ranges must be non-overlapping. Overlap is
+ * caller error with undefined behavior; this portable reference does not
+ * attempt pointer-range detection.
+ */
+int spp_diag_trace_stream_validate(const uint8_t *in, size_t len,
+                                   struct spp_diag_trace_stream_summary *out,
+                                   size_t *consumed);
 
 #endif
