@@ -915,6 +915,14 @@ static int test_compatibility(void)
         } else if (v == SPP_DIAG_TRACE_PROVENANCE_EVENT_NETWORK_POLICY_DECISION) {
             continue;
 #endif
+#ifdef SPP_DIAG_TRACE_PROVENANCE_EVENT_OPERATION_RETURN
+        } else if (v == SPP_DIAG_TRACE_PROVENANCE_EVENT_OPERATION_RETURN) {
+            continue;
+#endif
+#ifdef SPP_DIAG_TRACE_PROVENANCE_EVENT_TASK_EXIT
+        } else if (v == SPP_DIAG_TRACE_PROVENANCE_EVENT_TASK_EXIT) {
+            continue;
+#endif
         } else {
             fill_valid(&f);
             f.event_type = (uint16_t)v;

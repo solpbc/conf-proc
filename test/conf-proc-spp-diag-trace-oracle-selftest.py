@@ -968,7 +968,7 @@ def main() -> int:
 
     adjacent_negatives: tuple[tuple[bytes, int, int | None], ...] = (
         (
-            replace(replace(provenance_min_literal, 0, be(0x0104, 2)), 2, be(1, 2)),
+            replace(replace(provenance_min_literal, 0, be(0x0106, 2)), 2, be(1, 2)),
             WIRE_EVENT,
             WIRE_EVENT,
         ),
@@ -1053,7 +1053,7 @@ def main() -> int:
         expect_provenance_decode(harness, encoded, result)
         expect_provenance_encode(harness, encoded, result)
 
-    for event in (0x0001, 0x00FF, 0x0104, 0x01FF, 0x0200, 0xFFFF):
+    for event in (0x0001, 0x00FF, 0x0106, 0x01FF, 0x0200, 0xFFFF):
         encoded = replace(provenance_min_literal, 0, be(event, 2))
         expect_provenance_decode(harness, encoded, WIRE_EVENT)
         expect_provenance_encode(harness, encoded, WIRE_EVENT)
@@ -1186,7 +1186,7 @@ def main() -> int:
     )
 
     policy_invalid_structs: list[tuple[bytes, int]] = [
-        (replace(policy_dense_literal, 0, be(0x0104, 2)), WIRE_EVENT),
+        (replace(policy_dense_literal, 0, be(0x0106, 2)), WIRE_EVENT),
         (replace(policy_dense_literal, 2, be(1, 2)), WIRE_FLAGS),
         (replace(policy_dense_literal, 4, be(1045, 4)), WIRE_CAP),
         (replace(policy_dense_literal, 4, be(47, 4)), WIRE_LENGTH),
@@ -1232,7 +1232,7 @@ def main() -> int:
 
     policy_adjacent_negatives: tuple[tuple[bytes, int, int], ...] = (
         (
-            replace(replace(policy_dense_literal, 0, be(0x0104, 2)), 2, be(1, 2)),
+            replace(replace(policy_dense_literal, 0, be(0x0106, 2)), 2, be(1, 2)),
             WIRE_EVENT,
             WIRE_EVENT,
         ),
@@ -1347,7 +1347,7 @@ def main() -> int:
         expect_provenance_encode(harness, encoded, result)
         expect_provenance_preimage(harness, encoded, zero, result)
 
-    for event in (0x0000, 0x0001, 0x00FF, 0x0104, 0x01FF, 0x0200, 0xFFFF):
+    for event in (0x0000, 0x0001, 0x00FF, 0x0106, 0x01FF, 0x0200, 0xFFFF):
         encoded = replace(policy_dense_literal, 0, be(event, 2))
         expect_provenance_decode(harness, encoded, WIRE_EVENT)
         expect_provenance_encode(harness, encoded, WIRE_EVENT)
@@ -1528,7 +1528,7 @@ def main() -> int:
     )
 
     mapping_invalid_structs: list[tuple[bytes, int]] = [
-        (replace(mapping_dense_literal, 0, be(0x0104, 2)), WIRE_EVENT),
+        (replace(mapping_dense_literal, 0, be(0x0106, 2)), WIRE_EVENT),
         (replace(mapping_dense_literal, 2, be(1, 2)), WIRE_FLAGS),
         (replace(mapping_dense_literal, 4, be(1045, 4)), WIRE_CAP),
         (replace(mapping_dense_literal, 4, be(63, 4)), WIRE_LENGTH),
@@ -1592,7 +1592,7 @@ def main() -> int:
 
     mapping_precedence_negatives: tuple[tuple[bytes, int], ...] = (
         (
-            replace(replace(mapping_dense_literal, 0, be(0x0104, 2)), 2, be(1, 2)),
+            replace(replace(mapping_dense_literal, 0, be(0x0106, 2)), 2, be(1, 2)),
             WIRE_EVENT,
         ),
         (
@@ -1689,7 +1689,7 @@ def main() -> int:
                 f"mapping precedence vector {precedence_index}: {error}"
             ) from error
 
-    for event in (0x0000, 0x0001, 0x00FF, 0x0104, 0x01FF, 0x0200, 0xFFFF):
+    for event in (0x0000, 0x0001, 0x00FF, 0x0106, 0x01FF, 0x0200, 0xFFFF):
         encoded = replace(mapping_dense_literal, 0, be(event, 2))
         mapping_negative_frames.add(encoded)
         expect_provenance_decode(harness, encoded, WIRE_EVENT)
@@ -2060,7 +2060,7 @@ def main() -> int:
     )
 
     network_invalid_structs: list[tuple[bytes, int]] = [
-        (replace(network_ipv4_literal, 0, be(0x0104, 2)), WIRE_EVENT),
+        (replace(network_ipv4_literal, 0, be(0x0106, 2)), WIRE_EVENT),
         (replace(network_ipv4_literal, 2, be(1, 2)), WIRE_FLAGS),
         (replace(network_ipv4_literal, 4, be(1045, 4)), WIRE_CAP),
         (replace(network_ipv4_literal, 4, be(63, 4)), WIRE_LENGTH),
@@ -2132,7 +2132,7 @@ def main() -> int:
         expect_provenance_preimage(harness, encoded, zero, result)
 
     network_precedence_negatives: tuple[tuple[bytes, int], ...] = (
-        (replace(replace(network_ipv4_literal, 0, be(0x0104, 2)), 2, be(1, 2)), WIRE_EVENT),
+        (replace(replace(network_ipv4_literal, 0, be(0x0106, 2)), 2, be(1, 2)), WIRE_EVENT),
         (replace(replace(network_ipv4_literal, 2, be(1, 2)), 4, be(63, 4)), WIRE_FLAGS),
         (replace(replace(network_ipv4_literal, 4, be(63, 4)), 16, bytes(8)), WIRE_LENGTH),
         (replace(replace(network_ipv4_literal, 16, bytes(8)), 24, be(1, 8)), WIRE_VALUE),
@@ -2165,7 +2165,7 @@ def main() -> int:
                 f"network precedence vector {precedence_index}: {error}"
             ) from error
 
-    for event in (0x0000, 0x0001, 0x00FF, 0x0104, 0x01FF, 0x0200, 0xFFFF):
+    for event in (0x0000, 0x0001, 0x00FF, 0x0106, 0x01FF, 0x0200, 0xFFFF):
         encoded = replace(network_ipv4_literal, 0, be(event, 2))
         network_negative_frames.add(encoded)
         expect_provenance_decode(harness, encoded, WIRE_EVENT)
