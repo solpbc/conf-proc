@@ -1295,6 +1295,7 @@ static int provenance_payload_check(const uint8_t *p, uint32_t n)
     if ((modifier & ~(uint32_t)SPP_DIAG_TRACE_FILE_MOD_MASK) != 0) {
         return WIRE_FLAGS;
     }
+    /* dirfd: opaque 32-bit two's-complement bits, every pattern valid, never checked or cast to signed */
     dirfd_bits = load_u32be(p + 8);
     (void)dirfd_bits;
     reserved = load_u32be(p + 12);
