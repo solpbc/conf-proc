@@ -153,6 +153,8 @@ enum spp_diag_trace_result {
 #define SPP_DIAG_TRACE_OPERATION_CONNECT 4u
 #define SPP_DIAG_TRACE_OPERATION_SENDMSG 5u
 #define SPP_DIAG_TRACE_OPERATION_RETURN_PAYLOAD_SIZE 16u
+#define SPP_DIAG_TRACE_PROVENANCE_EVENT_TASK_EXIT 0x0105u
+#define SPP_DIAG_TRACE_TASK_EXIT_PAYLOAD_SIZE 8u
 
 _Static_assert(SPP_DIAG_TRACE_HEADER_SIZE == 192, "header wire size");
 _Static_assert(SPP_DIAG_TRACE_PREIMAGE_SIZE == 224, "preimage size");
@@ -209,6 +211,14 @@ _Static_assert(SPP_DIAG_TRACE_FRAME_HEADER_SIZE +
 _Static_assert(SPP_DIAG_TRACE_FRAME_PREIMAGE_DOMAIN_LEN + SPP_DIAG_TRACE_CHAIN_LEN +
                        4 + 60 == 123,
                "operation-return preimage size");
+_Static_assert(SPP_DIAG_TRACE_TASK_EXIT_PAYLOAD_SIZE == 8,
+               "task-exit payload size");
+_Static_assert(SPP_DIAG_TRACE_FRAME_HEADER_SIZE +
+                   SPP_DIAG_TRACE_TASK_EXIT_PAYLOAD_SIZE == 52,
+               "task-exit frame size");
+_Static_assert(SPP_DIAG_TRACE_FRAME_PREIMAGE_DOMAIN_LEN + SPP_DIAG_TRACE_CHAIN_LEN +
+                       4 + 52 == 115,
+               "task-exit preimage size");
 _Static_assert(SPP_DIAG_TRACE_STREAM_PREFIX_SIZE == 4, "stream prefix size");
 _Static_assert(SPP_DIAG_TRACE_STREAM_HEADER_ENTRY_SIZE == 196,
                "stream header entry size");

@@ -1193,6 +1193,7 @@ static int provenance_event_check(uint16_t event)
     case SPP_DIAG_TRACE_PROVENANCE_EVENT_EXEC_MAPPING_POLICY_DECISION:
     case SPP_DIAG_TRACE_PROVENANCE_EVENT_NETWORK_POLICY_DECISION:
     case SPP_DIAG_TRACE_PROVENANCE_EVENT_OPERATION_RETURN:
+    case SPP_DIAG_TRACE_PROVENANCE_EVENT_TASK_EXIT:
         return WIRE_OK;
     default:
         return WIRE_EVENT;
@@ -1230,6 +1231,9 @@ static int provenance_payload_length_check(uint16_t event, uint32_t n)
     case SPP_DIAG_TRACE_PROVENANCE_EVENT_OPERATION_RETURN:
         return n == SPP_DIAG_TRACE_OPERATION_RETURN_PAYLOAD_SIZE ? WIRE_OK
                                                                 : WIRE_LENGTH;
+    case SPP_DIAG_TRACE_PROVENANCE_EVENT_TASK_EXIT:
+        return n == SPP_DIAG_TRACE_TASK_EXIT_PAYLOAD_SIZE ? WIRE_OK
+                                                         : WIRE_LENGTH;
     default:
         return WIRE_EVENT;
     }
@@ -1240,14 +1244,25 @@ static int provenance_task_check(uint64_t task)
     return task != 0 ? WIRE_OK : WIRE_VALUE;
 }
 
-static int provenance_parent_check(uint64_t parent)
+static int provenance_parent_check(uint16_t event, uint64_t parent)
 {
+    if (event == SPP_DIAG_TRACE_PROVENANCE_EVENT_TASK_EXIT) {
+        return parent != 0 ? WIRE_OK : WIRE_VALUE;
+    }
     return parent == 0 ? WIRE_OK : WIRE_VALUE;
 }
 
-static int provenance_operation_check(uint64_t operation)
+static int provenance_operation_check(uint16_t event, uint64_t operation)
 {
+    if (event == SPP_DIAG_TRACE_PROVENANCE_EVENT_TASK_EXIT) {
+        return operation == 0 ? WIRE_OK : WIRE_VALUE;
+    }
     return operation != 0 ? WIRE_OK : WIRE_VALUE;
+}
+
+static int provenance_task_parent_check(uint64_t task, uint64_t parent)
+{
+    return task != parent ? WIRE_OK : WIRE_VALUE;
 }
 
 static int provenance_phase_check(uint16_t phase)
@@ -1278,11 +1293,15 @@ static int provenance_header_fields(const struct spp_diag_trace_frame *f)
     if (err != WIRE_OK) {
         return err;
     }
-    err = provenance_parent_check(f->parent_task_ordinal);
+    err = provenance_parent_check(f->event_type, f->parent_task_ordinal);
     if (err != WIRE_OK) {
         return err;
     }
-    err = provenance_operation_check(f->operation_ordinal);
+    err = provenance_operation_check(f->event_type, f->operation_ordinal);
+    if (err != WIRE_OK) {
+        return err;
+    }
+    err = provenance_task_parent_check(f->task_ordinal, f->parent_task_ordinal);
     if (err != WIRE_OK) {
         return err;
     }
@@ -1791,6 +1810,22 @@ static int payload_operation_return(const uint8_t *p, uint32_t n)
     return WIRE_OK;
 }
 
+static int payload_task_exit(const uint8_t *p, uint32_t n)
+{
+    uint32_t exit_code;
+    uint32_t reserved32;
+
+    (void)n;
+    /* exit_code: opaque 32-bit stored tsk->exit_code bits, every pattern valid, never checked or cast to signed */
+    exit_code = load_u32be(p + 0);
+    (void)exit_code;
+    reserved32 = load_u32be(p + 4);
+    if (reserved32 != 0) {
+        return WIRE_RESERVED;
+    }
+    return WIRE_OK;
+}
+
 static int provenance_payload_check(uint16_t event, const uint8_t *p, uint32_t n)
 {
     switch (event) {
@@ -1839,6 +1874,8 @@ static int provenance_payload_check(uint16_t event, const uint8_t *p, uint32_t n
         return payload_network_policy_decision(p, n);
     case SPP_DIAG_TRACE_PROVENANCE_EVENT_OPERATION_RETURN:
         return payload_operation_return(p, n);
+    case SPP_DIAG_TRACE_PROVENANCE_EVENT_TASK_EXIT:
+        return payload_task_exit(p, n);
     default:
         return WIRE_EVENT;
     }
@@ -1944,13 +1981,18 @@ int spp_diag_trace_provenance_frame_decode(const uint8_t *in, size_t len,
         return err;
     }
     parent = load_u64be(in + 24);
-    err = provenance_parent_check(parent);
+    err = provenance_parent_check(event, parent);
     if (err != WIRE_OK) {
         *consumed = 0;
         return err;
     }
     operation = load_u64be(in + 32);
-    err = provenance_operation_check(operation);
+    err = provenance_operation_check(event, operation);
+    if (err != WIRE_OK) {
+        *consumed = 0;
+        return err;
+    }
+    err = provenance_task_parent_check(task, parent);
     if (err != WIRE_OK) {
         *consumed = 0;
         return err;
