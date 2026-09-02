@@ -79,7 +79,59 @@ def check_certificates_and_crls() -> tuple[x509.Certificate, x509.Certificate, x
     assert vcek.issuer == ask.subject
     assert ark.extensions.get_extension_for_class(x509.BasicConstraints).value == x509.BasicConstraints(True, 1)
     assert ask.extensions.get_extension_for_class(x509.BasicConstraints).value == x509.BasicConstraints(True, 0)
-    assert vcek.extensions.get_extension_for_class(x509.BasicConstraints).value == x509.BasicConstraints(False, None)
+    ark_usage = ark.extensions.get_extension_for_class(x509.KeyUsage).value
+    ask_usage = ask.extensions.get_extension_for_class(x509.KeyUsage).value
+    assert ark_usage == x509.KeyUsage(
+        digital_signature=False,
+        content_commitment=False,
+        key_encipherment=False,
+        data_encipherment=False,
+        key_agreement=False,
+        key_cert_sign=True,
+        crl_sign=True,
+        encipher_only=False,
+        decipher_only=False,
+    )
+    assert ask_usage == x509.KeyUsage(
+        digital_signature=False,
+        content_commitment=False,
+        key_encipherment=False,
+        data_encipherment=False,
+        key_agreement=False,
+        key_cert_sign=True,
+        crl_sign=False,
+        encipher_only=False,
+        decipher_only=False,
+    )
+    assert extension_inventory(ark) == {
+        ("2.5.29.15", True),
+        ("2.5.29.19", True),
+    }
+    assert extension_inventory(ask) == {
+        ("2.5.29.15", True),
+        ("2.5.29.19", True),
+    }
+    assert extension_inventory(vcek) == {
+        (AMD_OID + "1", False),
+        (AMD_OID + "2", False),
+        (AMD_OID + "3.1", False),
+        (AMD_OID + "3.2", False),
+        (AMD_OID + "3.3", False),
+        (AMD_OID + "3.4", False),
+        (AMD_OID + "3.5", False),
+        (AMD_OID + "3.6", False),
+        (AMD_OID + "3.7", False),
+        (AMD_OID + "3.8", False),
+        (AMD_OID + "4", False),
+    }
+    for extension_class in (x509.BasicConstraints, x509.KeyUsage):
+        try:
+            vcek.extensions.get_extension_for_class(extension_class)
+        except x509.ExtensionNotFound:
+            pass
+        else:
+            raise AssertionError(extension_class)
+    assert vcek.serial_number == 0
 
     verify_pss_certificate(ark, ark)
     verify_pss_certificate(ask, ark)
@@ -123,6 +175,12 @@ def check_certificates_and_crls() -> tuple[x509.Certificate, x509.Certificate, x
         observed = int.from_bytes(body, "big") if tag == 0x02 else body
         assert observed == expected, oid
     return ark, ask, vcek
+
+
+def extension_inventory(cert: x509.Certificate) -> set[tuple[str, bool]]:
+    observed = {(extension.oid.dotted_string, extension.critical) for extension in cert.extensions}
+    assert len(observed) == len(cert.extensions)
+    return observed
 
 
 def verify_pss_certificate(cert: x509.Certificate, issuer: x509.Certificate) -> None:
