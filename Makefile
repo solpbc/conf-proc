@@ -42,12 +42,14 @@ SPP_DIAG_ATTEST_ORACLE := test/conf-proc-spp-diag-attest-oracle-selftest.py
 SPP_DIAG_ATTEST_TEST := test/conf-proc-spp-diag-attest-selftest.py
 SPP_DIAG_TRACE_CORE_DIR := spp-diag-trace-core-src/security/spp_diag_trace_core
 SPP_DIAG_TRACE_CORE_SRC := $(SPP_DIAG_TRACE_CORE_DIR)/core.c
+SPP_DIAG_TRACE_CORE_BOOTSTRAP_SRC := $(SPP_DIAG_TRACE_CORE_DIR)/bootstrap.c $(SPP_DIAG_TRACE_CORE_DIR)/gate.c $(SPP_DIAG_TRACE_CORE_DIR)/release.c
 SPP_DIAG_TRACE_CORE_CONSTANTS := $(SPP_DIAG_TRACE_CORE_DIR)/protocol_constants.h
 SPP_DIAG_TRACE_CORE_SHIM_INC := test/spp-diag-trace-core-shim/include
-SPP_DIAG_TRACE_CORE_HOST_INC := -I $(SPP_DIAG_TRACE_CORE_SHIM_INC) -I $(SPP_DIAG_TRACE_CORE_DIR)
+SPP_DIAG_TRACE_CORE_HOST_INC := -I $(SPP_DIAG_TRACE_CORE_SHIM_INC) -I spp-diag-trace-core-src/include -I $(SPP_DIAG_TRACE_CORE_DIR)
 SPP_DIAG_TRACE_CORE_HOST_SHA := test/spp-diag-trace-core-shim/host_sha256.c
 SPP_DIAG_TRACE_CORE_HOST_VMALLOC := test/spp-diag-trace-core-shim/host_vmalloc.c
 SPP_DIAG_TRACE_CORE_HOST_LIB := $(SPP_DIAG_TRACE_CORE_HOST_SHA) $(SPP_DIAG_TRACE_CORE_HOST_VMALLOC)
+SPP_DIAG_TRACE_CORE_BOOTSTRAP_HOST_LIB := $(SPP_DIAG_TRACE_CORE_HOST_LIB) test/spp-diag-trace-core-shim/host_bootstrap.c test/spp-diag-trace-core-shim/host_kmod.c test/spp-diag-trace-core-shim/host_ima.c
 SPP_DIAG_TRACE_CORE_EXTRACT := conf_proc_spp_diag_trace_core_extract_constants.py
 SPP_DIAG_TRACE_CORE_MANIFEST_PY := conf_proc_spp_diag_trace_core_manifest.py
 SPP_DIAG_TRACE_CORE_MATERIALIZE := conf_proc_spp_diag_trace_core_materialize.py
@@ -68,8 +70,10 @@ SPP_DIAG_TRACE_CORE_CONTEXT_TEST := test/conf-proc-spp-diag-trace-core-context-s
 SPP_DIAG_TRACE_CORE_CONTEXT_SOURCE := test/conf-proc-spp-diag-trace-core-context-source-selftest.py
 SPP_DIAG_TRACE_CORE_CALLGRAPH := test/conf-proc-spp-diag-trace-core-callgraph-selftest.py
 SPP_DIAG_TRACE_CORE_CALLGRAPH_NEG := test/conf-proc-spp-diag-trace-core-callgraph-negative-fixtures.c
+SPP_DIAG_TRACE_CORE_BOOTSTRAP_TEST := test/conf-proc-spp-diag-trace-core-bootstrap-selftest.c
+SPP_DIAG_TRACE_CORE_BOOTSTRAP_KUNIT_TEST := test/conf-proc-spp-diag-trace-core-bootstrap-kunit-selftest.c
 
-.PHONY: install check test ci clean ratls-contract test-spp-diag-trace test-spp-diag-trace-oracle test-spp-diag-trace-chain test-spp-diag-trace-checkpoints test-spp-diag-trace-semantics test-spp-diag-trace-sanitized test-spp-diag-ima-replay test-spp-diag-attest-fixture test-spp-diag-attest test-spp-diag-trace-core test-spp-diag-trace-core-oracle test-spp-diag-trace-core-race test-spp-diag-trace-core-sanitized test-spp-diag-trace-core-materialize test-spp-diag-trace-core-handoff test-spp-diag-trace-core-source-walk test-spp-diag-trace-core-context test-spp-diag-trace-core-callgraph
+.PHONY: install check test ci clean ratls-contract test-spp-diag-trace test-spp-diag-trace-oracle test-spp-diag-trace-chain test-spp-diag-trace-checkpoints test-spp-diag-trace-semantics test-spp-diag-trace-sanitized test-spp-diag-ima-replay test-spp-diag-attest-fixture test-spp-diag-attest test-spp-diag-trace-core test-spp-diag-trace-core-oracle test-spp-diag-trace-core-race test-spp-diag-trace-core-sanitized test-spp-diag-trace-core-materialize test-spp-diag-trace-core-handoff test-spp-diag-trace-core-source-walk test-spp-diag-trace-core-context test-spp-diag-trace-core-callgraph test-spp-diag-trace-core-bootstrap test-spp-diag-trace-core-bootstrap-sanitized test-spp-diag-trace-core-bootstrap-source-walk test-spp-diag-trace-core-bootstrap-kunit test-spp-diag-trace-core-bootstrap-callgraph
 
 install:
 	python3 -m venv .venv
@@ -286,6 +290,39 @@ test-spp-diag-trace-core-context:
 	./build/spp-diag-trace-core-context-selftest
 	rm -f build/spp-diag-trace-core-context-selftest
 
+test-spp-diag-trace-core-bootstrap:
+	mkdir -p build
+	$(CC) $(CORE_CFLAGS) -pthread -DCONFIG_KUNIT=1 -DCONFIG_SECURITY_SPP_DIAG_TRACE_CORE_BOOTSTRAP=1 $(SPP_DIAG_TRACE_CORE_HOST_INC) $(SPP_DIAG_TRACE_CORE_SRC) $(SPP_DIAG_TRACE_CORE_BOOTSTRAP_SRC) $(SPP_DIAG_TRACE_CORE_BOOTSTRAP_HOST_LIB) $(SPP_DIAG_TRACE_CORE_BOOTSTRAP_TEST) -o build/spp-diag-trace-core-bootstrap-selftest
+	./build/spp-diag-trace-core-bootstrap-selftest
+	rm -f build/spp-diag-trace-core-bootstrap-selftest
+
+test-spp-diag-trace-core-bootstrap-sanitized:
+	mkdir -p build
+	$(CC) $(CORE_CFLAGS) -pthread -DCONFIG_KUNIT=1 -DCONFIG_SECURITY_SPP_DIAG_TRACE_CORE_BOOTSTRAP=1 -fsanitize=address,undefined -g -fno-sanitize-recover=undefined $(SPP_DIAG_TRACE_CORE_HOST_INC) $(SPP_DIAG_TRACE_CORE_SRC) $(SPP_DIAG_TRACE_CORE_BOOTSTRAP_SRC) $(SPP_DIAG_TRACE_CORE_BOOTSTRAP_HOST_LIB) $(SPP_DIAG_TRACE_CORE_BOOTSTRAP_TEST) -o build/spp-diag-trace-core-bootstrap-selftest-sanitized
+	./build/spp-diag-trace-core-bootstrap-selftest-sanitized
+	rm -f build/spp-diag-trace-core-bootstrap-selftest-sanitized
+
+test-spp-diag-trace-core-bootstrap-source-walk:
+	$(PYTHON) $(SPP_DIAG_TRACE_CORE_SOURCE_WALK)
+
+test-spp-diag-trace-core-bootstrap-kunit:
+	mkdir -p build
+	$(PYTHON) $(SPP_DIAG_TRACE_CORE_SOURCE_WALK)
+	$(CC) $(CORE_CFLAGS) -pthread -DCONFIG_KUNIT=1 -DCONFIG_SECURITY_SPP_DIAG_TRACE_CORE_BOOTSTRAP=1 -DSPP_DIAG_TRACE_CORE_HOST_TEST=1 $(SPP_DIAG_TRACE_CORE_HOST_INC) $(SPP_DIAG_TRACE_CORE_SRC) $(SPP_DIAG_TRACE_CORE_BOOTSTRAP_SRC) $(SPP_DIAG_TRACE_CORE_BOOTSTRAP_HOST_LIB) $(SPP_DIAG_TRACE_CORE_BOOTSTRAP_KUNIT_TEST) -o build/spp-diag-trace-core-bootstrap-kunit-selftest
+	./build/spp-diag-trace-core-bootstrap-kunit-selftest
+	rm -f build/spp-diag-trace-core-bootstrap-kunit-selftest
+
+test-spp-diag-trace-core-bootstrap-callgraph:
+	mkdir -p build
+	$(CC) $(CORE_CFLAGS) -O0 -DCONFIG_SECURITY_SPP_DIAG_TRACE_CORE_BOOTSTRAP=1 $(SPP_DIAG_TRACE_CORE_HOST_INC) -r $(SPP_DIAG_TRACE_CORE_BOOTSTRAP_SRC) -o build/spp-diag-trace-core-bootstrap-callgraph.o
+	$(CC) $(CORE_CFLAGS) -O0 $(SPP_DIAG_TRACE_CORE_HOST_INC) -c $(SPP_DIAG_TRACE_CORE_SRC) -o build/spp-diag-trace-core-callgraph.o
+	$(CC) $(CORE_CFLAGS) -O0 -c -DHIDE_VMALLOC $(SPP_DIAG_TRACE_CORE_CALLGRAPH_NEG) -o build/spp-diag-trace-core-callgraph-neg-vmalloc.o
+	$(CC) $(CORE_CFLAGS) -O0 -c -DHIDE_SLEEP $(SPP_DIAG_TRACE_CORE_CALLGRAPH_NEG) -o build/spp-diag-trace-core-callgraph-neg-sleep.o
+	$(CC) $(CORE_CFLAGS) -O0 -c -DHIDE_MUTEX $(SPP_DIAG_TRACE_CORE_CALLGRAPH_NEG) -o build/spp-diag-trace-core-callgraph-neg-mutex.o
+	$(CC) $(CORE_CFLAGS) -O0 -c -DHIDE_ALT_LOCK $(SPP_DIAG_TRACE_CORE_CALLGRAPH_NEG) -o build/spp-diag-trace-core-callgraph-neg-alt-lock.o
+	$(PYTHON) $(SPP_DIAG_TRACE_CORE_CALLGRAPH) build/spp-diag-trace-core-callgraph.o build/spp-diag-trace-core-callgraph-neg-vmalloc.o build/spp-diag-trace-core-callgraph-neg-sleep.o build/spp-diag-trace-core-callgraph-neg-mutex.o build/spp-diag-trace-core-callgraph-neg-alt-lock.o build/spp-diag-trace-core-bootstrap-callgraph.o
+	rm -f build/spp-diag-trace-core-bootstrap-callgraph.o build/spp-diag-trace-core-callgraph.o build/spp-diag-trace-core-callgraph-neg-vmalloc.o build/spp-diag-trace-core-callgraph-neg-sleep.o build/spp-diag-trace-core-callgraph-neg-mutex.o build/spp-diag-trace-core-callgraph-neg-alt-lock.o
+
 test-spp-diag-trace-core-callgraph:
 	mkdir -p build
 	$(CC) $(CORE_CFLAGS) -O0 $(SPP_DIAG_TRACE_CORE_HOST_INC) -c $(SPP_DIAG_TRACE_CORE_SRC) -o build/spp-diag-trace-core-callgraph.o
@@ -296,7 +333,7 @@ test-spp-diag-trace-core-callgraph:
 	$(PYTHON) $(SPP_DIAG_TRACE_CORE_CALLGRAPH) build/spp-diag-trace-core-callgraph.o build/spp-diag-trace-core-callgraph-neg-vmalloc.o build/spp-diag-trace-core-callgraph-neg-sleep.o build/spp-diag-trace-core-callgraph-neg-mutex.o build/spp-diag-trace-core-callgraph-neg-alt-lock.o
 	rm -f build/spp-diag-trace-core-callgraph.o build/spp-diag-trace-core-callgraph-neg-vmalloc.o build/spp-diag-trace-core-callgraph-neg-sleep.o build/spp-diag-trace-core-callgraph-neg-mutex.o build/spp-diag-trace-core-callgraph-neg-alt-lock.o
 
-ci: check test test-spp-diag-trace test-spp-diag-trace-oracle test-spp-diag-trace-chain test-spp-diag-trace-checkpoints test-spp-diag-trace-semantics test-spp-diag-ima-replay test-spp-diag-attest test-spp-diag-trace-sanitized test-spp-diag-trace-core test-spp-diag-trace-core-oracle test-spp-diag-trace-core-race test-spp-diag-trace-core-materialize test-spp-diag-trace-core-handoff test-spp-diag-trace-core-source-walk test-spp-diag-trace-core-sanitized test-spp-diag-trace-core-context test-spp-diag-trace-core-callgraph
+ci: check test test-spp-diag-trace test-spp-diag-trace-oracle test-spp-diag-trace-chain test-spp-diag-trace-checkpoints test-spp-diag-trace-semantics test-spp-diag-ima-replay test-spp-diag-attest test-spp-diag-trace-sanitized test-spp-diag-trace-core test-spp-diag-trace-core-oracle test-spp-diag-trace-core-race test-spp-diag-trace-core-materialize test-spp-diag-trace-core-handoff test-spp-diag-trace-core-source-walk test-spp-diag-trace-core-sanitized test-spp-diag-trace-core-context test-spp-diag-trace-core-callgraph test-spp-diag-trace-core-bootstrap test-spp-diag-trace-core-bootstrap-sanitized test-spp-diag-trace-core-bootstrap-source-walk test-spp-diag-trace-core-bootstrap-kunit test-spp-diag-trace-core-bootstrap-callgraph
 	rm -rf build
 
 ratls-contract:

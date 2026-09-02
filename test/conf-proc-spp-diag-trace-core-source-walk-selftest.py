@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import re
+import json
 from pathlib import Path
 
 
@@ -22,11 +23,13 @@ CORE_SYMBOLS = (
 INITCALLS = ("security_init", "device_initcall", "late_initcall", "module_init")
 ALLOW_PREFIXES = (
     "spp-diag-trace-core-src/security/spp_diag_trace_core/",
+    "spp-diag-trace-core-src/include/",
     "test/conf-proc-spp-diag-trace-core-",
     "test/spp-diag-trace-core-shim/",
     "conf_proc_spp_diag_trace_core_",
     "spp-diag-trace-core-src/manifest.json",
     "spp-diag-trace-core-src/config.fragment",
+    "spp-diag-trace-core-src/config.bootstrap.fragment",
     "Makefile",
 )
 
@@ -49,6 +52,7 @@ NONSOURCE_PATHS = {
     "Makefile",
     "spp-diag-trace-core-src/manifest.json",
     "spp-diag-trace-core-src/config.fragment",
+    "spp-diag-trace-core-src/config.bootstrap.fragment",
 }
 SPDX_RE = re.compile(r"SPDX-License-Identifier:\s*(\S+)")
 
@@ -58,6 +62,13 @@ KUNIT_CASE_NAMES = (
     "init_process_context",
     "append_and_query_irqs_disabled",
     "mark_failure_irqs_disabled",
+)
+KUNIT_BOOTSTRAP_FILE = "spp-diag-trace-core-src/security/spp_diag_trace_core/bootstrap_kunit.c"
+KUNIT_BOOTSTRAP_SUITE_REGISTRATION = "kunit_test_suite(spp_diag_trace_core_bootstrap_suite)"
+KUNIT_BOOTSTRAP_CASE_NAMES = (
+	"parser_rejects_invalid_identity",
+	"gate_denies_before_release",
+	"ima_record_matches_state",
 )
 
 MAKE_VAR_RE = re.compile(r"^([A-Za-z0-9_]+)\s*:=\s*(.*)$")
@@ -221,6 +232,53 @@ def kunit_case_check(root: Path = ROOT) -> tuple[int, list[str]]:
     return kunit_case_check_text(text)
 
 
+def bootstrap_kunit_case_check_text(text: str) -> tuple[int, list[str]]:
+    violations: list[str] = []
+    if KUNIT_BOOTSTRAP_SUITE_REGISTRATION not in text:
+        violations.append(f"missing {KUNIT_BOOTSTRAP_SUITE_REGISTRATION!r}")
+    if "KUNIT_EXPECT_TRUE(test, true);" in text:
+        violations.append("bootstrap KUnit case has an inert true expectation")
+    found = [name for name in KUNIT_BOOTSTRAP_CASE_NAMES if f"KUNIT_CASE({name})" in text]
+    missing = [name for name in KUNIT_BOOTSTRAP_CASE_NAMES if name not in found]
+    if missing:
+        violations.append(f"missing bootstrap KUNIT_CASE entries: {missing}")
+    return len(found), violations
+
+
+def bootstrap_wiring_check(root: Path = ROOT) -> list[str]:
+    manifest = json.loads((root / "spp-diag-trace-core-src/manifest.json").read_text(encoding="utf-8"))
+    anchors = [item for item in manifest["targets"] if item["kind"] == "REPLACE" and item["placement"] == "anchor-insert"]
+    expected = (
+        ("security/security.c", "#include <linux/spp_diag_trace_bootstrap.h>\n"),
+        ("security/security.c", "spp_diag_trace_bootstrap_init();"),
+        ("security/security.c", "spp_diag_trace_bootstrap_bprm_check(bprm);"),
+        ("security/integrity/ima/ima_init.c", "#include <linux/spp_diag_trace_bootstrap.h>\n"),
+        ("security/integrity/ima/ima_init.c", "spp_diag_trace_bootstrap_ima_ready();"),
+        ("init/main.c", "#include <linux/spp_diag_trace_bootstrap.h>\n"),
+        ("init/main.c", "spp_diag_trace_bootstrap_release();"),
+    )
+    found = tuple((item["destination"], item["insertion"]) for item in anchors)
+    violations = []
+    if len(found) != len(expected) or any(
+        destination != expected_destination or needle not in insertion
+        for (destination, insertion), (expected_destination, needle) in zip(found, expected)
+    ):
+        violations.append(f"bootstrap anchors {found!r}")
+    disabled = (root / "spp-diag-trace-core-src/config.fragment").read_text(encoding="utf-8")
+    if "BOOTSTRAP" in disabled:
+        violations.append("K1-on/K2-off fragment enables bootstrap")
+    for path in (
+        root / "spp-diag-trace-core-src/security/spp_diag_trace_core/bootstrap.c",
+        root / "spp-diag-trace-core-src/security/spp_diag_trace_core/gate.c",
+        root / "spp-diag-trace-core-src/security/spp_diag_trace_core/release.c",
+    ):
+        text = path.read_text(encoding="utf-8")
+        for forbidden in ("kprobe", "tracepoint", "BPF", "late_initcall", "module_init"):
+            if forbidden in text:
+                violations.append(f"{path.name}: forbidden {forbidden}")
+    return violations
+
+
 def main() -> int:
     # --- AC9: dormancy walk (unchanged behavior) ---
     scanned, hits = walk()
@@ -362,6 +420,25 @@ def main() -> int:
         print("FAIL kunit-case-check did not flag a removed suite registration")
         return 1
     print("ok   kunit-case-check-detects-suite-removal")
+
+    bootstrap_text = (ROOT / KUNIT_BOOTSTRAP_FILE).read_text(encoding="utf-8")
+    bootstrap_count, bootstrap_violations = bootstrap_kunit_case_check_text(bootstrap_text)
+    if bootstrap_violations or bootstrap_count == 0:
+        print(f"FAIL bootstrap-kunit-case-check {bootstrap_violations}")
+        return 1
+    mutated_bootstrap = bootstrap_text.replace(
+        f"KUNIT_CASE({KUNIT_BOOTSTRAP_CASE_NAMES[0]}),", "", 1
+    )
+    if not bootstrap_kunit_case_check_text(mutated_bootstrap)[1]:
+        print("FAIL bootstrap-kunit-case-check did not flag a removed case")
+        return 1
+    print(f"ok   bootstrap-kunit-case-check-clean cases={bootstrap_count}")
+
+    wiring_violations = bootstrap_wiring_check()
+    if wiring_violations:
+        print(f"FAIL bootstrap-wiring-check {wiring_violations}")
+        return 1
+    print("ok   bootstrap-wiring-check")
 
     return 0
 

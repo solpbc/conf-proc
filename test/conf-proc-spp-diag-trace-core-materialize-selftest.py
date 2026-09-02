@@ -64,13 +64,17 @@ def _write_fixture_manifest(repo: str, scratch: str) -> str:
     )
     raw = dict(parsed.raw)
     targets = []
+    images: dict[str, bytes] = {}
     for target in parsed.raw["targets"]:
         updated = dict(target)
         if target["kind"] == "REPLACE":
             path = Path(repo) / target["destination"]
-            preimage = path.read_bytes()
+            preimage = images.get(target["destination"], path.read_bytes())
             mode = stat.S_IMODE(path.stat().st_mode)
-            postimage = materialize._replace_postimage(preimage, target["anchor_line"])
+            anchor = target.get("anchor_line", target.get("anchor"))
+            postimage = materialize._replace_postimage(
+                preimage, anchor, target["placement"], target.get("insertion", "")
+            )
             updated.update(
                 {
                     "preimage_mode": mode,
@@ -79,6 +83,7 @@ def _write_fixture_manifest(repo: str, scratch: str) -> str:
                     "postimage_sha256": hashlib.sha256(postimage).hexdigest(),
                 }
             )
+            images[target["destination"]] = postimage
         targets.append(updated)
     raw["targets"] = targets
     path = os.path.join(scratch, "fixture-manifest.json")
@@ -106,14 +111,37 @@ def _tree_fingerprint(root: str) -> dict[str, str]:
 
 def _make_fixture(scratch: str) -> tuple[str, str, str]:
     repo = os.path.join(scratch, "repo")
-    os.makedirs(os.path.join(repo, "security"))
+    os.makedirs(os.path.join(repo, "security", "integrity", "ima"))
+    os.makedirs(os.path.join(repo, "init"))
     Path(os.path.join(repo, "security", "Kconfig")).write_text(
         'menu "Security options"\nendmenu\n', encoding="utf-8"
     )
     Path(os.path.join(repo, "security", "Makefile")).write_text("obj-y += dummy/\n", encoding="utf-8")
+    Path(os.path.join(repo, "security", "security.c")).write_text(
+        "#include <net/flow.h>\n#include <net/sock.h>\n\n"
+        "/* How many LSMs were built into the kernel? */\n\n"
+        "int security_init(void)\n{\n\t/* Load LSMs in specified order. */\n"
+        "\tordered_lsm_init();\n\n\treturn 0;\n}\n\n"
+        "int security_bprm_check(struct linux_binprm *bprm)\n{\n\tint ret;\n\n"
+        "\tret = call_int_hook(bprm_check_security, 0, bprm);\n\tif (ret)\n"
+        "\t\treturn ret;\n\treturn ima_bprm_check(bprm);\n}\n",
+        encoding="utf-8",
+    )
+    Path(os.path.join(repo, "security", "integrity", "ima", "ima_init.c")).write_text(
+        "#include <linux/ima.h>\n#include <generated/utsrelease.h>\n\n#include \"ima.h\"\n\n"
+        "int ima_init(void)\n{\n\tima_measure_critical_data(\"kernel_info\", \"kernel_version\",\n"
+        "\t\t\t\t  UTS_RELEASE, strlen(UTS_RELEASE), false,\n\t\t\t\t  NULL, 0);\n\n"
+        "\treturn rc;\n}\n",
+        encoding="utf-8",
+    )
+    Path(os.path.join(repo, "init", "main.c")).write_text(
+        "#include <kunit/test.h>\n\nstatic int kernel_init(void *);\n\n"
+        "void kernel_init_freeable(void)\n{\n\tintegrity_load_keys();\n}\n",
+        encoding="utf-8",
+    )
     Path(os.path.join(repo, "README")).write_text("fixture\n", encoding="utf-8")
     _git(repo, "init")
-    _git(repo, "add", "security/Kconfig", "security/Makefile", "README")
+    _git(repo, "add", "security", "init", "README")
     _git(repo, "commit", "-m", "base")
     first = _git(repo, "rev-parse", "--verify", "HEAD").strip()
     Path(os.path.join(repo, "README")).write_text("fixture-second\n", encoding="utf-8")
@@ -536,7 +564,10 @@ def test_happy_path_and_determinism(scratch: str) -> None:
     fixture_manifest = parse_core_manifest(
         Path(FIXTURE_MANIFESTS[os.path.realpath(repo_a)]).read_bytes()
     )
-    for replace in fixture_manifest.replaces:
+    final_replaces = {
+        replace.destination: replace for replace in fixture_manifest.replaces
+    }
+    for replace in final_replaces.values():
         staged = Path(repo_a) / replace.destination
         digest = hashlib.sha256(staged.read_bytes()).hexdigest()
         mode = stat.S_IMODE(staged.stat().st_mode)

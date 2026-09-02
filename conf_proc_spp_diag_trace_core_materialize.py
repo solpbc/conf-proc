@@ -48,7 +48,7 @@ from conf_proc_spp_diag_trace_core_materialize_reasons import (
 
 REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_MANIFEST = REPO_ROOT / "spp-diag-trace-core-src" / "manifest.json"
-CORE_SOURCE_DIR = "spp-diag-trace-core-src/security/spp_diag_trace_core"
+SOURCE_TREE_DIR = "spp-diag-trace-core-src"
 TEMP_SUFFIX = ".spp-diag-trace-core-tmp"
 
 _TEST_EXPECTED_BASE_COMMIT_OVERRIDE: str | None = None
@@ -363,12 +363,14 @@ def _preflight_inputs(manifest: CoreManifest) -> None:
                 expected=item.sha256,
                 observed=actual,
             )
-    source_dir = _resolve_repo_path(CORE_SOURCE_DIR)
+    source_dir = _resolve_repo_path(SOURCE_TREE_DIR)
     if source_dir.is_dir():
         for dirpath, _dirnames, filenames in os.walk(source_dir):
             for name in filenames:
                 full = Path(dirpath) / name
                 relative = str(full.relative_to(REPO_ROOT))
+                if relative == "spp-diag-trace-core-src/manifest.json":
+                    continue
                 if relative not in manifested:
                     _fail(
                         CP_SPP_DIAG_TRACE_CORE_INPUT_UNMANIFESTED,
@@ -377,15 +379,33 @@ def _preflight_inputs(manifest: CoreManifest) -> None:
                     )
 
 
-def _replace_postimage(existing: bytes, anchor_line: str) -> bytes:
-    body = existing
-    if body and not body.endswith(b"\n"):
-        body += b"\n"
-    return body + anchor_line.encode("utf-8") + b"\n"
+def _replace_postimage(
+    existing: bytes,
+    anchor_line: str,
+    placement: str = "eof-append",
+    insertion: str = "",
+) -> bytes:
+    anchor = anchor_line.encode("utf-8")
+    if placement == "eof-append":
+        body = existing
+        if body and not body.endswith(b"\n"):
+            body += b"\n"
+        return body + anchor + b"\n"
+    if placement == "anchor-insert":
+        if existing.count(anchor) != 1:
+            _fail(
+                CP_SPP_DIAG_TRACE_CORE_PARTIAL_APPLY,
+                "anchor-insert anchor does not occur exactly once",
+                expected="one exact anchor occurrence",
+                observed=str(existing.count(anchor)),
+            )
+        offset = existing.index(anchor) + len(anchor)
+        return existing[:offset] + insertion.encode("utf-8") + existing[offset:]
+    _fail(CP_SPP_DIAG_TRACE_CORE_SCHEMA, "unsupported REPLACE placement")
 
 
 def _validated_replace_images(
-    dest: str, replace: ReplaceTarget
+    dest: str, replaces: tuple[ReplaceTarget, ...]
 ) -> tuple[bytes, int, bytes]:
     _refuse_symlink(dest)
     info = _lstat(dest)
@@ -393,50 +413,39 @@ def _validated_replace_images(
         _fail(
             CP_SPP_DIAG_TRACE_CORE_REPLACE_MISSING,
             "REPLACE destination is missing",
-            path=replace.destination,
+            path=replaces[0].destination,
         )
     existing = Path(dest).read_bytes()
-    anchor = replace.anchor_line.encode("utf-8")
-    if anchor in existing.splitlines() or anchor in existing:
-        _fail(
-            CP_SPP_DIAG_TRACE_CORE_PARTIAL_APPLY,
-            "REPLACE anchor line is already present",
-            path=replace.destination,
-            expected=f"absent {replace.anchor_line!r}",
-            observed="anchor line already in file",
-        )
+    original = existing
     mode = stat.S_IMODE(info.st_mode)
-    if mode != replace.preimage_mode:
-        _fail(
-            CP_SPP_DIAG_TRACE_CORE_REPLACE_CHANGED,
-            "REPLACE destination mode differs from the base preimage",
-            path=replace.destination,
-            expected=oct(replace.preimage_mode),
-            observed=oct(mode),
-        )
-    digest = _sha256_bytes(existing)
-    if digest != replace.preimage_sha256:
-        _fail(
-            CP_SPP_DIAG_TRACE_CORE_REPLACE_CHANGED,
-            "REPLACE destination digest differs from the base preimage",
-            path=replace.destination,
-            expected=replace.preimage_sha256,
-            observed=digest,
-        )
-    postimage = _replace_postimage(existing, replace.anchor_line)
-    postimage_digest = _sha256_bytes(postimage)
-    if (
-        replace.postimage_mode != replace.preimage_mode
-        or postimage_digest != replace.postimage_sha256
-    ):
-        _fail(
-            CP_SPP_DIAG_TRACE_CORE_SCHEMA,
-            "REPLACE postimage does not match its declared mode and digest",
-            path=replace.destination,
-            expected=f"mode={oct(replace.postimage_mode)} sha256={replace.postimage_sha256}",
-            observed=f"mode={oct(replace.preimage_mode)} sha256={postimage_digest}",
-        )
-    return existing, mode, postimage
+    for replace in replaces:
+        if mode != replace.preimage_mode:
+            _fail(CP_SPP_DIAG_TRACE_CORE_REPLACE_CHANGED,
+                  "REPLACE destination mode differs from its preimage",
+                  path=replace.destination, expected=oct(replace.preimage_mode),
+                  observed=oct(mode))
+        if replace.placement == "eof-append" and replace.anchor_line.encode("utf-8") in existing:
+            _fail(CP_SPP_DIAG_TRACE_CORE_PARTIAL_APPLY,
+                  "eof-append anchor line is already present",
+                  path=replace.destination, expected=f"absent {replace.anchor_line!r}",
+                  observed="anchor line already in file")
+        digest = _sha256_bytes(existing)
+        if digest != replace.preimage_sha256:
+            _fail(CP_SPP_DIAG_TRACE_CORE_REPLACE_CHANGED,
+                  "REPLACE destination digest differs from its preimage",
+                  path=replace.destination, expected=replace.preimage_sha256,
+                  observed=digest)
+        postimage = _replace_postimage(existing, replace.anchor_line,
+                                       replace.placement, replace.insertion)
+        postimage_digest = _sha256_bytes(postimage)
+        if replace.postimage_mode != mode or postimage_digest != replace.postimage_sha256:
+            _fail(CP_SPP_DIAG_TRACE_CORE_SCHEMA,
+                  "REPLACE postimage does not match its declared mode and digest",
+                  path=replace.destination,
+                  expected=f"mode={oct(replace.postimage_mode)} sha256={replace.postimage_sha256}",
+                  observed=f"mode={oct(mode)} sha256={postimage_digest}")
+        existing = postimage
+    return original, mode, existing
 
 
 def _preflight_destinations(worktree: str, manifest: CoreManifest) -> None:
@@ -450,9 +459,12 @@ def _preflight_destinations(worktree: str, manifest: CoreManifest) -> None:
                 "CREATE destination already exists",
                 path=create.destination,
             )
+    grouped: dict[str, list[ReplaceTarget]] = {}
     for replace in manifest.replaces:
-        dest = _inside_worktree(worktree, replace.destination)
-        _validated_replace_images(dest, replace)
+        grouped.setdefault(replace.destination, []).append(replace)
+    for destination, replaces in grouped.items():
+        dest = _inside_worktree(worktree, destination)
+        _validated_replace_images(dest, tuple(replaces))
 
 
 def _apply(worktree: str, manifest: CoreManifest) -> None:
@@ -477,17 +489,20 @@ def _apply(worktree: str, manifest: CoreManifest) -> None:
                     observed=digest,
                 )
             planned.append((dest, data, create.mode))
+        grouped: dict[str, list[ReplaceTarget]] = {}
         for replace in manifest.replaces:
-            dest = _inside_worktree(worktree, replace.destination)
+            grouped.setdefault(replace.destination, []).append(replace)
+        for destination, replaces in grouped.items():
+            dest = _inside_worktree(worktree, destination)
             existing, original_mode, postimage = _validated_replace_images(
-                dest, replace
+                dest, tuple(replaces)
             )
             replace_originals[dest] = (existing, original_mode)
             planned.append(
                 (
                     dest,
                     postimage,
-                    replace.postimage_mode,
+                    replaces[-1].postimage_mode,
                 )
             )
         create_dests = {
@@ -497,8 +512,13 @@ def _apply(worktree: str, manifest: CoreManifest) -> None:
         for dest, data, mode in planned:
             parent = os.path.dirname(dest)
             if not os.path.isdir(parent):
+                current = parent
+                missing_dirs: list[str] = []
+                while not os.path.isdir(current):
+                    missing_dirs.append(current)
+                    current = os.path.dirname(current)
                 os.makedirs(parent, exist_ok=True)
-                created_dirs.append(parent)
+                created_dirs.extend(reversed(missing_dirs))
             temp = dest + TEMP_SUFFIX
             with open(temp, "wb") as handle:
                 handle.write(data)
@@ -583,6 +603,8 @@ def _derivation_record(manifest: CoreManifest, base_commit: str) -> dict:
             {
                 "destination": item.destination,
                 "anchor_line": item.anchor_line,
+                "placement": item.placement,
+                "insertion": item.insertion,
                 "preimage_mode": item.preimage_mode,
                 "preimage_sha256": item.preimage_sha256,
                 "postimage_mode": item.postimage_mode,
@@ -590,10 +612,10 @@ def _derivation_record(manifest: CoreManifest, base_commit: str) -> dict:
             }
             for item in manifest.replaces
         ],
-        "diagnostic_config_fragment": {
-            "path": manifest.diagnostic_config_fragment.path,
-            "sha256": manifest.diagnostic_config_fragment.sha256,
-        },
+        "diagnostic_config_fragments": [
+            {"leg": item.leg, "path": item.path, "sha256": item.sha256}
+            for item in manifest.diagnostic_config_fragments
+        ],
     }
 
 

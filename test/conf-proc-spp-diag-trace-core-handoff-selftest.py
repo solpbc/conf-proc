@@ -23,7 +23,10 @@ import conf_proc_spp_diag_trace_core_handoff as handoff  # noqa: E402
 import conf_proc_spp_diag_trace_core_materialize as materialize  # noqa: E402
 from conf_proc_guard import HermeticGuard  # noqa: E402
 from conf_proc_json import canonical_loads  # noqa: E402
-from conf_proc_spp_diag_trace_core_manifest import CORE_API_SYMBOLS  # noqa: E402
+from conf_proc_spp_diag_trace_core_manifest import (  # noqa: E402
+    BOOTSTRAP_API_SYMBOLS,
+    CORE_API_SYMBOLS,
+)
 from conf_proc_spp_diag_trace_core_materialize_reasons import (  # noqa: E402
     CP_SPP_DIAG_TRACE_CORE_FORBIDDEN_COMMAND,
     CP_SPP_DIAG_TRACE_CORE_HANDOFF,
@@ -145,10 +148,16 @@ def _nm_shim(
     enabled_symbols = ":\n" if omit_enabled else "".join(
         f"printf '0000000000000001 T {symbol}\\n'\n" for symbol in CORE_API_SYMBOLS
     )
+    enabled_bootstrap = "".join(
+        f"printf '0000000000000001 T {symbol}\\n'\n" for symbol in BOOTSTRAP_API_SYMBOLS
+    )
+    disabled_core = "".join(
+        f"printf '0000000000000001 T {symbol}\\n'\n" for symbol in CORE_API_SYMBOLS
+    )
     disabled_symbol = (
-        "printf '0000000000000001 T spp_diag_trace_core_init\\n'\n"
+        "printf '0000000000000001 T spp_diag_trace_bootstrap_init\\n'\n"
         if leak_disabled
-        else ":\n"
+        else ""
     )
     _write_exec(
         path,
@@ -158,7 +167,9 @@ def _nm_shim(
         "printf '0000000000000001 T start_kernel\\n'\n"
         f'if [ "$3" = "{enabled_output}/vmlinux" ]; then\n'
         f"{enabled_symbols}"
+        f"{enabled_bootstrap}"
         f'elif [ "$3" = "{disabled_output}/vmlinux" ]; then\n'
+        f"{disabled_core}"
         f"{disabled_symbol}"
         "else\n"
         "  exit 2\n"
@@ -219,7 +230,7 @@ def test_happy_path(scratch: str) -> None:
     annotations = os.path.join(scratch, "annotations")
     make = os.path.join(scratch, "make")
     nm = os.path.join(scratch, "nm")
-    _annotations_shim(annotations, ann_log, "CONFIG_FOO=y\n")
+    _annotations_shim(annotations, ann_log, "CONFIG_FOO=y\nCONFIG_IMA=y\n")
     _make_shim(make, make_log)
     _nm_shim(nm, nm_log, output, disabled_output)
     for name in ("fetch", "checkout", "reset", "clean", "sign", "package", "boot", "device"):
@@ -256,7 +267,11 @@ def test_happy_path(scratch: str) -> None:
     record = canonical_loads(result.stdout.rstrip(b"\n"))
     if record["enabled"]["core_api_symbols"] != list(CORE_API_SYMBOLS):
         raise AssertionError(record["enabled"])
-    if record["disabled"]["core_api_symbols"] != []:
+    if record["disabled"]["core_api_symbols"] != list(CORE_API_SYMBOLS):
+        raise AssertionError(record["disabled"])
+    if record["enabled"]["bootstrap_api_symbols"] != list(BOOTSTRAP_API_SYMBOLS):
+        raise AssertionError(record["enabled"])
+    if record["disabled"]["bootstrap_api_symbols"] != []:
         raise AssertionError(record["disabled"])
     ann_lines = [line for line in Path(ann_log).read_text(encoding="utf-8").splitlines() if line]
     make_lines = [line for line in Path(make_log).read_text(encoding="utf-8").splitlines() if line]
@@ -310,7 +325,7 @@ def test_happy_path(scratch: str) -> None:
         raise AssertionError(f"nm argv {nm_lines}")
     config = Path(output, ".config").read_text(encoding="utf-8")
     y_lines = handoff._y_symbols(config)
-    for symbol in handoff.FRAGMENT_SYMBOLS:
+    for symbol in handoff.FRAGMENT_SYMBOLS["enabled"]:
         if symbol not in y_lines:
             raise AssertionError(f"missing {symbol} in {y_lines}")
     if Path(trap_log).read_text(encoding="utf-8").strip():
@@ -409,6 +424,20 @@ def test_fragment_capture_mismatch(scratch: str) -> None:
             raise
     else:
         raise AssertionError("changed fragment bytes were accepted for the declared digest")
+
+
+def test_static_usermodehelper_rejected(_scratch: str) -> None:
+    for leg in ("enabled", "disabled"):
+        y_lines = list(handoff.FRAGMENT_SYMBOLS[leg]) + [
+            "CONFIG_IMA", "CONFIG_STATIC_USERMODEHELPER"
+        ]
+        try:
+            handoff._validate_config_y(leg, y_lines, "/fixture/.config")
+        except SppDiagTraceCoreMaterializeError as exc:
+            if exc.reason_code != CP_SPP_DIAG_TRACE_CORE_HANDOFF:
+                raise
+        else:
+            raise AssertionError(f"{leg} accepted STATIC_USERMODEHELPER")
 
 
 def test_annotations_nonzero(scratch: str) -> None:
@@ -516,7 +545,7 @@ def test_missing_fragment_symbols(scratch: str) -> None:
     annotations = os.path.join(scratch, "annotations")
     make = os.path.join(scratch, "make")
     nm = os.path.join(scratch, "nm")
-    _annotations_shim(annotations, os.path.join(scratch, "ann.log"), "CONFIG_FOO=y\n")
+    _annotations_shim(annotations, os.path.join(scratch, "ann.log"), "CONFIG_FOO=y\nCONFIG_IMA=y\n")
     _make_shim(make, os.path.join(scratch, "make.log"), strip_fragment=True)
     _nm_shim(nm, os.path.join(scratch, "nm.log"), output, disabled_output)
     materialize._TEST_EXPECTED_BASE_COMMIT_OVERRIDE = first
@@ -563,7 +592,7 @@ def _test_artifact_symbol_failure(
     annotations = os.path.join(scratch, "annotations")
     make = os.path.join(scratch, "make")
     nm = os.path.join(scratch, "nm")
-    _annotations_shim(annotations, os.path.join(scratch, "ann.log"), "CONFIG_FOO=y\n")
+    _annotations_shim(annotations, os.path.join(scratch, "ann.log"), "CONFIG_FOO=y\nCONFIG_IMA=y\n")
     _make_shim(make, os.path.join(scratch, "make.log"))
     _nm_shim(
         nm,
@@ -637,7 +666,8 @@ def main() -> int:
         _fail("forbidden-argv-chokepoint", exc)
     for name, fn in (
         ("output-directory-alias", test_output_directory_alias),
-        ("fragment-capture-mismatch", test_fragment_capture_mismatch),
+    ("fragment-capture-mismatch", test_fragment_capture_mismatch),
+    ("static-usermodehelper-rejected", test_static_usermodehelper_rejected),
     ):
         scratch = tempfile.mkdtemp(prefix=f"k1-handoff-{name}-", dir="/var/tmp")
         try:

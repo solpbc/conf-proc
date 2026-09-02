@@ -4,4 +4,8 @@
 
 #include <errno.h>
 
+#ifndef EACCES
+#define EACCES 13
+#endif
+
 #endif

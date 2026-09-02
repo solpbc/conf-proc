@@ -7,3 +7,11 @@ config SECURITY_SPP_DIAG_TRACE_CORE
 	help
 	  Dormant in-memory SPP diagnostic trace core. Does not register
 	  LSM hooks or IMA measurements until a later activation patch.
+
+config SECURITY_SPP_DIAG_TRACE_CORE_BOOTSTRAP
+	bool "SPP diagnostic trace core bootstrap"
+	depends on SECURITY_SPP_DIAG_TRACE_CORE && IMA && CRYPTO_LIB_SHA256 && !STATIC_USERMODEHELPER
+	default n
+	help
+	  Bootstrap the SPP diagnostic trace core at kernel initialization and
+	  gate pre-release userspace execution until the diagnostic release.

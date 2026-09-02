@@ -17,6 +17,12 @@ ENTRIES = (
     "spp_diag_trace_core_append",
     "spp_diag_trace_core_mark_failure",
 )
+BOOTSTRAP_ENTRIES = (
+    "spp_diag_trace_bootstrap_init",
+    "spp_diag_trace_bootstrap_bprm_check",
+    "spp_diag_trace_bootstrap_ima_ready",
+    "spp_diag_trace_bootstrap_release",
+)
 ALLOWED_LOCK = "spp_diag_trace_core_shim_lock"
 LOCK_LEAVES = {
     "spp_diag_trace_core_shim_lock",
@@ -148,10 +154,10 @@ def main() -> int:
     if os.environ.get("SPP_DIAG_TRACE_CORE_FORCE_FAIL") == "1":
         print("FAIL callgraph forced")
         return 1
-    if len(sys.argv) != 6:
+    if len(sys.argv) not in (6, 7):
         raise SystemExit(
             "usage: conf-proc-spp-diag-trace-core-callgraph-selftest.py "
-            "CORE.O NEG_VMALLOC.O NEG_SLEEP.O NEG_MUTEX.O NEG_ALT_LOCK.O"
+            "CORE.O NEG_VMALLOC.O NEG_SLEEP.O NEG_MUTEX.O NEG_ALT_LOCK.O [BOOTSTRAP.O]"
         )
     core_obj = Path(sys.argv[1])
     neg_objs = [
@@ -191,6 +197,19 @@ def main() -> int:
             )
             return 1
         print(f"ok   callgraph-negative {path.name} caught={expected} hits={hits}")
+    if len(sys.argv) == 7:
+        bootstrap_obj = Path(sys.argv[6])
+        bootstrap_graph = parse_calls(bootstrap_obj)
+        missing = [name for name in BOOTSTRAP_ENTRIES if name not in bootstrap_graph]
+        if missing:
+            print(f"FAIL bootstrap callgraph missing entries {missing}")
+            return 1
+        reachable, callees = walk(bootstrap_graph, BOOTSTRAP_ENTRIES)
+        forbidden = sorted(name for name in FORBIDDEN if name in reachable or name in callees)
+        if forbidden:
+            print(f"FAIL bootstrap callgraph forbidden {forbidden}")
+            return 1
+        print(f"ok   bootstrap-callgraph entries={len(BOOTSTRAP_ENTRIES)}")
     return 0
 
 

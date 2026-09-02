@@ -14,7 +14,11 @@ from pathlib import Path
 from conf_proc_guard import HermeticGuard, ToolDeclaration, hermetic_lockdown
 from conf_proc_json import canonical_dumps
 from conf_proc_reasons import ApplianceError
-from conf_proc_spp_diag_trace_core_manifest import CoreManifest, parse_core_manifest
+from conf_proc_spp_diag_trace_core_manifest import (
+    BOOTSTRAP_API_SYMBOLS,
+    CoreManifest,
+    parse_core_manifest,
+)
 from conf_proc_spp_diag_trace_core_materialize import (
     DEFAULT_MANIFEST,
     REPO_ROOT,
@@ -31,10 +35,14 @@ from conf_proc_spp_diag_trace_core_materialize_reasons import (
 )
 
 
-FRAGMENT_SYMBOLS = (
+K1_FRAGMENT_SYMBOLS = (
     "CONFIG_CRYPTO_LIB_SHA256",
     "CONFIG_SECURITY_SPP_DIAG_TRACE_CORE",
 )
+FRAGMENT_SYMBOLS = {
+    "enabled": K1_FRAGMENT_SYMBOLS + ("CONFIG_SECURITY_SPP_DIAG_TRACE_CORE_BOOTSTRAP",),
+    "disabled": K1_FRAGMENT_SYMBOLS,
+}
 EXPORT_NAME = ".config.export"
 CONFIG_NAME = ".config"
 TEMP_SUFFIX = ".spp-diag-trace-core-handoff-tmp"
@@ -211,6 +219,22 @@ def _y_symbols(text: str) -> list[str]:
     return sorted(key for key, value in assignments.items() if value == "y")
 
 
+def _validate_config_y(leg: str, y_lines: list[str], config_path: str) -> None:
+    missing = [name for name in FRAGMENT_SYMBOLS[leg] if name not in y_lines]
+    if missing:
+        _fail(
+            CP_SPP_DIAG_TRACE_CORE_HANDOFF,
+            f"fragment symbols missing from {leg} =y closure",
+            path=config_path,
+            expected=" ".join(FRAGMENT_SYMBOLS[leg]),
+            observed=" ".join(y_lines),
+        )
+    if "CONFIG_IMA" not in y_lines:
+        _fail(CP_SPP_DIAG_TRACE_CORE_HANDOFF, "IMA is absent from the annotations closure", path=config_path)
+    if "CONFIG_STATIC_USERMODEHELPER" in y_lines:
+        _fail(CP_SPP_DIAG_TRACE_CORE_HANDOFF, "STATIC_USERMODEHELPER is enabled", path=config_path)
+
+
 def _validate_output_dirs(worktree: str, output_dirs: tuple[str, str]) -> None:
     output_reals = tuple(os.path.realpath(path) for path in output_dirs)
     if output_reals[0] == output_reals[1]:
@@ -282,7 +306,7 @@ def _prepare_config(
     *,
     exported: bytes,
     fragment: bytes,
-    enabled: bool,
+    leg: str,
     annotations: str,
     make: str,
     nm: str,
@@ -295,10 +319,9 @@ def _prepare_config(
     config_path = os.path.join(output_dir, CONFIG_NAME)
     _atomic_write(export_path, exported)
     merged = exported
-    if enabled:
-        if merged and not merged.endswith(b"\n"):
-            merged += b"\n"
-        merged += fragment
+    if merged and not merged.endswith(b"\n"):
+        merged += b"\n"
+    merged += fragment
     if merged and not merged.endswith(b"\n"):
         merged += b"\n"
     _atomic_write(config_path, merged)
@@ -321,29 +344,14 @@ def _prepare_config(
         )
     config_text = Path(config_path).read_text(encoding="utf-8")
     y_lines = _y_symbols(config_text)
-    if enabled:
-        missing = [name for name in FRAGMENT_SYMBOLS if name not in y_lines]
-        if missing:
-            _fail(
-                CP_SPP_DIAG_TRACE_CORE_HANDOFF,
-                "fragment symbols missing from enabled =y closure",
-                path=config_path,
-                expected=" ".join(FRAGMENT_SYMBOLS),
-                observed=" ".join(y_lines),
-            )
-    elif "CONFIG_SECURITY_SPP_DIAG_TRACE_CORE" in y_lines:
-        _fail(
-            CP_SPP_DIAG_TRACE_CORE_HANDOFF,
-            "disabled configuration unexpectedly enables the core",
-            path=config_path,
-        )
+    _validate_config_y(leg, y_lines, config_path)
     return {"config_sha256": _sha256_file(config_path), "config_y": y_lines}
 
 
 def _build(
     guard: HermeticGuard,
     *,
-    enabled: bool,
+    bootstrap_enabled: bool,
     annotations: str,
     make: str,
     nm: str,
@@ -353,7 +361,7 @@ def _build(
     disabled_output_dir: str,
     core_api_symbols: tuple[str, ...],
 ) -> dict:
-    targets = (CORE_OBJECT_TARGET, VMLINUX_TARGET) if enabled else (VMLINUX_TARGET,)
+    targets = (CORE_OBJECT_TARGET, VMLINUX_TARGET) if bootstrap_enabled else (VMLINUX_TARGET,)
     for target in targets:
         built = _run_handoff_tool(
             guard,
@@ -405,26 +413,36 @@ def _build(
             expected="start_kernel",
         )
     present = tuple(symbol for symbol in core_api_symbols if symbol in symbols)
-    if enabled and present != core_api_symbols:
+    if present != core_api_symbols:
         _fail(
             CP_SPP_DIAG_TRACE_CORE_HANDOFF,
-            "enabled vmlinux is missing core API symbols",
+            "vmlinux is missing core API symbols",
             path=artifact,
             expected=" ".join(core_api_symbols),
             observed=" ".join(present),
         )
-    if not enabled and present:
+    bootstrap_present = tuple(symbol for symbol in BOOTSTRAP_API_SYMBOLS if symbol in symbols)
+    if bootstrap_enabled and bootstrap_present != BOOTSTRAP_API_SYMBOLS:
         _fail(
             CP_SPP_DIAG_TRACE_CORE_HANDOFF,
-            "disabled vmlinux contains core API symbols",
+            "enabled vmlinux is missing bootstrap API symbols",
             path=artifact,
-            expected="no core API symbols",
-            observed=" ".join(present),
+            expected=" ".join(BOOTSTRAP_API_SYMBOLS),
+            observed=" ".join(bootstrap_present),
+        )
+    if not bootstrap_enabled and bootstrap_present:
+        _fail(
+            CP_SPP_DIAG_TRACE_CORE_HANDOFF,
+            "K1-on/K2-off vmlinux contains bootstrap API symbols",
+            path=artifact,
+            expected="no bootstrap API symbols",
+            observed=" ".join(bootstrap_present),
         )
     return {
         "vmlinux_sha256": _sha256_file(artifact),
         "vmlinux_size": os.path.getsize(artifact),
         "core_api_symbols": list(present),
+        "bootstrap_api_symbols": list(bootstrap_present),
     }
 
 
@@ -437,7 +455,7 @@ def run_handoff_steps(
     worktree: str,
     enabled_output_dir: str,
     disabled_output_dir: str,
-    fragment: bytes,
+    fragments: dict[str, bytes],
     core_api_symbols: tuple[str, ...],
 ) -> dict:
     with hermetic_lockdown():
@@ -471,8 +489,8 @@ def run_handoff_steps(
         enabled = _prepare_config(
             guard,
             exported=exported.stdout,
-            fragment=fragment,
-            enabled=True,
+            fragment=fragments["enabled"],
+            leg="enabled",
             annotations=annotations,
             make=make,
             nm=nm,
@@ -484,8 +502,8 @@ def run_handoff_steps(
         disabled = _prepare_config(
             guard,
             exported=exported.stdout,
-            fragment=b"",
-            enabled=False,
+            fragment=fragments["disabled"],
+            leg="disabled",
             annotations=annotations,
             make=make,
             nm=nm,
@@ -529,7 +547,7 @@ def run_handoff_steps(
             enabled.update(
                 _build(
                     guard,
-                    enabled=True,
+                    bootstrap_enabled=True,
                     annotations=annotations,
                     make=make,
                     nm=nm,
@@ -543,7 +561,7 @@ def run_handoff_steps(
             disabled.update(
                 _build(
                     guard,
-                    enabled=False,
+                    bootstrap_enabled=False,
                     annotations=annotations,
                     make=make,
                     nm=nm,
@@ -607,12 +625,10 @@ def main(argv: list[str] | None = None) -> int:
             worktree=worktree,
             manifest=manifest,
         )
-        fragment_path = REPO_ROOT / manifest.diagnostic_config_fragment.path
-        fragment = _capture_fragment(
-            guard,
-            fragment_path,
-            manifest.diagnostic_config_fragment.sha256,
-        )
+        fragments = {
+            item.leg: _capture_fragment(guard, REPO_ROOT / item.path, item.sha256)
+            for item in manifest.diagnostic_config_fragments
+        }
         derivation = materialize_worktree(guard, git_abs, worktree, manifest)
         record = run_handoff_steps(
             guard,
@@ -622,7 +638,7 @@ def main(argv: list[str] | None = None) -> int:
             worktree=worktree,
             enabled_output_dir=output_dir,
             disabled_output_dir=disabled_output_dir,
-            fragment=fragment,
+            fragments=fragments,
             core_api_symbols=manifest.core_api_symbols,
         )
         record["derivation"] = derivation
