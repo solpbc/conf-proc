@@ -292,8 +292,9 @@ test-spp-diag-trace-core-callgraph:
 	$(CC) $(CORE_CFLAGS) -O0 -c -DHIDE_VMALLOC $(SPP_DIAG_TRACE_CORE_CALLGRAPH_NEG) -o build/spp-diag-trace-core-callgraph-neg-vmalloc.o
 	$(CC) $(CORE_CFLAGS) -O0 -c -DHIDE_SLEEP $(SPP_DIAG_TRACE_CORE_CALLGRAPH_NEG) -o build/spp-diag-trace-core-callgraph-neg-sleep.o
 	$(CC) $(CORE_CFLAGS) -O0 -c -DHIDE_MUTEX $(SPP_DIAG_TRACE_CORE_CALLGRAPH_NEG) -o build/spp-diag-trace-core-callgraph-neg-mutex.o
-	$(PYTHON) $(SPP_DIAG_TRACE_CORE_CALLGRAPH) build/spp-diag-trace-core-callgraph.o build/spp-diag-trace-core-callgraph-neg-vmalloc.o build/spp-diag-trace-core-callgraph-neg-sleep.o build/spp-diag-trace-core-callgraph-neg-mutex.o
-	rm -f build/spp-diag-trace-core-callgraph.o build/spp-diag-trace-core-callgraph-neg-vmalloc.o build/spp-diag-trace-core-callgraph-neg-sleep.o build/spp-diag-trace-core-callgraph-neg-mutex.o
+	$(CC) $(CORE_CFLAGS) -O0 -c -DHIDE_ALT_LOCK $(SPP_DIAG_TRACE_CORE_CALLGRAPH_NEG) -o build/spp-diag-trace-core-callgraph-neg-alt-lock.o
+	$(PYTHON) $(SPP_DIAG_TRACE_CORE_CALLGRAPH) build/spp-diag-trace-core-callgraph.o build/spp-diag-trace-core-callgraph-neg-vmalloc.o build/spp-diag-trace-core-callgraph-neg-sleep.o build/spp-diag-trace-core-callgraph-neg-mutex.o build/spp-diag-trace-core-callgraph-neg-alt-lock.o
+	rm -f build/spp-diag-trace-core-callgraph.o build/spp-diag-trace-core-callgraph-neg-vmalloc.o build/spp-diag-trace-core-callgraph-neg-sleep.o build/spp-diag-trace-core-callgraph-neg-mutex.o build/spp-diag-trace-core-callgraph-neg-alt-lock.o
 
 ci: check test test-spp-diag-trace test-spp-diag-trace-oracle test-spp-diag-trace-chain test-spp-diag-trace-checkpoints test-spp-diag-trace-semantics test-spp-diag-ima-replay test-spp-diag-attest test-spp-diag-trace-sanitized test-spp-diag-trace-core test-spp-diag-trace-core-oracle test-spp-diag-trace-core-race test-spp-diag-trace-core-materialize test-spp-diag-trace-core-handoff test-spp-diag-trace-core-source-walk test-spp-diag-trace-core-sanitized test-spp-diag-trace-core-context test-spp-diag-trace-core-callgraph
 	rm -rf build

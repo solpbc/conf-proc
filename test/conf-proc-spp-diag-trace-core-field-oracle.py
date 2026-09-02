@@ -248,8 +248,8 @@ def coord_diffs(left: Cell, right: Cell) -> list[str]:
     return sorted(key for key in keys if left.coords.get(key) != right.coords.get(key))
 
 
-def payload_pre_release(path: bytes) -> bytes:
-    return u16(13) + u16(len(path)) + u32(1) + u32(1) + bytes(8) + path
+def payload_pre_release(path: bytes, opaque: int = 0) -> bytes:
+    return u16(13) + u16(len(path)) + u32(1) + u32(1) + u64(opaque) + path
 
 
 def payload_exec_attempt(path: bytes) -> bytes:
@@ -260,8 +260,8 @@ def payload_exec_commit() -> bytes:
     return u32(1) + u32(1) + u32(1) + u32(0)
 
 
-def payload_pid_tgid() -> bytes:
-    return u32(1) + u32(1) + bytes(8)
+def payload_pid_tgid(opaque: int = 0) -> bytes:
+    return u32(1) + u32(1) + u64(opaque)
 
 
 def payload_phase_marker(prev: int) -> bytes:
@@ -423,15 +423,18 @@ def mapping_ids(backing: int) -> tuple[int, int, int]:
 def build_class_cells() -> list[Cell]:
     cells: list[Cell] = []
 
-    for task, path in itertools.product((0, 1), (b"/", b"a" * 1024)):
+    for task, path, opaque in itertools.product(
+        (0, 1), (b"/", b"a" * 1024), (0, HIGH64, ONES64)
+    ):
         cells.append(
             make_cell(
                 EVENT_PRE_RELEASE,
                 task=task,
                 operation=1,
                 phase=PHASE_PRE_RELEASE,
-                payload=payload_pre_release(path),
+                payload=payload_pre_release(path, opaque),
                 path_len=len(path),
+                opaque=opaque,
             )
         )
 
@@ -445,14 +448,16 @@ def build_class_cells() -> list[Cell]:
             )
         )
 
-    cells.append(
-        make_cell(
-            EVENT_USERSPACE_RELEASE,
-            task=1,
-            phase=PHASE_PRE_RELEASE,
-            payload=payload_pid_tgid(),
+    for opaque in (0, HIGH64, ONES64):
+        cells.append(
+            make_cell(
+                EVENT_USERSPACE_RELEASE,
+                task=1,
+                phase=PHASE_PRE_RELEASE,
+                payload=payload_pid_tgid(opaque),
+                opaque=opaque,
+            )
         )
-    )
 
     exec_attempt_grid = (
         (0, PHASE_INIT, b"/"),
@@ -491,16 +496,18 @@ def build_class_cells() -> list[Cell]:
             payload=bytes(8),
         )
     )
-    cells.append(
-        make_cell(
-            EVENT_TASK_CREATED,
-            task=2,
-            parent=1,
-            operation=1,
-            phase=PHASE_INIT,
-            payload=payload_pid_tgid(),
+    for opaque in (0, HIGH64, ONES64):
+        cells.append(
+            make_cell(
+                EVENT_TASK_CREATED,
+                task=2,
+                parent=1,
+                operation=1,
+                phase=PHASE_INIT,
+                payload=payload_pid_tgid(opaque),
+                opaque=opaque,
+            )
         )
-    )
     for prev in (PHASE_INIT, PHASE_JIT_CACHE):
         cells.append(
             make_cell(
@@ -803,6 +810,94 @@ def first_green(greens: list[Cell], event: int, pred=None) -> Cell:
 
 def isolating_twins(greens: list[Cell]) -> list[Cell]:
     twins: list[Cell] = []
+
+    pre = first_green(
+        greens,
+        EVENT_PRE_RELEASE,
+        lambda cell: cell.coords.get("path_len") == 1
+        and cell.coords.get("opaque") == 0,
+    )
+    for name, offset, raw in (
+        ("errno", 0, u16(0)),
+        ("path_len", 2, u16(0)),
+        ("pid", 4, u32(0)),
+        ("tgid", 8, u32(0)),
+        ("path_nul", 20, b"\x00"),
+    ):
+        twins.append(
+            derive_twin(pre, name, 0, payload=patch(pre.payload, offset, raw))
+        )
+
+    release = first_green(
+        greens,
+        EVENT_USERSPACE_RELEASE,
+        lambda cell: cell.coords.get("opaque") == 0,
+    )
+    twins.append(
+        derive_twin(release, "pid", 0, payload=patch(release.payload, 0, u32(0)))
+    )
+    twins.append(
+        derive_twin(release, "tgid", 0, payload=patch(release.payload, 4, u32(0)))
+    )
+
+    attempt = first_green(
+        greens,
+        EVENT_EXEC_ATTEMPT,
+        lambda cell: cell.flags == 0 and cell.coords.get("path_len") == 1,
+    )
+    for name, offset, raw in (
+        ("pass_index", 0, u32(0)),
+        ("path_len", 4, u16(0)),
+        ("reserved", 6, u16(1)),
+        ("pid", 8, u32(0)),
+        ("tgid", 12, u32(0)),
+        ("path_nul", 16, b"\x00"),
+    ):
+        twins.append(
+            derive_twin(attempt, name, 0, payload=patch(attempt.payload, offset, raw))
+        )
+
+    commit = first_green(greens, EVENT_EXEC_COMMIT)
+    for name, offset in (
+        ("pass_count", 0),
+        ("pid", 4),
+        ("tgid", 8),
+    ):
+        twins.append(
+            derive_twin(commit, name, 0, payload=patch(commit.payload, offset, u32(0)))
+        )
+    twins.append(
+        derive_twin(
+            commit, "reserved", 1, payload=patch(commit.payload, 12, u32(1))
+        )
+    )
+
+    created = first_green(
+        greens,
+        EVENT_TASK_CREATED,
+        lambda cell: cell.coords.get("opaque") == 0,
+    )
+    twins.append(
+        derive_twin(created, "pid", 0, payload=patch(created.payload, 0, u32(0)))
+    )
+    twins.append(
+        derive_twin(created, "tgid", 0, payload=patch(created.payload, 4, u32(0)))
+    )
+
+    marker = first_green(
+        greens,
+        EVENT_PHASE_MARKER,
+        lambda cell: cell.coords.get("prev_phase") == PHASE_INIT,
+    )
+    twins.append(
+        derive_twin(marker, "prev_phase", 0, payload=patch(marker.payload, 0, u16(0)))
+    )
+    twins.append(
+        derive_twin(marker, "next_phase", 3, payload=patch(marker.payload, 2, u16(3)))
+    )
+    twins.append(
+        derive_twin(marker, "marker_reserved", 1, payload=patch(marker.payload, 4, u32(1)))
+    )
 
     open_green = first_green(greens, EVENT_FILE_OPEN)
     twins.append(
@@ -1165,9 +1260,8 @@ def main() -> int:
         for cell, want in zip(candidates, expected):
             actual = parse_harness(harness.send(frame_tuple(cell)))
             got = int(actual[0])
-            want_ok = want == WIRE_OK
             got_ok = got == WIRE_OK
-            if want_ok != got_ok:
+            if got != want:
                 raise AssertionError(
                     f"verdict mismatch event={cell.event} origin={cell.origin} "
                     f"classifier={want} gpl={got} coords={cell.coords}"

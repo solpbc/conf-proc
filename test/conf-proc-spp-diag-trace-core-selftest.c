@@ -83,6 +83,8 @@ static void test_snapshot_null(void)
 	expect_eq("snap-null-core",
 		  spp_diag_trace_core_snapshot(NULL, sizeof(buf), &need),
 		  WIRE_NULL);
+	expect_u64("snap-null-core-need", need,
+		   sizeof(struct spp_diag_trace_core_snapshot));
 	expect_eq("snap-null-out",
 		  spp_diag_trace_core_snapshot(buf, sizeof(buf), NULL),
 		  WIRE_NULL);
@@ -477,6 +479,8 @@ static void test_snapshot_capacity(void)
 	expect_eq("cap-setup", init_ok(), WIRE_OK);
 	expect_eq("snap-null-out",
 		  spp_diag_trace_core_snapshot(NULL, 0, &need), WIRE_NULL);
+	expect_u64("snap-null-out-need", need,
+		   sizeof(struct spp_diag_trace_core_snapshot) + 244);
 	expect_eq("snap-null-need",
 		  spp_diag_trace_core_snapshot(stack, 0, NULL), WIRE_NULL);
 

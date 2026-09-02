@@ -16,6 +16,7 @@
 #define SPP_DIAG_TRACE_CORE_OP_MAX_STREAM_BYTES SPP_DIAG_TRACE_MAX_STREAM_BYTES
 #endif
 
+#if IS_ENABLED(CONFIG_KUNIT)
 struct spp_diag_trace_core_snapshot {
 	int initialized;
 	int failed;
@@ -33,6 +34,7 @@ struct spp_diag_trace_core_snapshot {
 	u32 last_frame_len;
 	u64 stream_len;
 };
+#endif
 
 int spp_diag_trace_core_init(const u8 challenge[32],
 			     const u8 run_identity[32],

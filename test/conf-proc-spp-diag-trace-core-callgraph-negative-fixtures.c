@@ -14,10 +14,10 @@ static void *depth3(void)
 	return vmalloc(8);
 }
 #elif defined(HIDE_SLEEP)
-int pthread_mutex_lock(void *mutex);
+void might_sleep(void);
 static void depth3(void)
 {
-	pthread_mutex_lock((void *)0);
+	might_sleep();
 }
 #elif defined(HIDE_MUTEX)
 void mutex_lock(void);
@@ -25,8 +25,14 @@ static void depth3(void)
 {
 	mutex_lock();
 }
+#elif defined(HIDE_ALT_LOCK)
+void raw_spin_lock(void);
+static void depth3(void)
+{
+	raw_spin_lock();
+}
 #else
-#error "define HIDE_VMALLOC, HIDE_SLEEP, or HIDE_MUTEX"
+#error "define HIDE_VMALLOC, HIDE_SLEEP, HIDE_MUTEX, or HIDE_ALT_LOCK"
 #endif
 
 static void depth2(void)

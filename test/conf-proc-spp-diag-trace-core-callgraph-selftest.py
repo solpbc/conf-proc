@@ -33,6 +33,7 @@ FORBIDDEN = (
     "down",
     "schedule",
     "pthread_mutex_lock",
+    "raw_spin_lock",
 )
 
 FUNC_HEADER = re.compile(r"^[0-9a-f]+ <([^>]+)>:\s*$")
@@ -136,20 +137,28 @@ def analyze(obj_path: Path) -> tuple[set[str], list[str], int]:
     return reachable, forbidden_hits, len(FORBIDDEN)
 
 
+def undefined_symbols(obj_path: Path) -> set[str]:
+    output = subprocess.check_output(
+        ["nm", "-u", str(obj_path)], text=True, stderr=subprocess.STDOUT
+    )
+    return {line.split()[-1] for line in output.splitlines() if line.split()}
+
+
 def main() -> int:
     if os.environ.get("SPP_DIAG_TRACE_CORE_FORCE_FAIL") == "1":
         print("FAIL callgraph forced")
         return 1
-    if len(sys.argv) < 5:
+    if len(sys.argv) != 6:
         raise SystemExit(
             "usage: conf-proc-spp-diag-trace-core-callgraph-selftest.py "
-            "CORE.O NEG_VMALLOC.O NEG_SLEEP.O NEG_MUTEX.O"
+            "CORE.O NEG_VMALLOC.O NEG_SLEEP.O NEG_MUTEX.O NEG_ALT_LOCK.O"
         )
     core_obj = Path(sys.argv[1])
     neg_objs = [
         (Path(sys.argv[2]), "vmalloc"),
-        (Path(sys.argv[3]), "pthread_mutex_lock"),
+        (Path(sys.argv[3]), "might_sleep"),
         (Path(sys.argv[4]), "mutex_lock"),
+        (Path(sys.argv[5]), "raw_spin_lock"),
     ]
     graph = parse_calls(core_obj)
     reachable, forbidden_hits, forbidden_n = analyze(core_obj)
@@ -161,9 +170,17 @@ def main() -> int:
         if ALLOWED_LOCK not in fns and ALLOWED_LOCK not in callees:
             print(f"FAIL callgraph {entry} does not reach {ALLOWED_LOCK}")
             return 1
+    append_fns, append_callees = walk(graph, ("spp_diag_trace_core_append",))
+    if "sha256" not in append_fns and "sha256" not in append_callees:
+        print("FAIL callgraph append does not reach sha256")
+        return 1
+    if "sha256" not in undefined_symbols(core_obj):
+        print("FAIL callgraph sha256 is not an unresolved production reference")
+        return 1
     print(
         f"ok   callgraph reachable_functions={len(reachable)} "
-        f"forbidden_checked={forbidden_n} entries={len(ENTRIES)}"
+        f"forbidden_checked={forbidden_n} entries={len(ENTRIES)} "
+        "sha256=reachable-unresolved"
     )
 
     for path, expected in neg_objs:

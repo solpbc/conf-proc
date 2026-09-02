@@ -156,16 +156,19 @@ static void test_sha_sentinels(void)
 	struct spp_diag_trace_core_snapshot snap;
 	u8 sentinel0[32];
 	u8 sentinel1[32];
+	u8 sentinel2[32];
 	u8 preimage[1151];
 	unsigned pre_len = 0;
 	unsigned calls;
 
 	memset(sentinel0, 0xa1, sizeof(sentinel0));
 	memset(sentinel1, 0xb2, sizeof(sentinel1));
+	memset(sentinel2, 0xc3, sizeof(sentinel2));
 	spp_diag_trace_core_reset();
 	host_sha256_reset_instrumentation();
 	host_sha256_push_sentinel(sentinel0);
 	host_sha256_push_sentinel(sentinel1);
+	host_sha256_push_sentinel(sentinel2);
 	expect_eq("sha-init", init_seed(0x81), WIRE_OK);
 	calls = host_sha256_call_count();
 	expect_eq("sha-init-calls", (int)calls, 2);
@@ -187,11 +190,7 @@ static void test_sha_sentinels(void)
 		g_fails++;
 	}
 	expect_eq("sha-snap-append", take_snap(&snap), WIRE_OK);
-	if (memcmp(snap.chain, sentinel0, 32) == 0 ||
-	    memcmp(snap.chain, sentinel1, 32) == 0) {
-		fprintf(stderr, "FAIL sha-final-chain used a sentinel\n");
-		g_fails++;
-	}
+	expect_mem("sha-final-chain", snap.chain, sentinel2, 32);
 	host_sha256_reset_instrumentation();
 	printf("ok   context-sha-sentinels calls=%u preimage=%u\n", calls,
 	       pre_len);

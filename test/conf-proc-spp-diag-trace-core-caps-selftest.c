@@ -98,6 +98,27 @@ static int append_pre_release(const u8 *payload, size_t n)
 		payload, n);
 }
 
+static void fill_pre_release(u8 *payload, size_t n)
+{
+	size_t i;
+
+	memset(payload, 0xab, n);
+	payload[0] = 0;
+	payload[1] = 13;
+	payload[2] = (u8)((n - 20) >> 8);
+	payload[3] = (u8)(n - 20);
+	payload[4] = 0;
+	payload[5] = 0;
+	payload[6] = 0;
+	payload[7] = 1;
+	payload[8] = 0;
+	payload[9] = 0;
+	payload[10] = 0;
+	payload[11] = 1;
+	for (i = 20; i < n; i++)
+		payload[i] = 'a';
+}
+
 static void test_frame_cap(void)
 {
 	struct spp_diag_trace_core_snapshot snap;
@@ -156,7 +177,7 @@ static void test_byte_cap_before_frame_cap(void)
 	int admitted = 0;
 	int rejected = 0;
 
-	memset(payload, 0xab, sizeof(payload));
+	fill_pre_release(payload, sizeof(payload));
 	spp_diag_trace_core_reset();
 	spp_diag_trace_core_set_op_caps((u32)max_frames, max_bytes);
 	expect_eq("byte-cap-init", init_ids(), WIRE_OK);

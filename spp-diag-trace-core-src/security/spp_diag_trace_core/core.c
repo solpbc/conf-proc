@@ -442,6 +442,72 @@ static int check_policy_result(u16 decision, u32 result)
 	return WIRE_OK;
 }
 
+static int check_pre_release_payload(const u8 *p, size_t n)
+{
+	u16 path_len;
+	int err;
+
+	if (load_u16be(p) != 13u)
+		return WIRE_VALUE;
+	path_len = load_u16be(p + 2);
+	err = check_path_len(path_len, n, 20u);
+	if (err)
+		return err;
+	if (load_u32be(p + 4) == 0 || load_u32be(p + 8) == 0)
+		return WIRE_VALUE;
+	return check_path_bytes(p + 20, path_len);
+}
+
+static int check_userspace_release_payload(const u8 *p)
+{
+	return load_u32be(p) != 0 && load_u32be(p + 4) != 0 ? WIRE_OK
+							       : WIRE_VALUE;
+}
+
+static int check_exec_attempt_payload(const u8 *p, size_t n)
+{
+	u16 path_len;
+	int err;
+
+	if (load_u32be(p) == 0)
+		return WIRE_VALUE;
+	path_len = load_u16be(p + 4);
+	err = check_path_len(path_len, n, 16u);
+	if (err)
+		return err;
+	if (load_u16be(p + 6) != 0)
+		return WIRE_RESERVED;
+	if (load_u32be(p + 8) == 0 || load_u32be(p + 12) == 0)
+		return WIRE_VALUE;
+	return check_path_bytes(p + 16, path_len);
+}
+
+static int check_exec_commit_payload(const u8 *p)
+{
+	if (load_u32be(p) == 0 || load_u32be(p + 4) == 0 ||
+	    load_u32be(p + 8) == 0)
+		return WIRE_VALUE;
+	return load_u32be(p + 12) == 0 ? WIRE_OK : WIRE_RESERVED;
+}
+
+static int check_task_created_payload(const u8 *p)
+{
+	return load_u32be(p) != 0 && load_u32be(p + 4) != 0 ? WIRE_OK
+							       : WIRE_VALUE;
+}
+
+static int check_phase_marker_payload(const u8 *p, u16 frame_phase)
+{
+	u16 prev = load_u16be(p);
+	u16 next = load_u16be(p + 2);
+
+	if (prev < SPP_DIAG_TRACE_PHASE_INIT ||
+	    prev > SPP_DIAG_TRACE_PHASE_JIT_CACHE || next != (u16)(prev + 1u) ||
+	    frame_phase != next)
+		return WIRE_STATE;
+	return load_u32be(p + 4) == 0 ? WIRE_OK : WIRE_RESERVED;
+}
+
 static int check_file_open_payload(const u8 *p, size_t n)
 {
 	u16 action;
@@ -787,11 +853,24 @@ static int check_task_exit_payload(const u8 *p, size_t n)
 	return WIRE_OK;
 }
 
-static int check_payload_content(u16 event, const void *payload, size_t n)
+static int check_payload_content(u16 event, u16 phase, const void *payload,
+				 size_t n)
 {
 	const u8 *p = payload;
 
 	switch (event) {
+	case SPP_DIAG_TRACE_EVENT_PRE_RELEASE_EXEC_DENIED:
+		return check_pre_release_payload(p, n);
+	case SPP_DIAG_TRACE_EVENT_USERSPACE_RELEASE:
+		return check_userspace_release_payload(p);
+	case SPP_DIAG_TRACE_EVENT_EXEC_ATTEMPT:
+		return check_exec_attempt_payload(p, n);
+	case SPP_DIAG_TRACE_EVENT_EXEC_COMMIT:
+		return check_exec_commit_payload(p);
+	case SPP_DIAG_TRACE_EVENT_TASK_CREATED:
+		return check_task_created_payload(p);
+	case SPP_DIAG_TRACE_EVENT_PHASE_MARKER:
+		return check_phase_marker_payload(p, phase);
 	case SPP_DIAG_TRACE_PROVENANCE_EVENT_FILE_OPEN_ATTEMPT:
 		return check_file_open_payload(p, n);
 	case SPP_DIAG_TRACE_PROVENANCE_EVENT_FILE_POLICY_DECISION:
@@ -839,7 +918,7 @@ static int check_append_fields(u16 event, u16 flags, u64 task, u64 parent,
 	err = check_phase(event, flags, phase);
 	if (err)
 		return err;
-	return check_payload_content(event, payload, payload_length);
+	return check_payload_content(event, phase, payload, payload_length);
 }
 
 static void clear_unpublished_meta(void)
@@ -1153,13 +1232,18 @@ int spp_diag_trace_core_snapshot(void *out, size_t out_cap, size_t *required_cap
 	size_t need;
 	struct spp_diag_trace_core_snapshot meta;
 
-	if (out == NULL || required_cap == NULL)
+	if (required_cap == NULL)
 		return WIRE_NULL;
 
 	run_barrier();
 	spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
 	fill_snapshot_meta(&meta);
 	need = sizeof(meta) + (size_t)meta.stream_len;
+	if (out == NULL) {
+		*required_cap = need;
+		spin_unlock_irqrestore(&spp_diag_trace_core_lock, flags);
+		return WIRE_NULL;
+	}
 	if (out_cap < need) {
 		*required_cap = need;
 		spin_unlock_irqrestore(&spp_diag_trace_core_lock, flags);
