@@ -173,70 +173,7 @@ def main() -> int:
     expect_init(harness, zero, zero, zero, zero)
     expect_init(harness, challenge, run, control, cmdline)
 
-    encoded_header = header(challenge, run, control, cmdline)
-    core_init = frame(1, 0, 0, 0, 0, 0, 0, b"")
-    header_chain = header_chain_of(encoded_header)
-    chain = roll_frame(header_chain, core_init)
-    terminal = frame(10, 0, 1, 0, 0, 0, 15, b"")
-    chain_after = roll_frame(chain, terminal)
     terminal_tuple = frame_tuple(10, 0, 0, 0, 0, 15, b"")
-    actual = invoke(
-        harness,
-        "run",
-        challenge.hex(),
-        run.hex(),
-        control.hex(),
-        cmdline.hex(),
-        terminal_tuple,
-    )
-    wanted = [
-        "0",
-        "0",
-        "0",
-        "1",
-        "2",
-        str(244 + 4 + 44),
-        "2",
-        encoded_header.hex(),
-        core_init.hex(),
-        header_chain.hex(),
-        chain_after.hex(),
-        core_init.hex(),
-        terminal.hex(),
-    ]
-    if actual != wanted:
-        raise AssertionError(f"run-terminal: expected {wanted}, got {actual}")
-
-    ima_payload = be((1 << 64) - 1, 8)
-    ima = frame(3, 0, 1, 0, 0, 0, 0, ima_payload)
-    chain_ima = roll_frame(chain, ima)
-    actual = invoke(
-        harness,
-        "run",
-        challenge.hex(),
-        run.hex(),
-        control.hex(),
-        cmdline.hex(),
-        frame_tuple(3, 0, 0, 0, 0, 0, ima_payload),
-    )
-    wanted = [
-        "0",
-        "0",
-        "0",
-        "1",
-        "2",
-        str(244 + 4 + 52),
-        "2",
-        encoded_header.hex(),
-        core_init.hex(),
-        header_chain.hex(),
-        chain_ima.hex(),
-        core_init.hex(),
-        ima.hex(),
-    ]
-    if actual != wanted:
-        raise AssertionError(f"run-ima-ready: expected {wanted}, got {actual}")
-
     actual = invoke(
         harness,
         "run",

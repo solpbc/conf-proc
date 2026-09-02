@@ -5,6 +5,7 @@
 #include <linux/spinlock.h>
 #include <linux/string.h>
 #include <linux/types.h>
+#include <linux/vmalloc.h>
 
 #include "core.h"
 
@@ -14,6 +15,37 @@ static const u8 k_source_commit[SPP_DIAG_TRACE_SOURCE_COMMIT_LEN] = {
 };
 static const u8 k_header_domain[28] = { SPP_DIAG_TRACE_PREIMAGE_DOMAIN_BYTES };
 static const u8 k_frame_domain[27] = { SPP_DIAG_TRACE_FRAME_PREIMAGE_DOMAIN_BYTES };
+
+static DEFINE_SPINLOCK(spp_diag_trace_core_lock);
+
+static struct {
+	int initialized;
+	int failed;
+	int reason;
+	u8 *stream;
+	size_t stream_cap;
+	size_t stream_len;
+	u8 header[SPP_DIAG_TRACE_HEADER_SIZE];
+	u8 core_init_frame[SPP_DIAG_TRACE_FRAME_HEADER_SIZE];
+	u8 header_chain[SPP_DIAG_TRACE_CHAIN_LEN];
+	u8 chain[SPP_DIAG_TRACE_CHAIN_LEN];
+	u64 frame_count;
+	u64 stream_byte_count;
+	u64 sequence;
+	u8 last_frame[SPP_DIAG_TRACE_MAX_FRAME_BYTES];
+	u32 last_frame_len;
+	u32 max_frames_op;
+	u64 max_stream_bytes_op;
+#if IS_ENABLED(CONFIG_KUNIT)
+	int fault_inject;
+	int init_fault;
+	void (*pre_lock_barrier)(void *);
+	void *pre_lock_barrier_arg;
+#endif
+} core = {
+	.max_frames_op = SPP_DIAG_TRACE_CORE_OP_MAX_FRAMES,
+	.max_stream_bytes_op = SPP_DIAG_TRACE_CORE_OP_MAX_STREAM_BYTES,
+};
 
 static void store_u16be(u8 *p, u16 v)
 {
@@ -39,6 +71,32 @@ static void store_u64be(u8 *p, u64 v)
 	p[5] = (u8)(v >> 16);
 	p[6] = (u8)(v >> 8);
 	p[7] = (u8)v;
+}
+
+static u16 load_u16be(const u8 *p)
+{
+	return (u16)(((u16)p[0] << 8) | (u16)p[1]);
+}
+
+static u32 load_u32be(const u8 *p)
+{
+	return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) |
+	       (u32)p[3];
+}
+
+static u64 load_u64be(const u8 *p)
+{
+	return ((u64)p[0] << 56) | ((u64)p[1] << 48) | ((u64)p[2] << 40) |
+	       ((u64)p[3] << 32) | ((u64)p[4] << 24) | ((u64)p[5] << 16) |
+	       ((u64)p[6] << 8) | (u64)p[7];
+}
+
+static int add_u64(u64 a, u64 b, u64 *out)
+{
+	if (a > ~0ull - b)
+		return WIRE_ARITHMETIC;
+	*out = a + b;
+	return WIRE_OK;
 }
 
 static void encode_header(u8 *out, const u8 challenge[32],
@@ -104,68 +162,60 @@ static void hash_frame_preimage(const u8 *prev_chain, const u8 *frame,
 	sha256(preimage, n, out);
 }
 
-static void fill_snapshot_locked(const struct spp_diag_trace_core *core,
-				 struct spp_diag_trace_core_snapshot *out)
+#if IS_ENABLED(CONFIG_KUNIT)
+static void fill_snapshot_meta(struct spp_diag_trace_core_snapshot *out)
 {
 	memset(out, 0, sizeof(*out));
-	out->initialized = core->initialized;
-	out->failed = core->failed;
-	out->reason = core->reason;
-	memcpy(out->header, core->header, SPP_DIAG_TRACE_HEADER_SIZE);
-	memcpy(out->core_init_frame, core->core_init_frame,
+	out->initialized = core.initialized;
+	out->failed = core.failed;
+	out->reason = core.reason;
+	memcpy(out->header, core.header, SPP_DIAG_TRACE_HEADER_SIZE);
+	memcpy(out->core_init_frame, core.core_init_frame,
 	       SPP_DIAG_TRACE_FRAME_HEADER_SIZE);
-	memcpy(out->header_chain, core->header_chain, SPP_DIAG_TRACE_CHAIN_LEN);
-	memcpy(out->chain, core->chain, SPP_DIAG_TRACE_CHAIN_LEN);
-	out->frame_count = core->frame_count;
-	out->stream_byte_count = core->stream_byte_count;
-	out->sequence = core->sequence;
-	out->max_frames_op = SPP_DIAG_TRACE_CORE_OP_MAX_FRAMES;
-	out->max_stream_bytes_op = SPP_DIAG_TRACE_CORE_OP_MAX_STREAM_BYTES;
-	out->last_frame_len = core->last_frame_len;
-	if (core->last_frame_len)
-		memcpy(out->last_frame, core->last_frame, core->last_frame_len);
+	memcpy(out->header_chain, core.header_chain, SPP_DIAG_TRACE_CHAIN_LEN);
+	memcpy(out->chain, core.chain, SPP_DIAG_TRACE_CHAIN_LEN);
+	out->frame_count = core.frame_count;
+	out->stream_byte_count = core.stream_byte_count;
+	out->sequence = core.sequence;
+	out->max_frames_op = core.max_frames_op;
+	out->max_stream_bytes_op = core.max_stream_bytes_op;
+	out->last_frame_len = core.last_frame_len;
+	if (core.last_frame_len)
+		memcpy(out->last_frame, core.last_frame, core.last_frame_len);
+	out->stream_len = core.stream_len;
 }
+#endif
 
-static void ensure_lock(struct spp_diag_trace_core *core)
-{
-	if (!core->lock_inited) {
-		spin_lock_init(&core->lock);
-		core->lock_inited = 1;
-	}
-}
-
-static void run_barrier(struct spp_diag_trace_core *core)
+static void run_barrier(void)
 {
 #if IS_ENABLED(CONFIG_KUNIT)
-	if (core->pre_lock_barrier)
-		core->pre_lock_barrier(core->pre_lock_barrier_arg);
-#else
-	(void)core;
+	if (core.pre_lock_barrier)
+		core.pre_lock_barrier(core.pre_lock_barrier_arg);
 #endif
 }
 
-static int sticky_or_fault(struct spp_diag_trace_core *core)
+static int sticky_or_fault(void)
 {
-	if (core->failed)
-		return core->reason;
+	if (core.failed)
+		return core.reason;
 #if IS_ENABLED(CONFIG_KUNIT)
-	if (core->fault_inject) {
-		core->failed = 1;
-		core->reason = core->fault_inject;
-		core->fault_inject = 0;
-		return core->reason;
+	if (core.fault_inject) {
+		core.failed = 1;
+		core.reason = core.fault_inject;
+		core.fault_inject = 0;
+		return core.reason;
 	}
 #endif
 	return WIRE_OK;
 }
 
-static int fail_sticky(struct spp_diag_trace_core *core, int reason)
+static int fail_sticky(int reason)
 {
-	if (!core->failed) {
-		core->failed = 1;
-		core->reason = reason;
+	if (!core.failed) {
+		core.failed = 1;
+		core.reason = reason;
 	}
-	return core->reason;
+	return core.reason;
 }
 
 static int core_event(u16 event)
@@ -347,6 +397,418 @@ static int check_phase(u16 event, u16 flags, u16 phase)
 	}
 }
 
+static int check_path_len(u16 path_len, size_t payload_length, u32 prefix)
+{
+	if (path_len == 0)
+		return WIRE_LENGTH;
+	if (path_len > SPP_DIAG_TRACE_MAX_PATH_BYTES)
+		return WIRE_CAP;
+	if (payload_length != (size_t)prefix + (size_t)path_len)
+		return WIRE_LENGTH;
+	return WIRE_OK;
+}
+
+static int check_path_bytes(const u8 *path, u16 n)
+{
+	size_t i;
+
+	for (i = 0; i < n; i++) {
+		if (path[i] == 0)
+			return WIRE_VALUE;
+	}
+	return WIRE_OK;
+}
+
+static int check_zero_bytes(const u8 *p, size_t n)
+{
+	size_t i;
+
+	for (i = 0; i < n; i++) {
+		if (p[i] != 0)
+			return WIRE_VALUE;
+	}
+	return WIRE_OK;
+}
+
+static int check_policy_result(u16 decision, u32 result)
+{
+	if (decision == SPP_DIAG_TRACE_POLICY_ALLOW) {
+		if (result != 0)
+			return WIRE_VALUE;
+	} else if (decision == SPP_DIAG_TRACE_POLICY_DENY) {
+		if ((result >> 31) == 0)
+			return WIRE_VALUE;
+	}
+	return WIRE_OK;
+}
+
+static int check_file_open_payload(const u8 *p, size_t n)
+{
+	u16 action;
+	u16 path_len;
+	u16 access;
+	u16 modifiers;
+	u32 reserved;
+	int err;
+
+	action = load_u16be(p);
+	if (action != 1u)
+		return WIRE_STATE;
+	path_len = load_u16be(p + 2);
+	err = check_path_len(path_len, n,
+			     SPP_DIAG_TRACE_FILE_OPEN_ATTEMPT_PREFIX_SIZE);
+	if (err)
+		return err;
+	access = load_u16be(p + 4);
+	if (access < SPP_DIAG_TRACE_FILE_ACCESS_READ ||
+	    access > SPP_DIAG_TRACE_FILE_ACCESS_PATH_ONLY)
+		return WIRE_STATE;
+	modifiers = load_u16be(p + 6);
+	if ((modifiers & ~SPP_DIAG_TRACE_FILE_MOD_MASK) != 0)
+		return WIRE_FLAGS;
+	reserved = load_u32be(p + 12);
+	if (reserved != 0)
+		return WIRE_RESERVED;
+	return check_path_bytes(p + 16, path_len);
+}
+
+static int check_file_policy_payload(const u8 *p, size_t n)
+{
+	u16 access;
+	u16 modifiers;
+	u16 decision;
+	u16 object_kind;
+	u32 result;
+	u64 inode;
+	u64 mount_identity;
+	int err;
+
+	(void)n;
+	access = load_u16be(p);
+	if (access < SPP_DIAG_TRACE_FILE_ACCESS_READ ||
+	    access > SPP_DIAG_TRACE_FILE_ACCESS_PATH_ONLY)
+		return WIRE_STATE;
+	modifiers = load_u16be(p + 2);
+	if ((modifiers & ~SPP_DIAG_TRACE_FILE_MOD_MASK) != 0)
+		return WIRE_FLAGS;
+	decision = load_u16be(p + 4);
+	if (decision != SPP_DIAG_TRACE_POLICY_ALLOW &&
+	    decision != SPP_DIAG_TRACE_POLICY_DENY)
+		return WIRE_STATE;
+	object_kind = load_u16be(p + 6);
+	if (object_kind < SPP_DIAG_TRACE_FILE_OBJECT_REGULAR ||
+	    object_kind > SPP_DIAG_TRACE_FILE_OBJECT_OTHER)
+		return WIRE_STATE;
+	result = load_u32be(p + 8);
+	err = check_policy_result(decision, result);
+	if (err)
+		return err;
+	inode = load_u64be(p + 24);
+	if (inode == 0)
+		return WIRE_VALUE;
+	mount_identity = load_u64be(p + 32);
+	if (mount_identity == 0)
+		return WIRE_VALUE;
+	return WIRE_OK;
+}
+
+static int check_mapping_payload(const u8 *p, size_t n)
+{
+	u16 operation;
+	u16 decision;
+	u16 backing;
+	u16 mode;
+	u32 requested;
+	u32 effective;
+	u32 prior;
+	u32 result;
+	u32 fs_magic;
+	u32 dev_major;
+	u32 dev_minor;
+	u32 seals;
+	u64 inode;
+	u64 mount_identity;
+	u64 observed_size;
+	int anonymous;
+	int err;
+
+	(void)n;
+	operation = load_u16be(p);
+	if (operation != SPP_DIAG_TRACE_MAPPING_OPERATION_MMAP &&
+	    operation != SPP_DIAG_TRACE_MAPPING_OPERATION_MPROTECT)
+		return WIRE_STATE;
+	decision = load_u16be(p + 2);
+	if (decision != SPP_DIAG_TRACE_POLICY_ALLOW &&
+	    decision != SPP_DIAG_TRACE_POLICY_DENY)
+		return WIRE_STATE;
+	backing = load_u16be(p + 4);
+	if (backing < SPP_DIAG_TRACE_MAPPING_BACKING_ANONYMOUS ||
+	    backing > SPP_DIAG_TRACE_MAPPING_BACKING_OTHER)
+		return WIRE_STATE;
+	mode = load_u16be(p + 6);
+	if (mode != SPP_DIAG_TRACE_MAPPING_MODE_SHARED &&
+	    mode != SPP_DIAG_TRACE_MAPPING_MODE_PRIVATE)
+		return WIRE_STATE;
+	requested = load_u32be(p + 8);
+	if ((requested & ~SPP_DIAG_TRACE_MAPPING_PROT_MASK) != 0)
+		return WIRE_FLAGS;
+	effective = load_u32be(p + 12);
+	if ((effective & ~SPP_DIAG_TRACE_MAPPING_PROT_MASK) != 0)
+		return WIRE_FLAGS;
+	prior = load_u32be(p + 16);
+	if ((prior & ~SPP_DIAG_TRACE_MAPPING_PROT_MASK) != 0)
+		return WIRE_FLAGS;
+	if ((effective & SPP_DIAG_TRACE_MAPPING_PROT_EXEC) == 0)
+		return WIRE_STATE;
+	if (operation == SPP_DIAG_TRACE_MAPPING_OPERATION_MMAP && prior != 0)
+		return WIRE_STATE;
+	result = load_u32be(p + 20);
+	err = check_policy_result(decision, result);
+	if (err)
+		return err;
+	anonymous = backing == SPP_DIAG_TRACE_MAPPING_BACKING_ANONYMOUS;
+	fs_magic = load_u32be(p + 24);
+	if (anonymous && fs_magic != 0)
+		return WIRE_VALUE;
+	dev_major = load_u32be(p + 28);
+	if (anonymous && dev_major != 0)
+		return WIRE_VALUE;
+	dev_minor = load_u32be(p + 32);
+	if (anonymous && dev_minor != 0)
+		return WIRE_VALUE;
+	seals = load_u32be(p + 36);
+	if (backing != SPP_DIAG_TRACE_MAPPING_BACKING_MEMFD && seals != 0)
+		return WIRE_FLAGS;
+	inode = load_u64be(p + 40);
+	if (anonymous) {
+		if (inode != 0)
+			return WIRE_VALUE;
+	} else if (inode == 0) {
+		return WIRE_VALUE;
+	}
+	mount_identity = load_u64be(p + 48);
+	if (anonymous) {
+		if (mount_identity != 0)
+			return WIRE_VALUE;
+	} else if (mount_identity == 0) {
+		return WIRE_VALUE;
+	}
+	observed_size = load_u64be(p + 56);
+	if (anonymous && observed_size != 0)
+		return WIRE_VALUE;
+	return WIRE_OK;
+}
+
+static int check_network_relation(u16 operation, u16 kind, u16 source,
+				  u16 family, u16 addrlen)
+{
+	int inet = family == SPP_DIAG_TRACE_NETWORK_FAMILY_AF_INET;
+	int inet6 = family == SPP_DIAG_TRACE_NETWORK_FAMILY_AF_INET6;
+	int zero = family == 0;
+	int other = !zero && !inet && !inet6;
+
+	switch (kind) {
+	case SPP_DIAG_TRACE_NETWORK_ENDPOINT_IPV4:
+		if (!inet)
+			return WIRE_STATE;
+		if (source == SPP_DIAG_TRACE_NETWORK_ENDPOINT_SOURCE_EXPLICIT)
+			return addrlen == 16 ? WIRE_OK : WIRE_STATE;
+		return addrlen == 0 ? WIRE_OK : WIRE_STATE;
+	case SPP_DIAG_TRACE_NETWORK_ENDPOINT_IPV6:
+		if (!inet6)
+			return WIRE_STATE;
+		if (source == SPP_DIAG_TRACE_NETWORK_ENDPOINT_SOURCE_EXPLICIT)
+			return addrlen == 28 ? WIRE_OK : WIRE_STATE;
+		return addrlen == 0 ? WIRE_OK : WIRE_STATE;
+	case SPP_DIAG_TRACE_NETWORK_ENDPOINT_UNSUPPORTED:
+		if (source == SPP_DIAG_TRACE_NETWORK_ENDPOINT_SOURCE_EXPLICIT) {
+			if (inet || inet6)
+				return WIRE_STATE;
+			return (addrlen >= 2 && addrlen <= 128) ? WIRE_OK
+								: WIRE_STATE;
+		}
+		if (!other)
+			return WIRE_STATE;
+		return addrlen == 0 ? WIRE_OK : WIRE_STATE;
+	case SPP_DIAG_TRACE_NETWORK_ENDPOINT_MALFORMED:
+		if (source != SPP_DIAG_TRACE_NETWORK_ENDPOINT_SOURCE_EXPLICIT)
+			return WIRE_STATE;
+		if ((addrlen == 0 || addrlen == 1) && zero)
+			return WIRE_OK;
+		if (inet && addrlen >= 2 && addrlen <= 128 && addrlen != 16)
+			return WIRE_OK;
+		if (inet6 && addrlen >= 2 && addrlen <= 128 && addrlen != 28)
+			return WIRE_OK;
+		return WIRE_STATE;
+	case SPP_DIAG_TRACE_NETWORK_ENDPOINT_UNRESOLVED:
+		if (operation != SPP_DIAG_TRACE_NETWORK_OPERATION_SENDMSG)
+			return WIRE_STATE;
+		if (source !=
+		    SPP_DIAG_TRACE_NETWORK_ENDPOINT_SOURCE_CONNECTED)
+			return WIRE_STATE;
+		if (!zero)
+			return WIRE_STATE;
+		return addrlen == 0 ? WIRE_OK : WIRE_STATE;
+	default:
+		return WIRE_STATE;
+	}
+}
+
+static int check_network_content(const u8 *p, u16 kind)
+{
+	u16 port;
+	u32 scope;
+	u32 flow;
+
+	switch (kind) {
+	case SPP_DIAG_TRACE_NETWORK_ENDPOINT_IPV4:
+		if (load_u32be(p + 40) != 0)
+			return WIRE_VALUE;
+		if (load_u32be(p + 44) != 0)
+			return WIRE_VALUE;
+		return check_zero_bytes(p + 48, 12);
+	case SPP_DIAG_TRACE_NETWORK_ENDPOINT_IPV6:
+		return WIRE_OK;
+	case SPP_DIAG_TRACE_NETWORK_ENDPOINT_UNSUPPORTED:
+	case SPP_DIAG_TRACE_NETWORK_ENDPOINT_MALFORMED:
+	case SPP_DIAG_TRACE_NETWORK_ENDPOINT_UNRESOLVED:
+		port = load_u16be(p + 36);
+		if (port != 0)
+			return WIRE_VALUE;
+		scope = load_u32be(p + 40);
+		if (scope != 0)
+			return WIRE_VALUE;
+		flow = load_u32be(p + 44);
+		if (flow != 0)
+			return WIRE_VALUE;
+		return check_zero_bytes(p + 48, 16);
+	default:
+		return WIRE_STATE;
+	}
+}
+
+static int check_network_payload(const u8 *p, size_t n)
+{
+	u16 operation;
+	u16 decision;
+	u16 kind;
+	u16 source;
+	u16 socket_kind;
+	u16 family;
+	u16 addrlen;
+	u16 reserved;
+	u32 result;
+	u32 flags;
+	u32 size;
+	u64 cookie;
+	int err;
+
+	(void)n;
+	operation = load_u16be(p);
+	if (operation != SPP_DIAG_TRACE_NETWORK_OPERATION_CONNECT &&
+	    operation != SPP_DIAG_TRACE_NETWORK_OPERATION_SENDMSG)
+		return WIRE_STATE;
+	decision = load_u16be(p + 2);
+	if (decision != SPP_DIAG_TRACE_POLICY_ALLOW &&
+	    decision != SPP_DIAG_TRACE_POLICY_DENY)
+		return WIRE_STATE;
+	kind = load_u16be(p + 4);
+	if (kind < SPP_DIAG_TRACE_NETWORK_ENDPOINT_IPV4 ||
+	    kind > SPP_DIAG_TRACE_NETWORK_ENDPOINT_UNRESOLVED)
+		return WIRE_STATE;
+	source = load_u16be(p + 6);
+	if (source != SPP_DIAG_TRACE_NETWORK_ENDPOINT_SOURCE_EXPLICIT &&
+	    source != SPP_DIAG_TRACE_NETWORK_ENDPOINT_SOURCE_CONNECTED)
+		return WIRE_STATE;
+	socket_kind = load_u16be(p + 8);
+	if (socket_kind < SPP_DIAG_TRACE_NETWORK_SOCKET_STREAM ||
+	    socket_kind > SPP_DIAG_TRACE_NETWORK_SOCKET_OTHER)
+		return WIRE_STATE;
+	addrlen = load_u16be(p + 14);
+	if (addrlen > 128)
+		return WIRE_LENGTH;
+	cookie = load_u64be(p + 28);
+	if (cookie == 0)
+		return WIRE_VALUE;
+	reserved = load_u16be(p + 38);
+	if (reserved != 0)
+		return WIRE_RESERVED;
+	flags = load_u32be(p + 20);
+	size = load_u32be(p + 24);
+	if (operation == SPP_DIAG_TRACE_NETWORK_OPERATION_CONNECT) {
+		if (source != SPP_DIAG_TRACE_NETWORK_ENDPOINT_SOURCE_EXPLICIT)
+			return WIRE_STATE;
+		if (flags != 0)
+			return WIRE_STATE;
+		if (size != 0)
+			return WIRE_STATE;
+	} else if ((size >> 31) != 0) {
+		return WIRE_VALUE;
+	}
+	result = load_u32be(p + 16);
+	err = check_policy_result(decision, result);
+	if (err)
+		return err;
+	family = load_u16be(p + 12);
+	err = check_network_relation(operation, kind, source, family, addrlen);
+	if (err)
+		return err;
+	return check_network_content(p, kind);
+}
+
+static int check_operation_return_payload(const u8 *p, size_t n)
+{
+	u16 kind;
+	u16 reserved16;
+	u32 reserved32;
+
+	(void)n;
+	kind = load_u16be(p);
+	if (kind < SPP_DIAG_TRACE_OPERATION_FILE_OPEN ||
+	    kind > SPP_DIAG_TRACE_OPERATION_EXEC)
+		return WIRE_STATE;
+	reserved16 = load_u16be(p + 2);
+	if (reserved16 != 0)
+		return WIRE_RESERVED;
+	reserved32 = load_u32be(p + 4);
+	if (reserved32 != 0)
+		return WIRE_RESERVED;
+	return WIRE_OK;
+}
+
+static int check_task_exit_payload(const u8 *p, size_t n)
+{
+	u32 reserved32;
+
+	(void)n;
+	reserved32 = load_u32be(p + 4);
+	if (reserved32 != 0)
+		return WIRE_RESERVED;
+	return WIRE_OK;
+}
+
+static int check_payload_content(u16 event, const void *payload, size_t n)
+{
+	const u8 *p = payload;
+
+	switch (event) {
+	case SPP_DIAG_TRACE_PROVENANCE_EVENT_FILE_OPEN_ATTEMPT:
+		return check_file_open_payload(p, n);
+	case SPP_DIAG_TRACE_PROVENANCE_EVENT_FILE_POLICY_DECISION:
+		return check_file_policy_payload(p, n);
+	case SPP_DIAG_TRACE_PROVENANCE_EVENT_EXEC_MAPPING_POLICY_DECISION:
+		return check_mapping_payload(p, n);
+	case SPP_DIAG_TRACE_PROVENANCE_EVENT_NETWORK_POLICY_DECISION:
+		return check_network_payload(p, n);
+	case SPP_DIAG_TRACE_PROVENANCE_EVENT_OPERATION_RETURN:
+		return check_operation_return_payload(p, n);
+	case SPP_DIAG_TRACE_PROVENANCE_EVENT_TASK_EXIT:
+		return check_task_exit_payload(p, n);
+	default:
+		return WIRE_OK;
+	}
+}
+
 static int check_append_fields(u16 event, u16 flags, u64 task, u64 parent,
 			       u64 operation, u16 phase, const void *payload,
 			       size_t payload_length)
@@ -374,11 +836,29 @@ static int check_append_fields(u16 event, u16 flags, u64 task, u64 parent,
 	err = check_operation(event, operation);
 	if (err)
 		return err;
-	return check_phase(event, flags, phase);
+	err = check_phase(event, flags, phase);
+	if (err)
+		return err;
+	return check_payload_content(event, payload, payload_length);
 }
 
-int spp_diag_trace_core_init(struct spp_diag_trace_core *core,
-			     const u8 challenge[32],
+static void clear_unpublished_meta(void)
+{
+	memset(core.header, 0, sizeof(core.header));
+	memset(core.core_init_frame, 0, sizeof(core.core_init_frame));
+	memset(core.header_chain, 0, sizeof(core.header_chain));
+	memset(core.chain, 0, sizeof(core.chain));
+	memset(core.last_frame, 0, sizeof(core.last_frame));
+	core.last_frame_len = 0;
+	core.frame_count = 0;
+	core.stream_byte_count = 0;
+	core.sequence = 0;
+	core.stream = NULL;
+	core.stream_cap = 0;
+	core.stream_len = 0;
+}
+
+int spp_diag_trace_core_init(const u8 challenge[32],
 			     const u8 run_identity[32],
 			     const u8 control_plan_address[32],
 			     const u8 command_line_sha256[32])
@@ -388,202 +868,384 @@ int spp_diag_trace_core_init(struct spp_diag_trace_core *core,
 	u8 core_init[SPP_DIAG_TRACE_FRAME_HEADER_SIZE];
 	u8 header_chain[SPP_DIAG_TRACE_CHAIN_LEN];
 	u8 chain[SPP_DIAG_TRACE_CHAIN_LEN];
+	u8 *buf = NULL;
+	size_t cap;
+	u64 prefix_bytes = 0;
 	int err;
+	int init_fault = 0;
+	u64 a, b, c, ab, abc;
 
-	if (core == NULL)
-		return WIRE_NULL;
-	ensure_lock(core);
-	spin_lock_irqsave(&core->lock, flags);
-	run_barrier(core);
-	err = sticky_or_fault(core);
-	if (err) {
-		spin_unlock_irqrestore(&core->lock, flags);
-		return err;
-	}
-	if (core->initialized) {
-		err = fail_sticky(core, WIRE_STATE);
-		spin_unlock_irqrestore(&core->lock, flags);
-		return err;
-	}
 	if (challenge == NULL || run_identity == NULL ||
 	    control_plan_address == NULL || command_line_sha256 == NULL) {
-		err = fail_sticky(core, WIRE_NULL);
-		spin_unlock_irqrestore(&core->lock, flags);
+		run_barrier();
+		spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
+		if (core.initialized)
+			err = fail_sticky(WIRE_STATE);
+		else
+			err = fail_sticky(WIRE_NULL);
+		spin_unlock_irqrestore(&spp_diag_trace_core_lock, flags);
 		return err;
 	}
+
+	/*
+	 * Cap is test-single-threaded setup via set_op_caps; read without the
+	 * publication lock so vmalloc stays outside the critical section.
+	 */
+	cap = core.max_stream_bytes_op;
+#if IS_ENABLED(CONFIG_KUNIT)
+	init_fault = core.init_fault;
+	core.init_fault = 0;
+#endif
+
+	if (init_fault ==
+#if IS_ENABLED(CONFIG_KUNIT)
+	    SPP_DIAG_TRACE_CORE_INIT_FAULT_ALLOCATION
+#else
+	    -1
+#endif
+	) {
+		buf = NULL;
+	} else {
+		/* Process-context: real kernel vmalloc() calls might_sleep(). */
+		buf = vmalloc(cap);
+	}
+	if (buf == NULL) {
+		err = WIRE_CAP;
+		goto fail_prelock;
+	}
+
 	encode_header(header, challenge, run_identity, control_plan_address,
 		      command_line_sha256);
-	hash_header_preimage(header, header_chain);
 	encode_frame(core_init, SPP_DIAG_TRACE_EVENT_CORE_INIT, 0, 0, 0, 0, 0, 0,
 		     SPP_DIAG_TRACE_PHASE_PRE_RELEASE, NULL);
+	hash_header_preimage(header, header_chain);
 	hash_frame_preimage(header_chain, core_init,
 			    SPP_DIAG_TRACE_FRAME_HEADER_SIZE, chain);
-	memcpy(core->header, header, SPP_DIAG_TRACE_HEADER_SIZE);
-	memcpy(core->core_init_frame, core_init,
+
+#if IS_ENABLED(CONFIG_KUNIT)
+	if (init_fault == SPP_DIAG_TRACE_CORE_INIT_FAULT_HEADER_ENCODING)
+		header[0] ^= 0xffu;
+	if (init_fault == SPP_DIAG_TRACE_CORE_INIT_FAULT_HEADER_INVARIANT)
+		store_u32be(header + 188, 1);
+	if (init_fault == SPP_DIAG_TRACE_CORE_INIT_FAULT_CORE_INIT_ENCODING)
+		store_u32be(core_init + 4, 1);
+	if (init_fault == SPP_DIAG_TRACE_CORE_INIT_FAULT_CORE_INIT_INVARIANT)
+		store_u64be(core_init + 8, 1);
+#endif
+
+	if (memcmp(header, k_magic_header, 8) != 0) {
+		err = WIRE_MAGIC;
+		goto fail_prelock;
+	}
+	if (load_u32be(header + 188) != 0) {
+		err = WIRE_RESERVED;
+		goto fail_prelock;
+	}
+	if (load_u32be(core_init + 4) != 0) {
+		err = WIRE_LENGTH;
+		goto fail_prelock;
+	}
+	if (load_u64be(core_init + 8) != 0) {
+		err = WIRE_SEQUENCE;
+		goto fail_prelock;
+	}
+
+	a = SPP_DIAG_TRACE_STREAM_HEADER_ENTRY_SIZE;
+	b = SPP_DIAG_TRACE_STREAM_PREFIX_SIZE;
+	c = SPP_DIAG_TRACE_FRAME_HEADER_SIZE;
+#if IS_ENABLED(CONFIG_KUNIT)
+	if (init_fault == SPP_DIAG_TRACE_CORE_INIT_FAULT_INITIAL_ARITHMETIC)
+		a = ~0ull;
+#endif
+	if (add_u64(a, b, &ab) != WIRE_OK || add_u64(ab, c, &abc) != WIRE_OK ||
+	    abc != (u64)SPP_DIAG_TRACE_STREAM_HEADER_ENTRY_SIZE +
+			   (u64)SPP_DIAG_TRACE_STREAM_PREFIX_SIZE +
+			   (u64)SPP_DIAG_TRACE_FRAME_HEADER_SIZE) {
+		err = WIRE_ARITHMETIC;
+		goto fail_prelock;
+	}
+	prefix_bytes = abc;
+
+	run_barrier();
+	spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
+	err = sticky_or_fault();
+	if (err)
+		goto fail_locked;
+	if (core.initialized) {
+		err = fail_sticky(WIRE_STATE);
+		goto fail_locked;
+	}
+
+	store_u32be(buf, SPP_DIAG_TRACE_HEADER_SIZE);
+	memcpy(buf + 4, header, SPP_DIAG_TRACE_HEADER_SIZE);
+	store_u32be(buf + 4 + SPP_DIAG_TRACE_HEADER_SIZE,
+		    SPP_DIAG_TRACE_FRAME_HEADER_SIZE);
+	memcpy(buf + 4 + SPP_DIAG_TRACE_HEADER_SIZE + 4, core_init,
 	       SPP_DIAG_TRACE_FRAME_HEADER_SIZE);
-	memcpy(core->header_chain, header_chain, SPP_DIAG_TRACE_CHAIN_LEN);
-	memcpy(core->chain, chain, SPP_DIAG_TRACE_CHAIN_LEN);
-	memcpy(core->last_frame, core_init, SPP_DIAG_TRACE_FRAME_HEADER_SIZE);
-	core->last_frame_len = SPP_DIAG_TRACE_FRAME_HEADER_SIZE;
-	core->frame_count = 1;
-	core->stream_byte_count = SPP_DIAG_TRACE_STREAM_HEADER_ENTRY_SIZE +
-				  SPP_DIAG_TRACE_STREAM_PREFIX_SIZE +
-				  SPP_DIAG_TRACE_FRAME_HEADER_SIZE;
-	core->sequence = 1;
-	core->initialized = 1;
-	core->failed = 0;
-	core->reason = 0;
-	spin_unlock_irqrestore(&core->lock, flags);
+
+	memcpy(core.header, header, SPP_DIAG_TRACE_HEADER_SIZE);
+	memcpy(core.core_init_frame, core_init, SPP_DIAG_TRACE_FRAME_HEADER_SIZE);
+	memcpy(core.header_chain, header_chain, SPP_DIAG_TRACE_CHAIN_LEN);
+	memcpy(core.chain, chain, SPP_DIAG_TRACE_CHAIN_LEN);
+	memcpy(core.last_frame, core_init, SPP_DIAG_TRACE_FRAME_HEADER_SIZE);
+	core.last_frame_len = SPP_DIAG_TRACE_FRAME_HEADER_SIZE;
+	core.stream = buf;
+	core.stream_cap = cap;
+	core.stream_len = (size_t)prefix_bytes;
+	core.frame_count = 1;
+	core.stream_byte_count = prefix_bytes;
+	core.sequence = 1;
+
+#if IS_ENABLED(CONFIG_KUNIT)
+	if (init_fault == SPP_DIAG_TRACE_CORE_INIT_FAULT_PRE_PUBLICATION)
+		core.frame_count = 0;
+#endif
+	if (core.frame_count != 1 || core.stream_byte_count != prefix_bytes) {
+		clear_unpublished_meta();
+		err = fail_sticky(WIRE_STATE);
+		goto fail_locked;
+	}
+
+	core.initialized = 1;
+	core.failed = 0;
+	core.reason = 0;
+	spin_unlock_irqrestore(&spp_diag_trace_core_lock, flags);
 	return WIRE_OK;
+
+fail_prelock:
+	run_barrier();
+	spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
+	err = fail_sticky(err);
+fail_locked:
+	spin_unlock_irqrestore(&spp_diag_trace_core_lock, flags);
+	vfree(buf);
+	return err;
 }
 
-int spp_diag_trace_core_append(struct spp_diag_trace_core *core,
-			       u16 event_type, u16 flags,
-			       u64 task_ordinal, u64 parent_task_ordinal,
-			       u64 operation_ordinal, u16 phase,
-			       const void *payload, size_t payload_length)
+int spp_diag_trace_core_is_green(void)
+{
+	unsigned long flags;
+	int green;
+
+	run_barrier();
+	spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
+	green = core.initialized && !core.failed;
+	spin_unlock_irqrestore(&spp_diag_trace_core_lock, flags);
+	return green;
+}
+
+int spp_diag_trace_core_append(u16 event_type, u16 flags, u64 task_ordinal,
+			       u64 parent_task_ordinal, u64 operation_ordinal,
+			       u16 phase, const void *payload,
+			       size_t payload_length)
 {
 	unsigned long irqflags;
+	u8 payload_copy[SPP_DIAG_TRACE_MAX_PAYLOAD_BYTES];
 	u8 frame[SPP_DIAG_TRACE_MAX_FRAME_BYTES];
 	u8 next_chain[SPP_DIAG_TRACE_CHAIN_LEN];
+	const void *payload_src = NULL;
 	u32 frame_len;
+	u64 prefix_plus_frame;
+	u64 next_bytes;
+	int field_err;
 	int err;
 
-	if (core == NULL)
-		return WIRE_NULL;
-	ensure_lock(core);
-	spin_lock_irqsave(&core->lock, irqflags);
-	run_barrier(core);
-	err = sticky_or_fault(core);
+	if (payload == NULL && payload_length > 0)
+		field_err = WIRE_NULL;
+	else if (payload_length > SPP_DIAG_TRACE_MAX_PAYLOAD_BYTES)
+		field_err = WIRE_CAP;
+	else {
+		if (payload_length && payload != NULL) {
+			memcpy(payload_copy, payload, payload_length);
+			payload_src = payload_copy;
+		}
+		field_err = check_append_fields(event_type, flags, task_ordinal,
+						parent_task_ordinal,
+						operation_ordinal, phase,
+						payload_src, payload_length);
+	}
+
+	run_barrier();
+	spin_lock_irqsave(&spp_diag_trace_core_lock, irqflags);
+	err = sticky_or_fault();
 	if (err) {
-		spin_unlock_irqrestore(&core->lock, irqflags);
+		spin_unlock_irqrestore(&spp_diag_trace_core_lock, irqflags);
 		return err;
 	}
-	if (!core->initialized) {
-		err = fail_sticky(core, WIRE_STATE);
-		spin_unlock_irqrestore(&core->lock, irqflags);
+	if (!core.initialized) {
+		err = fail_sticky(WIRE_STATE);
+		spin_unlock_irqrestore(&spp_diag_trace_core_lock, irqflags);
 		return err;
 	}
-	err = check_append_fields(event_type, flags, task_ordinal,
-				  parent_task_ordinal, operation_ordinal, phase,
-				  payload, payload_length);
-	if (err) {
-		err = fail_sticky(core, err);
-		spin_unlock_irqrestore(&core->lock, irqflags);
+	if (field_err) {
+		err = fail_sticky(field_err);
+		spin_unlock_irqrestore(&spp_diag_trace_core_lock, irqflags);
+		return err;
+	}
+	if (payload_length >
+	    (size_t)(~0u - SPP_DIAG_TRACE_FRAME_HEADER_SIZE)) {
+		err = fail_sticky(WIRE_ARITHMETIC);
+		spin_unlock_irqrestore(&spp_diag_trace_core_lock, irqflags);
 		return err;
 	}
 	frame_len = SPP_DIAG_TRACE_FRAME_HEADER_SIZE + (u32)payload_length;
-	if (core->frame_count >= SPP_DIAG_TRACE_CORE_OP_MAX_FRAMES) {
-		err = fail_sticky(core, WIRE_CAP);
-		spin_unlock_irqrestore(&core->lock, irqflags);
+	if (core.frame_count >= core.max_frames_op) {
+		err = fail_sticky(WIRE_CAP);
+		spin_unlock_irqrestore(&spp_diag_trace_core_lock, irqflags);
 		return err;
 	}
-	if (core->stream_byte_count + SPP_DIAG_TRACE_STREAM_PREFIX_SIZE +
-		    frame_len >
-	    SPP_DIAG_TRACE_CORE_OP_MAX_STREAM_BYTES) {
-		err = fail_sticky(core, WIRE_CAP);
-		spin_unlock_irqrestore(&core->lock, irqflags);
+	if (add_u64(SPP_DIAG_TRACE_STREAM_PREFIX_SIZE, frame_len,
+		    &prefix_plus_frame) != WIRE_OK ||
+	    add_u64(core.stream_byte_count, prefix_plus_frame, &next_bytes) !=
+		    WIRE_OK) {
+		err = fail_sticky(WIRE_ARITHMETIC);
+		spin_unlock_irqrestore(&spp_diag_trace_core_lock, irqflags);
 		return err;
 	}
+	if (next_bytes > core.max_stream_bytes_op) {
+		err = fail_sticky(WIRE_CAP);
+		spin_unlock_irqrestore(&spp_diag_trace_core_lock, irqflags);
+		return err;
+	}
+
 	encode_frame(frame, event_type, flags, (u32)payload_length,
-		     core->sequence, task_ordinal, parent_task_ordinal,
-		     operation_ordinal, phase, payload);
-	hash_frame_preimage(core->chain, frame, frame_len, next_chain);
-	memcpy(core->chain, next_chain, SPP_DIAG_TRACE_CHAIN_LEN);
-	memcpy(core->last_frame, frame, frame_len);
-	core->last_frame_len = frame_len;
-	core->frame_count += 1;
-	core->stream_byte_count += SPP_DIAG_TRACE_STREAM_PREFIX_SIZE + frame_len;
-	core->sequence += 1;
-	spin_unlock_irqrestore(&core->lock, irqflags);
+		     core.sequence, task_ordinal, parent_task_ordinal,
+		     operation_ordinal, phase, payload_src);
+	hash_frame_preimage(core.chain, frame, frame_len, next_chain);
+	store_u32be(core.stream + core.stream_len, frame_len);
+	memcpy(core.stream + core.stream_len + 4, frame, frame_len);
+	core.stream_len += 4u + frame_len;
+	memcpy(core.chain, next_chain, SPP_DIAG_TRACE_CHAIN_LEN);
+	memcpy(core.last_frame, frame, frame_len);
+	core.last_frame_len = frame_len;
+	core.frame_count += 1;
+	core.stream_byte_count = next_bytes;
+	core.sequence += 1;
+	spin_unlock_irqrestore(&spp_diag_trace_core_lock, irqflags);
 	return WIRE_OK;
 }
 
-int spp_diag_trace_core_snapshot(struct spp_diag_trace_core *core,
-				 struct spp_diag_trace_core_snapshot *out)
-{
-	unsigned long flags;
-
-	if (core == NULL || out == NULL)
-		return WIRE_NULL;
-	ensure_lock(core);
-	spin_lock_irqsave(&core->lock, flags);
-	fill_snapshot_locked(core, out);
-	spin_unlock_irqrestore(&core->lock, flags);
-	return WIRE_OK;
-}
-
-int spp_diag_trace_core_mark_failure(struct spp_diag_trace_core *core,
-				     int reason)
+int spp_diag_trace_core_mark_failure(int reason)
 {
 	unsigned long flags;
 	int err;
+	int mapped = reason;
 
-	if (core == NULL)
-		return WIRE_NULL;
-	ensure_lock(core);
-	spin_lock_irqsave(&core->lock, flags);
-	run_barrier(core);
-	err = sticky_or_fault(core);
+	if (reason < WIRE_NULL || reason > WIRE_SEQUENCE)
+		mapped = WIRE_VALUE;
+
+	run_barrier();
+	spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
+	err = sticky_or_fault();
 	if (err) {
-		spin_unlock_irqrestore(&core->lock, flags);
+		spin_unlock_irqrestore(&spp_diag_trace_core_lock, flags);
 		return err;
 	}
-	err = fail_sticky(core, reason);
-	spin_unlock_irqrestore(&core->lock, flags);
+	err = fail_sticky(mapped);
+	spin_unlock_irqrestore(&spp_diag_trace_core_lock, flags);
 	return err;
 }
 
 #if IS_ENABLED(CONFIG_KUNIT)
-void spp_diag_trace_core_reset(struct spp_diag_trace_core *core)
+int spp_diag_trace_core_snapshot(void *out, size_t out_cap, size_t *required_cap)
 {
 	unsigned long flags;
+	size_t need;
+	struct spp_diag_trace_core_snapshot meta;
 
-	if (core == NULL)
-		return;
-	ensure_lock(core);
-	spin_lock_irqsave(&core->lock, flags);
-	core->initialized = 0;
-	core->failed = 0;
-	core->reason = 0;
-	memset(core->header, 0, sizeof(core->header));
-	memset(core->core_init_frame, 0, sizeof(core->core_init_frame));
-	memset(core->header_chain, 0, sizeof(core->header_chain));
-	memset(core->chain, 0, sizeof(core->chain));
-	core->frame_count = 0;
-	core->stream_byte_count = 0;
-	core->sequence = 0;
-	memset(core->last_frame, 0, sizeof(core->last_frame));
-	core->last_frame_len = 0;
-	core->fault_inject = 0;
-	core->pre_lock_barrier = NULL;
-	core->pre_lock_barrier_arg = NULL;
-	spin_unlock_irqrestore(&core->lock, flags);
+	if (out == NULL || required_cap == NULL)
+		return WIRE_NULL;
+
+	run_barrier();
+	spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
+	fill_snapshot_meta(&meta);
+	need = sizeof(meta) + (size_t)meta.stream_len;
+	if (out_cap < need) {
+		*required_cap = need;
+		spin_unlock_irqrestore(&spp_diag_trace_core_lock, flags);
+		return WIRE_BUFFER_TOO_SMALL;
+	}
+	memcpy(out, &meta, sizeof(meta));
+	if (meta.stream_len && core.stream)
+		memcpy((u8 *)out + sizeof(meta), core.stream,
+		       (size_t)meta.stream_len);
+	*required_cap = need;
+	spin_unlock_irqrestore(&spp_diag_trace_core_lock, flags);
+	return WIRE_OK;
 }
 
-void spp_diag_trace_core_inject_fault(struct spp_diag_trace_core *core, int fault)
+void spp_diag_trace_core_reset(void)
 {
 	unsigned long flags;
+	u8 *detached;
 
-	if (core == NULL)
-		return;
-	ensure_lock(core);
-	spin_lock_irqsave(&core->lock, flags);
-	core->fault_inject = fault;
-	spin_unlock_irqrestore(&core->lock, flags);
+	spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
+	detached = core.stream;
+	core.stream = NULL;
+	core.initialized = 0;
+	core.failed = 0;
+	core.reason = 0;
+	memset(core.header, 0, sizeof(core.header));
+	memset(core.core_init_frame, 0, sizeof(core.core_init_frame));
+	memset(core.header_chain, 0, sizeof(core.header_chain));
+	memset(core.chain, 0, sizeof(core.chain));
+	core.frame_count = 0;
+	core.stream_byte_count = 0;
+	core.sequence = 0;
+	memset(core.last_frame, 0, sizeof(core.last_frame));
+	core.last_frame_len = 0;
+	core.stream_cap = 0;
+	core.stream_len = 0;
+	core.max_frames_op = SPP_DIAG_TRACE_CORE_OP_MAX_FRAMES;
+	core.max_stream_bytes_op = SPP_DIAG_TRACE_CORE_OP_MAX_STREAM_BYTES;
+	core.fault_inject = 0;
+	core.init_fault = 0;
+	core.pre_lock_barrier = NULL;
+	core.pre_lock_barrier_arg = NULL;
+	spin_unlock_irqrestore(&spp_diag_trace_core_lock, flags);
+	vfree(detached);
 }
 
-void spp_diag_trace_core_set_pre_lock_barrier(struct spp_diag_trace_core *core,
-					      void (*fn)(void *), void *arg)
+void spp_diag_trace_core_inject_fault(int reason)
 {
 	unsigned long flags;
 
-	if (core == NULL)
-		return;
-	ensure_lock(core);
-	spin_lock_irqsave(&core->lock, flags);
-	core->pre_lock_barrier = fn;
-	core->pre_lock_barrier_arg = arg;
-	spin_unlock_irqrestore(&core->lock, flags);
+	spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
+	core.fault_inject = reason;
+	spin_unlock_irqrestore(&spp_diag_trace_core_lock, flags);
+}
+
+void spp_diag_trace_core_inject_init_fault(int stage)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
+	core.init_fault = stage;
+	spin_unlock_irqrestore(&spp_diag_trace_core_lock, flags);
+}
+
+void spp_diag_trace_core_set_pre_lock_barrier(void (*fn)(void *), void *arg)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
+	core.pre_lock_barrier = fn;
+	core.pre_lock_barrier_arg = arg;
+	spin_unlock_irqrestore(&spp_diag_trace_core_lock, flags);
+}
+
+void spp_diag_trace_core_set_op_caps(u32 max_frames, u64 max_stream_bytes)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
+	core.max_frames_op = max_frames;
+	core.max_stream_bytes_op = max_stream_bytes;
+	spin_unlock_irqrestore(&spp_diag_trace_core_lock, flags);
+}
+
+int spp_diag_trace_core_test_checked_add_u64(u64 a, u64 b, u64 *out)
+{
+	return add_u64(a, b, out);
 }
 #endif

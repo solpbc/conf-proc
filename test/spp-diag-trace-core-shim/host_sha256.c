@@ -91,7 +91,58 @@ static void sha256_compress(u32 state[8], const u8 block[64])
 	state[7] += h;
 }
 
-void sha256(const u8 *data, unsigned int len, u8 *out)
+#define HOST_SHA256_PREIMAGE_MAX 1151u
+#define HOST_SHA256_RING 8u
+
+static unsigned sha_call_count;
+static unsigned sha_preimage_n;
+static unsigned sha_preimage_lens[HOST_SHA256_RING];
+static u8 sha_preimages[HOST_SHA256_RING][HOST_SHA256_PREIMAGE_MAX];
+static unsigned sha_sentinel_count;
+static unsigned sha_sentinel_idx;
+static u8 sha_sentinels[HOST_SHA256_RING][32];
+
+void host_sha256_reset_instrumentation(void)
+{
+	sha_call_count = 0;
+	sha_preimage_n = 0;
+	sha_sentinel_count = 0;
+	sha_sentinel_idx = 0;
+}
+
+unsigned host_sha256_call_count(void)
+{
+	return sha_call_count;
+}
+
+void host_sha256_push_sentinel(const u8 digest[32])
+{
+	if (sha_sentinel_count >= HOST_SHA256_RING)
+		return;
+	memcpy(sha_sentinels[sha_sentinel_count], digest, 32);
+	sha_sentinel_count++;
+}
+
+unsigned host_sha256_preimage_count(void)
+{
+	return sha_preimage_n;
+}
+
+int host_sha256_get_preimage(unsigned i, u8 *out, unsigned *len)
+{
+	unsigned n;
+
+	if (i >= sha_preimage_n || out == NULL || len == NULL)
+		return 0;
+	n = sha_preimage_lens[i];
+	if (n > HOST_SHA256_PREIMAGE_MAX)
+		n = HOST_SHA256_PREIMAGE_MAX;
+	memcpy(out, sha_preimages[i], n);
+	*len = sha_preimage_lens[i];
+	return 1;
+}
+
+static void sha256_compute(const u8 *data, unsigned int len, u8 *out)
 {
 	u32 state[8] = {
 		0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
@@ -117,4 +168,27 @@ void sha256(const u8 *data, unsigned int len, u8 *out)
 	sha256_compress(state, block);
 	for (offset = 0; offset < 8; offset++)
 		store_be32(out + offset * 4, state[offset]);
+}
+
+void sha256(const u8 *data, unsigned int len, u8 *out)
+{
+	unsigned slot;
+	unsigned n;
+
+	sha_call_count++;
+	if (sha_preimage_n < HOST_SHA256_RING) {
+		slot = sha_preimage_n++;
+		sha_preimage_lens[slot] = len;
+		n = len;
+		if (n > HOST_SHA256_PREIMAGE_MAX)
+			n = HOST_SHA256_PREIMAGE_MAX;
+		if (n && data != NULL)
+			memcpy(sha_preimages[slot], data, n);
+	}
+	if (sha_sentinel_idx < sha_sentinel_count) {
+		memcpy(out, sha_sentinels[sha_sentinel_idx], 32);
+		sha_sentinel_idx++;
+		return;
+	}
+	sha256_compute(data, len, out);
 }

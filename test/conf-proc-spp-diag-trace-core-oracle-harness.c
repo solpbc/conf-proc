@@ -131,9 +131,25 @@ static int parse_identities(char **argv, u8 challenge[32], u8 run[32], u8 contro
 	       parse_hex(argv[2], control, 32) && parse_hex(argv[3], cmdline, 32);
 }
 
+#define SNAP_BUF_CAP (sizeof(struct spp_diag_trace_core_snapshot) + 8192)
+
+static int take_snap(struct spp_diag_trace_core_snapshot *snap)
+{
+	unsigned char buf[SNAP_BUF_CAP];
+	size_t need = 0;
+	int rc;
+
+	rc = spp_diag_trace_core_snapshot(buf, sizeof(buf), &need);
+	if (rc != WIRE_OK)
+		return rc;
+	if (need < sizeof(*snap))
+		return WIRE_LENGTH;
+	memcpy(snap, buf, sizeof(*snap));
+	return WIRE_OK;
+}
+
 static int run_sequence(int mark, int argc, char **argv)
 {
-	struct spp_diag_trace_core core;
 	struct spp_diag_trace_core_snapshot snap;
 	u8 challenge[32], run[32], control[32], cmdline[32];
 	u8 frames[16][SPP_DIAG_TRACE_MAX_FRAME_BYTES];
@@ -144,12 +160,11 @@ static int run_sequence(int mark, int argc, char **argv)
 	int i;
 	int frame_argc_off;
 
-	memset(&core, 0, sizeof(core));
 	memset(&snap, 0, sizeof(snap));
 	if (!parse_identities(argv, challenge, run, control, cmdline))
 		return 2;
-	result = spp_diag_trace_core_init(&core, challenge, run, control, cmdline);
-	spp_diag_trace_core_snapshot(&core, &snap);
+	result = spp_diag_trace_core_init(challenge, run, control, cmdline);
+	take_snap(&snap);
 	if (result == WIRE_OK) {
 		memcpy(frames[0], snap.core_init_frame,
 		       SPP_DIAG_TRACE_FRAME_HEADER_SIZE);
@@ -166,8 +181,8 @@ static int run_sequence(int mark, int argc, char **argv)
 		if (end == argv[4] || *end != '\0')
 			return 2;
 		if (result == WIRE_OK)
-			result = spp_diag_trace_core_mark_failure(&core, reason);
-		spp_diag_trace_core_snapshot(&core, &snap);
+			result = spp_diag_trace_core_mark_failure(reason);
+		take_snap(&snap);
 		frame_argc_off = 5;
 	}
 	for (i = frame_argc_off; i < argc; i++) {
@@ -177,22 +192,89 @@ static int run_sequence(int mark, int argc, char **argv)
 			return 2;
 		if (!parse_frame_tuple(argv[i], &parsed))
 			return 2;
-		result = spp_diag_trace_core_append(&core, parsed.event_type,
+		result = spp_diag_trace_core_append(parsed.event_type,
 						    parsed.flags, parsed.task,
-						    parsed.parent, parsed.operation,
+						    parsed.parent,
+						    parsed.operation,
 						    parsed.phase,
 						    parsed.payload_length
 							    ? parsed.payload
 							    : NULL,
 						    parsed.payload_length);
-		spp_diag_trace_core_snapshot(&core, &snap);
+		take_snap(&snap);
 		if (result == WIRE_OK) {
-			memcpy(frames[frame_n], snap.last_frame, snap.last_frame_len);
+			memcpy(frames[frame_n], snap.last_frame,
+			       snap.last_frame_len);
 			frame_lens[frame_n] = snap.last_frame_len;
 			frame_n++;
 		}
 	}
 	print_snapshot(result, &snap, frames[0], frame_lens, frame_n);
+	return 0;
+}
+
+static int run_one_frame(const u8 challenge[32], const u8 run[32],
+			 const u8 control[32], const u8 cmdline[32],
+			 const char *frame_hex)
+{
+	struct spp_diag_trace_core_snapshot snap;
+	struct parsed_frame parsed;
+	u8 frames[2][SPP_DIAG_TRACE_MAX_FRAME_BYTES];
+	size_t frame_lens[2];
+	size_t frame_n = 0;
+	int result;
+
+	memset(&snap, 0, sizeof(snap));
+	spp_diag_trace_core_reset();
+	spp_diag_trace_core_set_op_caps(16, 8192);
+	result = spp_diag_trace_core_init(challenge, run, control, cmdline);
+	if (result != WIRE_OK) {
+		take_snap(&snap);
+		print_snapshot(result, &snap, frames[0], frame_lens, 0);
+		return 0;
+	}
+	take_snap(&snap);
+	memcpy(frames[0], snap.core_init_frame, SPP_DIAG_TRACE_FRAME_HEADER_SIZE);
+	frame_lens[0] = SPP_DIAG_TRACE_FRAME_HEADER_SIZE;
+	frame_n = 1;
+	if (!parse_frame_tuple(frame_hex, &parsed))
+		return 2;
+	result = spp_diag_trace_core_append(parsed.event_type, parsed.flags,
+					    parsed.task, parsed.parent,
+					    parsed.operation, parsed.phase,
+					    parsed.payload_length ? parsed.payload
+								  : NULL,
+					    parsed.payload_length);
+	take_snap(&snap);
+	if (result == WIRE_OK) {
+		memcpy(frames[frame_n], snap.last_frame, snap.last_frame_len);
+		frame_lens[frame_n] = snap.last_frame_len;
+		frame_n++;
+	}
+	print_snapshot(result, &snap, frames[0], frame_lens, frame_n);
+	return 0;
+}
+
+static int run_batch(char **argv)
+{
+	u8 challenge[32], run[32], control[32], cmdline[32];
+	char line[8192];
+	size_t len;
+
+	if (!parse_identities(argv, challenge, run, control, cmdline))
+		return 2;
+	setvbuf(stdout, NULL, _IOLBF, 0);
+	while (fgets(line, sizeof(line), stdin) != NULL) {
+		len = strlen(line);
+		while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
+			line[len - 1] = '\0';
+			len--;
+		}
+		if (len == 0)
+			continue;
+		if (run_one_frame(challenge, run, control, cmdline, line) != 0)
+			return 2;
+	}
 	return 0;
 }
 
@@ -204,7 +286,9 @@ int main(int argc, char **argv)
 		return run_sequence(0, argc - 2, argv + 2);
 	if (argc >= 7 && strcmp(argv[1], "mark") == 0)
 		return run_sequence(1, argc - 2, argv + 2);
-	fputs("usage: core-oracle-harness init|run|mark CH RUN CTL CMD [REASON] [FRAME...]\n",
+	if (argc == 6 && strcmp(argv[1], "batch") == 0)
+		return run_batch(argv + 2);
+	fputs("usage: core-oracle-harness init|run|mark|batch CH RUN CTL CMD [REASON] [FRAME...]\n",
 	      stderr);
 	return 2;
 }
