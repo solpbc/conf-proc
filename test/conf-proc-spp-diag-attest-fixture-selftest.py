@@ -23,6 +23,7 @@ UTC = timezone.utc
 TPM_GENERATED_VALUE = 0xFF544347
 TPM_ST_ATTEST_QUOTE = 0x8018
 TPM_ALG_SHA256 = 0x000B
+TPM_ALG_RSASSA = 0x0014
 TPM_ALG_RSAPSS = 0x0016
 AMD_OID = "1.3.6.1.4.1.3704.1."
 
@@ -247,7 +248,7 @@ def check_ak_public_area(ak_public: rsa.RSAPublicKey) -> None:
     assert public_area.integer(4) == 0x0005_0072
     assert public_area.take(public_area.integer(2)) == b""
     assert public_area.integer(2) == 0x0010  # symmetric = TPM_ALG_NULL
-    assert public_area.integer(2) == TPM_ALG_RSAPSS
+    assert public_area.integer(2) == TPM_ALG_RSASSA
     assert public_area.integer(2) == TPM_ALG_SHA256
     assert public_area.integer(2) == 2048
     assert public_area.integer(4) == 0  # default exponent 65537
@@ -288,14 +289,14 @@ def check_quote(ak_public) -> None:
     quote.consumed()
 
     signature = Cursor(fixture.fixture_bytes("quote.sig"), "big")
-    assert signature.integer(2) == TPM_ALG_RSAPSS
+    assert signature.integer(2) == TPM_ALG_RSASSA
     assert signature.integer(2) == TPM_ALG_SHA256
     raw_signature = signature.take(signature.integer(2))
     signature.consumed()
     ak_public.verify(
         raw_signature,
         fixture.fixture_bytes("quote.msg"),
-        padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=32),
+        padding.PKCS1v15(),
         hashes.SHA256(),
     )
 
