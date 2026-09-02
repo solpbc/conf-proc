@@ -564,6 +564,7 @@ def _rollback(
 def _derivation_record(manifest: CoreManifest, base_commit: str) -> dict:
     return {
         "base_commit": base_commit,
+        "core_api_symbols": list(manifest.core_api_symbols),
         "protocol_authority": {
             "header": manifest.protocol_authority.header,
             "header_sha256": manifest.protocol_authority.header_sha256,

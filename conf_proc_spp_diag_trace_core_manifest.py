@@ -33,12 +33,19 @@ REPLACE_MAKEFILE_LINE: Final = (
     "obj-$(CONFIG_SECURITY_SPP_DIAG_TRACE_CORE) += spp_diag_trace_core/"
 )
 REPLACE_KCONFIG_LINE: Final = 'source "security/spp_diag_trace_core/Kconfig"'
+CORE_API_SYMBOLS: Final = (
+    "spp_diag_trace_core_init",
+    "spp_diag_trace_core_is_green",
+    "spp_diag_trace_core_append",
+    "spp_diag_trace_core_mark_failure",
+)
 
 _TOP_KEYS: Final = frozenset(
     {
         "schema",
         "manifest_version",
         "expected_base_commit",
+        "core_api_symbols",
         "protocol_authority",
         "diagnostic_config_fragment",
         "inputs",
@@ -100,6 +107,7 @@ class ReplaceTarget:
 @dataclass(frozen=True)
 class CoreManifest:
     expected_base_commit: str
+    core_api_symbols: tuple[str, ...]
     protocol_authority: AuthorityBlobs
     diagnostic_config_fragment: InputBlob
     inputs: tuple[InputBlob, ...]
@@ -127,6 +135,12 @@ def parse_core_manifest(data: bytes) -> CoreManifest:
         type(raw["expected_base_commit"]) is str and _is_commit(raw["expected_base_commit"]),
         CP_SPP_DIAG_TRACE_CORE_TYPE,
         "expected_base_commit must be 40 lowercase hex characters",
+    )
+    _require(
+        type(raw["core_api_symbols"]) is list
+        and tuple(raw["core_api_symbols"]) == CORE_API_SYMBOLS,
+        CP_SPP_DIAG_TRACE_CORE_SCHEMA,
+        "core_api_symbols must declare the four production APIs in order",
     )
 
     authority_raw = raw["protocol_authority"]
@@ -223,6 +237,7 @@ def parse_core_manifest(data: bytes) -> CoreManifest:
 
     return CoreManifest(
         expected_base_commit=raw["expected_base_commit"],
+        core_api_symbols=tuple(raw["core_api_symbols"]),
         protocol_authority=authority,
         diagnostic_config_fragment=fragment,
         inputs=tuple(inputs),

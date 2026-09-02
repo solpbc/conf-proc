@@ -22,9 +22,12 @@ sys.path.insert(0, str(ROOT))
 import conf_proc_spp_diag_trace_core_handoff as handoff  # noqa: E402
 import conf_proc_spp_diag_trace_core_materialize as materialize  # noqa: E402
 from conf_proc_guard import HermeticGuard  # noqa: E402
+from conf_proc_json import canonical_loads  # noqa: E402
+from conf_proc_spp_diag_trace_core_manifest import CORE_API_SYMBOLS  # noqa: E402
 from conf_proc_spp_diag_trace_core_materialize_reasons import (  # noqa: E402
     CP_SPP_DIAG_TRACE_CORE_FORBIDDEN_COMMAND,
     CP_SPP_DIAG_TRACE_CORE_HANDOFF,
+    CP_SPP_DIAG_TRACE_CORE_INPUT_CHANGED,
     SppDiagTraceCoreMaterializeError,
 )
 
@@ -99,23 +102,67 @@ def _make_shim(path: str, log: str, *, strip_fragment: bool = False) -> None:
         f'printf "%s\\n" "$@" >> "{log}"\n'
         "outdir=\n"
         "has_olddef=\n"
+        "target=\n"
         "for arg in \"$@\"; do\n"
         "  case \"$arg\" in\n"
         "    O=*) outdir=${arg#O=} ;;\n"
         "    olddefconfig) has_olddef=1 ;;\n"
+        "    security/spp_diag_trace_core/core.o|vmlinux) target=$arg ;;\n"
         "  esac\n"
         "done\n"
         f"strip={strip}\n"
+        "if [ \"$1\" = -f ]; then\n"
+        "  mkdir -p debian\n"
+        "  printf 'fixture cert\\n' > debian/canonical-certs.pem\n"
+        "  printf 'fixture revoked cert\\n' > debian/canonical-revoked-certs.pem\n"
+        "  exit 0\n"
+        "fi\n"
         "if [ -n \"$has_olddef\" ]; then\n"
         "  if [ \"$strip\" = yes ]; then\n"
         "    printf 'CONFIG_ONLY_FOO=y\\n' > \"$outdir/.config\"\n"
         "  fi\n"
         "  exit 0\n"
         "fi\n"
-        "if [ -n \"$outdir\" ]; then\n"
-        "  touch \"$outdir/built\"\n"
+        "if [ \"$target\" = security/spp_diag_trace_core/core.o ]; then\n"
+        "  touch \"$outdir/core-built\"\n"
+        "fi\n"
+        "if [ \"$target\" = vmlinux ]; then\n"
+        "  printf 'fixture vmlinux\\n' > \"$outdir/vmlinux\"\n"
         "fi\n"
         "exit 0\n",
+    )
+
+
+def _nm_shim(
+    path: str,
+    log: str,
+    enabled_output: str,
+    disabled_output: str,
+    *,
+    omit_enabled: bool = False,
+    leak_disabled: bool = False,
+) -> None:
+    enabled_symbols = ":\n" if omit_enabled else "".join(
+        f"printf '0000000000000001 T {symbol}\\n'\n" for symbol in CORE_API_SYMBOLS
+    )
+    disabled_symbol = (
+        "printf '0000000000000001 T spp_diag_trace_core_init\\n'\n"
+        if leak_disabled
+        else ":\n"
+    )
+    _write_exec(
+        path,
+        "#!/bin/sh\n"
+        f'printf "cwd=%s\\n" "$PWD" >> "{log}"\n'
+        f'printf "%s\\n" "$@" >> "{log}"\n'
+        "printf '0000000000000001 T start_kernel\\n'\n"
+        f'if [ "$3" = "{enabled_output}/vmlinux" ]; then\n'
+        f"{enabled_symbols}"
+        f'elif [ "$3" = "{disabled_output}/vmlinux" ]; then\n'
+        f"{disabled_symbol}"
+        "else\n"
+        "  exit 2\n"
+        "fi\n",
     )
 
 
@@ -158,17 +205,23 @@ def _fail(name: str, error: Exception) -> None:
 def test_happy_path(scratch: str) -> None:
     repo, first, _second = MAT._make_fixture(scratch)
     output = os.path.join(scratch, "out")
+    disabled_output = os.path.join(scratch, "out-disabled")
     os.makedirs(output)
+    os.makedirs(disabled_output)
     ann_log = os.path.join(scratch, "ann.log")
     make_log = os.path.join(scratch, "make.log")
+    nm_log = os.path.join(scratch, "nm.log")
     trap_log = os.path.join(scratch, "trap.log")
     Path(ann_log).write_text("", encoding="utf-8")
     Path(make_log).write_text("", encoding="utf-8")
+    Path(nm_log).write_text("", encoding="utf-8")
     Path(trap_log).write_text("", encoding="utf-8")
     annotations = os.path.join(scratch, "annotations")
     make = os.path.join(scratch, "make")
+    nm = os.path.join(scratch, "nm")
     _annotations_shim(annotations, ann_log, "CONFIG_FOO=y\n")
     _make_shim(make, make_log)
+    _nm_shim(nm, nm_log, output, disabled_output)
     for name in ("fetch", "checkout", "reset", "clean", "sign", "package", "boot", "device"):
         _trap_shim(os.path.join(scratch, name), trap_log)
     materialize._TEST_EXPECTED_BASE_COMMIT_OVERRIDE = first
@@ -188,14 +241,26 @@ def test_happy_path(scratch: str) -> None:
             make,
             "--make-sha256",
             _sha(make),
+            "--nm",
+            nm,
+            "--nm-sha256",
+            _sha(nm),
             "--output-dir",
             output,
+            "--disabled-output-dir",
+            disabled_output,
         ]
     )
     if result.returncode != 0:
         raise AssertionError(result.stderr.decode())
+    record = canonical_loads(result.stdout.rstrip(b"\n"))
+    if record["enabled"]["core_api_symbols"] != list(CORE_API_SYMBOLS):
+        raise AssertionError(record["enabled"])
+    if record["disabled"]["core_api_symbols"] != []:
+        raise AssertionError(record["disabled"])
     ann_lines = [line for line in Path(ann_log).read_text(encoding="utf-8").splitlines() if line]
     make_lines = [line for line in Path(make_log).read_text(encoding="utf-8").splitlines() if line]
+    nm_lines = [line for line in Path(nm_log).read_text(encoding="utf-8").splitlines() if line]
     expected_ann = [
         f"cwd={repo}",
         "-f",
@@ -213,10 +278,36 @@ def test_happy_path(scratch: str) -> None:
         f"O={output}",
         "olddefconfig",
         f"cwd={repo}",
+        f"O={disabled_output}",
+        "olddefconfig",
+        f"cwd={repo}",
+        "-f",
+        "debian/rules",
+        *handoff.CANONICAL_CERT_TARGETS,
+        f"cwd={repo}",
         f"O={output}",
+        handoff.CORE_OBJECT_TARGET,
+        f"cwd={repo}",
+        f"O={output}",
+        handoff.VMLINUX_TARGET,
+        f"cwd={repo}",
+        f"O={disabled_output}",
+        handoff.VMLINUX_TARGET,
     ]
     if make_lines != expected_make:
         raise AssertionError(f"make argv {make_lines}")
+    expected_nm = [
+        f"cwd={repo}",
+        "-g",
+        "--defined-only",
+        f"{output}/vmlinux",
+        f"cwd={repo}",
+        "-g",
+        "--defined-only",
+        f"{disabled_output}/vmlinux",
+    ]
+    if nm_lines != expected_nm:
+        raise AssertionError(f"nm argv {nm_lines}")
     config = Path(output, ".config").read_text(encoding="utf-8")
     y_lines = handoff._y_symbols(config)
     for symbol in handoff.FRAGMENT_SYMBOLS:
@@ -224,8 +315,13 @@ def test_happy_path(scratch: str) -> None:
             raise AssertionError(f"missing {symbol} in {y_lines}")
     if Path(trap_log).read_text(encoding="utf-8").strip():
         raise AssertionError("forbidden trap shim was invoked")
-    if not Path(output, "built").is_file():
-        raise AssertionError("build shim did not run")
+    if not Path(output, "core-built").is_file():
+        raise AssertionError("enabled object build shim did not run")
+    if not Path(output, "vmlinux").is_file() or not Path(disabled_output, "vmlinux").is_file():
+        raise AssertionError("dual final-artifact build shim did not run")
+    for target in handoff.CANONICAL_CERT_TARGETS:
+        if Path(repo, target).exists():
+            raise AssertionError(f"generated certificate input was not removed: {target}")
 
 
 def test_forbidden_argv_chokepoint() -> None:
@@ -257,7 +353,9 @@ def test_forbidden_argv_chokepoint() -> None:
                     argv,
                     annotations="/opt/annotations",
                     make="/opt/make",
-                    output_dir="/opt/out",
+                    nm="/opt/nm",
+                    enabled_output_dir="/opt/out-enabled",
+                    disabled_output_dir="/opt/out-disabled",
                 )
             except SppDiagTraceCoreMaterializeError as exc:
                 if exc.reason_code != CP_SPP_DIAG_TRACE_CORE_FORBIDDEN_COMMAND:
@@ -270,15 +368,62 @@ def test_forbidden_argv_chokepoint() -> None:
         raise AssertionError("run_tool was reached for a forbidden argv")
 
 
+def test_output_directory_alias(scratch: str) -> None:
+    worktree = os.path.join(scratch, "worktree")
+    real_parent = os.path.join(scratch, "real-parent")
+    alias_parent = os.path.join(scratch, "alias-parent")
+    shared = os.path.join(real_parent, "shared")
+    os.makedirs(worktree)
+    os.makedirs(shared)
+    os.symlink(real_parent, alias_parent)
+    try:
+        handoff._validate_output_dirs(
+            worktree,
+            (shared, os.path.join(alias_parent, "shared")),
+        )
+    except SppDiagTraceCoreMaterializeError as exc:
+        if exc.reason_code != CP_SPP_DIAG_TRACE_CORE_HANDOFF:
+            raise
+    else:
+        raise AssertionError("two output aliases of one real directory were accepted")
+
+
+def test_fragment_capture_mismatch(scratch: str) -> None:
+    fragment = os.path.join(scratch, "config.fragment")
+    declared = b"CONFIG_SECURITY_SPP_DIAG_TRACE_CORE=y\n"
+    Path(fragment).write_bytes(declared + b"CONFIG_MUTATED=y\n")
+    guard = HermeticGuard(
+        allowed_reads=frozenset({fragment}),
+        tools={},
+        env={"PATH": "/usr/bin", "LC_ALL": "C", "TZ": "UTC"},
+        build_epoch=0,
+    )
+    try:
+        handoff._capture_fragment(
+            guard,
+            Path(fragment),
+            hashlib.sha256(declared).hexdigest(),
+        )
+    except SppDiagTraceCoreMaterializeError as exc:
+        if exc.reason_code != CP_SPP_DIAG_TRACE_CORE_INPUT_CHANGED:
+            raise
+    else:
+        raise AssertionError("changed fragment bytes were accepted for the declared digest")
+
+
 def test_annotations_nonzero(scratch: str) -> None:
     repo, first, _second = MAT._make_fixture(scratch)
     output = os.path.join(scratch, "out")
+    disabled_output = os.path.join(scratch, "out-disabled")
     os.makedirs(output)
+    os.makedirs(disabled_output)
     before = sorted(os.listdir(output))
     annotations = os.path.join(scratch, "annotations")
     make = os.path.join(scratch, "make")
+    nm = os.path.join(scratch, "nm")
     _annotations_shim(annotations, os.path.join(scratch, "ann.log"), "CONFIG_FOO=y\n", exit_code=1)
     _make_shim(make, os.path.join(scratch, "make.log"))
+    _nm_shim(nm, os.path.join(scratch, "nm.log"), output, disabled_output)
     materialize._TEST_EXPECTED_BASE_COMMIT_OVERRIDE = first
     result = _run_handoff(
         [
@@ -296,8 +441,14 @@ def test_annotations_nonzero(scratch: str) -> None:
             make,
             "--make-sha256",
             _sha(make),
+            "--nm",
+            nm,
+            "--nm-sha256",
+            _sha(nm),
             "--output-dir",
             output,
+            "--disabled-output-dir",
+            disabled_output,
         ]
     )
     if result.returncode == 0:
@@ -311,12 +462,16 @@ def test_annotations_nonzero(scratch: str) -> None:
 def test_annotations_empty(scratch: str) -> None:
     repo, first, _second = MAT._make_fixture(scratch)
     output = os.path.join(scratch, "out")
+    disabled_output = os.path.join(scratch, "out-disabled")
     os.makedirs(output)
+    os.makedirs(disabled_output)
     before = sorted(os.listdir(output))
     annotations = os.path.join(scratch, "annotations")
     make = os.path.join(scratch, "make")
+    nm = os.path.join(scratch, "nm")
     _annotations_shim(annotations, os.path.join(scratch, "ann.log"), "", exit_code=0)
     _make_shim(make, os.path.join(scratch, "make.log"))
+    _nm_shim(nm, os.path.join(scratch, "nm.log"), output, disabled_output)
     materialize._TEST_EXPECTED_BASE_COMMIT_OVERRIDE = first
     result = _run_handoff(
         [
@@ -334,8 +489,14 @@ def test_annotations_empty(scratch: str) -> None:
             make,
             "--make-sha256",
             _sha(make),
+            "--nm",
+            nm,
+            "--nm-sha256",
+            _sha(nm),
             "--output-dir",
             output,
+            "--disabled-output-dir",
+            disabled_output,
         ]
     )
     if result.returncode == 0:
@@ -349,11 +510,15 @@ def test_annotations_empty(scratch: str) -> None:
 def test_missing_fragment_symbols(scratch: str) -> None:
     repo, first, _second = MAT._make_fixture(scratch)
     output = os.path.join(scratch, "out")
+    disabled_output = os.path.join(scratch, "out-disabled")
     os.makedirs(output)
+    os.makedirs(disabled_output)
     annotations = os.path.join(scratch, "annotations")
     make = os.path.join(scratch, "make")
+    nm = os.path.join(scratch, "nm")
     _annotations_shim(annotations, os.path.join(scratch, "ann.log"), "CONFIG_FOO=y\n")
     _make_shim(make, os.path.join(scratch, "make.log"), strip_fragment=True)
+    _nm_shim(nm, os.path.join(scratch, "nm.log"), output, disabled_output)
     materialize._TEST_EXPECTED_BASE_COMMIT_OVERRIDE = first
     result = _run_handoff(
         [
@@ -371,8 +536,14 @@ def test_missing_fragment_symbols(scratch: str) -> None:
             make,
             "--make-sha256",
             _sha(make),
+            "--nm",
+            nm,
+            "--nm-sha256",
+            _sha(nm),
             "--output-dir",
             output,
+            "--disabled-output-dir",
+            disabled_output,
         ]
     )
     if result.returncode == 0:
@@ -381,11 +552,80 @@ def test_missing_fragment_symbols(scratch: str) -> None:
         raise AssertionError(result.stderr.decode())
 
 
+def _test_artifact_symbol_failure(
+    scratch: str, *, omit_enabled: bool = False, leak_disabled: bool = False
+) -> None:
+    repo, first, _second = MAT._make_fixture(scratch)
+    output = os.path.join(scratch, "out")
+    disabled_output = os.path.join(scratch, "out-disabled")
+    os.makedirs(output)
+    os.makedirs(disabled_output)
+    annotations = os.path.join(scratch, "annotations")
+    make = os.path.join(scratch, "make")
+    nm = os.path.join(scratch, "nm")
+    _annotations_shim(annotations, os.path.join(scratch, "ann.log"), "CONFIG_FOO=y\n")
+    _make_shim(make, os.path.join(scratch, "make.log"))
+    _nm_shim(
+        nm,
+        os.path.join(scratch, "nm.log"),
+        output,
+        disabled_output,
+        omit_enabled=omit_enabled,
+        leak_disabled=leak_disabled,
+    )
+    materialize._TEST_EXPECTED_BASE_COMMIT_OVERRIDE = first
+    result = _run_handoff(
+        [
+            "--worktree",
+            repo,
+            "--git",
+            GIT,
+            "--git-sha256",
+            GIT_SHA256,
+            "--annotations",
+            annotations,
+            "--annotations-sha256",
+            _sha(annotations),
+            "--make",
+            make,
+            "--make-sha256",
+            _sha(make),
+            "--nm",
+            nm,
+            "--nm-sha256",
+            _sha(nm),
+            "--output-dir",
+            output,
+            "--disabled-output-dir",
+            disabled_output,
+        ]
+    )
+    if result.returncode == 0:
+        raise AssertionError("artifact symbol mismatch succeeded")
+    if CP_SPP_DIAG_TRACE_CORE_HANDOFF.encode() not in result.stderr:
+        raise AssertionError(result.stderr.decode())
+    if not Path(output, "core-built").is_file():
+        raise AssertionError("standalone core object was not built before final-artifact refusal")
+    for target in handoff.CANONICAL_CERT_TARGETS:
+        if Path(repo, target).exists():
+            raise AssertionError(f"generated certificate input was not removed: {target}")
+
+
+def test_kbuild_inclusion_missing(scratch: str) -> None:
+    _test_artifact_symbol_failure(scratch, omit_enabled=True)
+
+
+def test_disabled_symbol_leak(scratch: str) -> None:
+    _test_artifact_symbol_failure(scratch, leak_disabled=True)
+
+
 CASES = (
     ("happy-path", test_happy_path),
     ("annotations-nonzero", test_annotations_nonzero),
     ("annotations-empty", test_annotations_empty),
     ("missing-fragment-symbols", test_missing_fragment_symbols),
+    ("kbuild-inclusion-missing", test_kbuild_inclusion_missing),
+    ("disabled-symbol-leak", test_disabled_symbol_leak),
 )
 
 
@@ -395,6 +635,18 @@ def main() -> int:
         _ok("forbidden-argv-chokepoint")
     except Exception as exc:  # noqa: BLE001
         _fail("forbidden-argv-chokepoint", exc)
+    for name, fn in (
+        ("output-directory-alias", test_output_directory_alias),
+        ("fragment-capture-mismatch", test_fragment_capture_mismatch),
+    ):
+        scratch = tempfile.mkdtemp(prefix=f"k1-handoff-{name}-", dir="/var/tmp")
+        try:
+            fn(scratch)
+            _ok(name)
+        except Exception as exc:  # noqa: BLE001
+            _fail(name, exc)
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
     for name, fn in CASES:
         scratch = tempfile.mkdtemp(prefix=f"k1-handoff-{name}-", dir="/var/tmp")
         materialize._TEST_EXPECTED_BASE_COMMIT_OVERRIDE = None
