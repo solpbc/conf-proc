@@ -76,9 +76,14 @@ def _annotations_shim(path: str, log: str, stdout_text: str, exit_code: int = 0)
     _write_exec(
         path,
         "#!/bin/sh\n"
+        f'printf "cwd=%s\\n" "$PWD" >> "{log}"\n'
         f'printf "%s\\n" "$@" >> "{log}"\n'
         f"exit_code={exit_code}\n"
-        "if [ \"$1\" = --export ]; then\n"
+        "if [ \"$#\" -eq 7 ] && [ \"$1\" = -f ] && "
+        "[ \"$2\" = debian.azure-fde-6.8/config/annotations ] && "
+        "[ \"$3\" = --arch ] && [ \"$4\" = amd64 ] && "
+        "[ \"$5\" = --flavour ] && [ \"$6\" = azure-fde ] && "
+        "[ \"$7\" = --export ]; then\n"
         f'  cat "{payload}"\n'
         "fi\n"
         "exit $exit_code\n",
@@ -90,6 +95,7 @@ def _make_shim(path: str, log: str, *, strip_fragment: bool = False) -> None:
     _write_exec(
         path,
         "#!/bin/sh\n"
+        f'printf "cwd=%s\\n" "$PWD" >> "{log}"\n'
         f'printf "%s\\n" "$@" >> "{log}"\n'
         "outdir=\n"
         "has_olddef=\n"
@@ -118,6 +124,12 @@ def _trap_shim(path: str, log: str) -> None:
 
 
 def _run_handoff(argv: list[str]):
+    argv = list(argv)
+    if "--manifest" not in argv:
+        worktree = argv[argv.index("--worktree") + 1]
+        argv.extend(
+            ["--manifest", MAT.FIXTURE_MANIFESTS[os.path.realpath(worktree)]]
+        )
     stdout = _ByteStdout()
     stderr = io.StringIO()
     old_out, old_err = sys.stdout, sys.stderr
@@ -184,13 +196,27 @@ def test_happy_path(scratch: str) -> None:
         raise AssertionError(result.stderr.decode())
     ann_lines = [line for line in Path(ann_log).read_text(encoding="utf-8").splitlines() if line]
     make_lines = [line for line in Path(make_log).read_text(encoding="utf-8").splitlines() if line]
-    if ann_lines != ["--export"]:
+    expected_ann = [
+        f"cwd={repo}",
+        "-f",
+        handoff.ANNOTATIONS_CONFIG,
+        "--arch",
+        "amd64",
+        "--flavour",
+        "azure-fde",
+        "--export",
+    ]
+    if ann_lines != expected_ann:
         raise AssertionError(f"annotations argv {ann_lines}")
-    if make_lines != [f"O={output} olddefconfig", f"O={output}"]:
-        # shims log each arg on its own line
-        expected = [f"O={output}", "olddefconfig", f"O={output}"]
-        if make_lines != expected:
-            raise AssertionError(f"make argv {make_lines}")
+    expected_make = [
+        f"cwd={repo}",
+        f"O={output}",
+        "olddefconfig",
+        f"cwd={repo}",
+        f"O={output}",
+    ]
+    if make_lines != expected_make:
+        raise AssertionError(f"make argv {make_lines}")
     config = Path(output, ".config").read_text(encoding="utf-8")
     y_lines = handoff._y_symbols(config)
     for symbol in handoff.FRAGMENT_SYMBOLS:
@@ -213,6 +239,7 @@ def test_forbidden_argv_chokepoint() -> None:
     HermeticGuard.run_tool = boom  # type: ignore[assignment]
     try:
         for argv in (
+            ["/opt/annotations", "--export"],
             ["/usr/bin/git", "fetch"],
             ["/usr/bin/git", "checkout", "HEAD"],
             ["/usr/bin/git", "reset", "--hard"],

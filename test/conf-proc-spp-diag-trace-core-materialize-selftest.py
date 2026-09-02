@@ -33,6 +33,8 @@ from conf_proc_spp_diag_trace_core_materialize_reasons import (  # noqa: E402
     CP_SPP_DIAG_TRACE_CORE_INPUT_MISSING,
     CP_SPP_DIAG_TRACE_CORE_INPUT_UNMANIFESTED,
     CP_SPP_DIAG_TRACE_CORE_PARTIAL_APPLY,
+    CP_SPP_DIAG_TRACE_CORE_REPLACE_CHANGED,
+    CP_SPP_DIAG_TRACE_CORE_SCHEMA,
     CP_SPP_DIAG_TRACE_CORE_SYMLINK,
     SppDiagTraceCoreMaterializeError,
 )
@@ -41,6 +43,7 @@ from conf_proc_spp_diag_trace_core_materialize_reasons import (  # noqa: E402
 GIT = os.path.realpath(shutil.which("git") or "/usr/bin/git")
 GIT_SHA256 = hashlib.sha256(Path(GIT).read_bytes()).hexdigest()
 FAILURES = 0
+FIXTURE_MANIFESTS: dict[str, str] = {}
 
 
 def _run(argv: list[str], cwd: str) -> subprocess.CompletedProcess:
@@ -53,6 +56,34 @@ def _git(cwd: str, *args: str) -> str:
         cwd,
     )
     return result.stdout.decode("utf-8", "replace")
+
+
+def _write_fixture_manifest(repo: str, scratch: str) -> str:
+    parsed = parse_core_manifest(
+        (ROOT / "spp-diag-trace-core-src" / "manifest.json").read_bytes()
+    )
+    raw = dict(parsed.raw)
+    targets = []
+    for target in parsed.raw["targets"]:
+        updated = dict(target)
+        if target["kind"] == "REPLACE":
+            path = Path(repo) / target["destination"]
+            preimage = path.read_bytes()
+            mode = stat.S_IMODE(path.stat().st_mode)
+            postimage = materialize._replace_postimage(preimage, target["anchor_line"])
+            updated.update(
+                {
+                    "preimage_mode": mode,
+                    "preimage_sha256": hashlib.sha256(preimage).hexdigest(),
+                    "postimage_mode": mode,
+                    "postimage_sha256": hashlib.sha256(postimage).hexdigest(),
+                }
+            )
+        targets.append(updated)
+    raw["targets"] = targets
+    path = os.path.join(scratch, "fixture-manifest.json")
+    Path(path).write_bytes(canonical_dumps(raw))
+    return path
 
 
 def _tree_fingerprint(root: str) -> dict[str, str]:
@@ -90,6 +121,7 @@ def _make_fixture(scratch: str) -> tuple[str, str, str]:
     _git(repo, "commit", "-m", "second")
     second = _git(repo, "rev-parse", "--verify", "HEAD").strip()
     _git(repo, "checkout", "-q", first)
+    FIXTURE_MANIFESTS[os.path.realpath(repo)] = _write_fixture_manifest(repo, scratch)
     return repo, first, second
 
 
@@ -118,9 +150,9 @@ def _materialize(worktree: str, extra: list[str] | None = None):
         GIT,
         "--git-sha256",
         GIT_SHA256,
-        "--manifest",
-        str(ROOT / "spp-diag-trace-core-src" / "manifest.json"),
     ]
+    if not extra or "--manifest" not in extra:
+        argv.extend(["--manifest", FIXTURE_MANIFESTS[os.path.realpath(worktree)]])
     if extra:
         argv.extend(extra)
     stdout = _ByteStdout()
@@ -159,11 +191,12 @@ REAL_MANIFEST = ROOT / "spp-diag-trace-core-src" / "manifest.json"
 
 def _throwaway_manifest(
     scratch: str,
+    repo: str,
     retarget: dict[str, str],
     *,
     authority_abs: bool = False,
 ) -> str:
-    parsed = parse_core_manifest(REAL_MANIFEST.read_bytes())
+    parsed = parse_core_manifest(Path(FIXTURE_MANIFESTS[os.path.realpath(repo)]).read_bytes())
     raw = dict(parsed.raw)
     raw["inputs"] = [
         dict(entry, path=retarget.get(entry["path"], entry["path"]))
@@ -244,7 +277,7 @@ def test_missing_input(scratch: str) -> None:
     copied = Path(scratch) / "core.h"
     shutil.copy2(ROOT / rel, copied)
     copied.rename(Path(scratch) / "core.h.hidden-for-test")
-    manifest = _throwaway_manifest(scratch, {rel: str(copied)})
+    manifest = _throwaway_manifest(scratch, repo, {rel: str(copied)})
     materialize._TEST_EXPECTED_BASE_COMMIT_OVERRIDE = first
     before = _tree_fingerprint(repo)
     result = _materialize(repo, ["--manifest", manifest])
@@ -260,7 +293,7 @@ def test_changed_input(scratch: str) -> None:
     copied = Path(scratch) / "Kconfig"
     shutil.copy2(ROOT / rel, copied)
     copied.write_bytes(copied.read_bytes() + b"\n# mutated\n")
-    manifest = _throwaway_manifest(scratch, {rel: str(copied)})
+    manifest = _throwaway_manifest(scratch, repo, {rel: str(copied)})
     materialize._TEST_EXPECTED_BASE_COMMIT_OVERRIDE = first
     before = _tree_fingerprint(repo)
     result = _materialize(repo, ["--manifest", manifest])
@@ -276,7 +309,7 @@ def test_unmanifested_input(scratch: str) -> None:
     shutil.copytree(ROOT / "spp-diag-trace-core-src", isolated / "spp-diag-trace-core-src")
     extra = isolated / CORE_SRC_REL / "extra-unmanifested.c"
     extra.write_text("/* extra */\n", encoding="utf-8")
-    manifest = _throwaway_manifest(scratch, {}, authority_abs=True)
+    manifest = _throwaway_manifest(scratch, repo, {}, authority_abs=True)
     previous_root = materialize.REPO_ROOT
     materialize.REPO_ROOT = isolated
     try:
@@ -326,6 +359,87 @@ def test_partial_apply(scratch: str) -> None:
         raise AssertionError("partial apply succeeded")
     _expect_reason(result.stderr, CP_SPP_DIAG_TRACE_CORE_PARTIAL_APPLY)
     _assert_unchanged(before, repo)
+
+
+def test_replace_changed_digest(scratch: str) -> None:
+    repo, _first, _second = _make_fixture(scratch)
+    makefile = Path(repo, "security", "Makefile")
+    makefile.write_bytes(makefile.read_bytes() + b"# changed base\n")
+    _git(repo, "add", "security/Makefile")
+    _git(repo, "commit", "-m", "changed replacement bytes")
+    materialize._TEST_EXPECTED_BASE_COMMIT_OVERRIDE = _git(
+        repo, "rev-parse", "--verify", "HEAD"
+    ).strip()
+    before = _tree_fingerprint(repo)
+    result = _materialize(repo)
+    if result.returncode == 0:
+        raise AssertionError("changed REPLACE digest succeeded")
+    _expect_reason(result.stderr, CP_SPP_DIAG_TRACE_CORE_REPLACE_CHANGED)
+    _assert_unchanged(before, repo)
+
+
+def test_replace_changed_mode(scratch: str) -> None:
+    repo, _first, _second = _make_fixture(scratch)
+    makefile = Path(repo, "security", "Makefile")
+    os.chmod(makefile, 0o755)
+    _git(repo, "add", "security/Makefile")
+    _git(repo, "commit", "-m", "changed replacement mode")
+    materialize._TEST_EXPECTED_BASE_COMMIT_OVERRIDE = _git(
+        repo, "rev-parse", "--verify", "HEAD"
+    ).strip()
+    before = _tree_fingerprint(repo)
+    result = _materialize(repo)
+    if result.returncode == 0:
+        raise AssertionError("changed REPLACE mode succeeded")
+    _expect_reason(result.stderr, CP_SPP_DIAG_TRACE_CORE_REPLACE_CHANGED)
+    _assert_unchanged(before, repo)
+
+
+def test_replace_wrong_postimage(scratch: str) -> None:
+    repo, first, _second = _make_fixture(scratch)
+    raw = dict(
+        parse_core_manifest(
+            Path(FIXTURE_MANIFESTS[os.path.realpath(repo)]).read_bytes()
+        ).raw
+    )
+    targets = [dict(target) for target in raw["targets"]]
+    targets[-1]["postimage_sha256"] = "0" * 64
+    raw["targets"] = targets
+    manifest = os.path.join(scratch, "wrong-postimage-manifest.json")
+    Path(manifest).write_bytes(canonical_dumps(raw))
+    materialize._TEST_EXPECTED_BASE_COMMIT_OVERRIDE = first
+    before = _tree_fingerprint(repo)
+    result = _materialize(repo, ["--manifest", manifest])
+    if result.returncode == 0:
+        raise AssertionError("wrong REPLACE postimage succeeded")
+    _expect_reason(result.stderr, CP_SPP_DIAG_TRACE_CORE_SCHEMA)
+    _assert_unchanged(before, repo)
+
+
+def test_replace_boundary_mutation(scratch: str) -> None:
+    repo, first, _second = _make_fixture(scratch)
+    materialize._TEST_EXPECTED_BASE_COMMIT_OVERRIDE = first
+    original = materialize._preflight_destinations
+    boundary_state: dict[str, str] = {}
+
+    def mutate_after_preflight(worktree: str, manifest) -> None:
+        original(worktree, manifest)
+        makefile = Path(worktree, "security", "Makefile")
+        makefile.write_bytes(makefile.read_bytes() + b"# boundary mutation\n")
+        boundary_state.update(_tree_fingerprint(worktree))
+
+    materialize._preflight_destinations = mutate_after_preflight
+    try:
+        result = _materialize(repo)
+    finally:
+        materialize._preflight_destinations = original
+    if result.returncode == 0:
+        raise AssertionError("boundary-mutated REPLACE preimage succeeded")
+    _expect_reason(result.stderr, CP_SPP_DIAG_TRACE_CORE_REPLACE_CHANGED)
+    if not boundary_state:
+        raise AssertionError("boundary mutation did not run")
+    if _tree_fingerprint(repo) != boundary_state:
+        raise AssertionError("apply changed targets after boundary mutation")
 
 
 def test_symlink_worktree(scratch: str) -> None:
@@ -419,6 +533,17 @@ def test_happy_path_and_determinism(scratch: str) -> None:
             raise AssertionError(f"{create.destination} sha256 {digest} != {create.sha256}")
         if hashlib.sha256((Path(repo_b) / create.destination).read_bytes()).hexdigest() != digest:
             raise AssertionError("CREATE bytes differ across two staging runs")
+    fixture_manifest = parse_core_manifest(
+        Path(FIXTURE_MANIFESTS[os.path.realpath(repo_a)]).read_bytes()
+    )
+    for replace in fixture_manifest.replaces:
+        staged = Path(repo_a) / replace.destination
+        digest = hashlib.sha256(staged.read_bytes()).hexdigest()
+        mode = stat.S_IMODE(staged.stat().st_mode)
+        if digest != replace.postimage_sha256 or mode != replace.postimage_mode:
+            raise AssertionError(
+                f"{replace.destination} postimage mode/digest {(mode, digest)}"
+            )
     makefile = (Path(repo_a) / "security/Makefile").read_text(encoding="utf-8")
     kconfig = (Path(repo_a) / "security/Kconfig").read_text(encoding="utf-8")
     if "obj-$(CONFIG_SECURITY_SPP_DIAG_TRACE_CORE) += spp_diag_trace_core/" not in makefile:
@@ -433,7 +558,7 @@ def test_happy_path_and_determinism(scratch: str) -> None:
     parsed_b["base_commit"] = "same"
     if canonical_dumps(parsed_a) != canonical_dumps(parsed_b):
         raise AssertionError("derivation records differ")
-    mutated = parse_core_manifest((ROOT / "spp-diag-trace-core-src" / "manifest.json").read_bytes())
+    mutated = fixture_manifest
     bad_path = os.path.join(scratch, "bad-manifest.json")
     raw = dict(mutated.raw)
     raw_targets = list(raw["targets"])
@@ -459,6 +584,10 @@ CASES = (
     ("unmanifested-input", test_unmanifested_input),
     ("create-collision", test_create_collision),
     ("partial-apply", test_partial_apply),
+    ("replace-changed-digest", test_replace_changed_digest),
+    ("replace-changed-mode", test_replace_changed_mode),
+    ("replace-wrong-postimage", test_replace_wrong_postimage),
+    ("replace-boundary-mutation", test_replace_boundary_mutation),
     ("symlink-worktree", test_symlink_worktree),
     ("git-probe-empty", test_git_probe_empty),
     ("git-probe-unparseable", test_git_probe_unparseable),

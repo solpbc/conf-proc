@@ -49,7 +49,18 @@ _AUTHORITY_KEYS: Final = frozenset({"header", "header_sha256", "source", "source
 _FRAGMENT_KEYS: Final = frozenset({"path", "sha256"})
 _INPUT_KEYS: Final = frozenset({"path", "sha256", "mode"})
 _CREATE_KEYS: Final = frozenset({"kind", "destination", "source", "mode", "sha256"})
-_REPLACE_KEYS: Final = frozenset({"kind", "destination", "anchor_line", "placement"})
+_REPLACE_KEYS: Final = frozenset(
+    {
+        "kind",
+        "destination",
+        "anchor_line",
+        "placement",
+        "preimage_mode",
+        "preimage_sha256",
+        "postimage_mode",
+        "postimage_sha256",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -80,6 +91,10 @@ class ReplaceTarget:
     destination: str
     anchor_line: str
     placement: str
+    preimage_mode: int
+    preimage_sha256: str
+    postimage_mode: int
+    postimage_sha256: str
 
 
 @dataclass(frozen=True)
@@ -175,11 +190,19 @@ def parse_core_manifest(data: bytes) -> CoreManifest:
             _require(type(entry["destination"]) is str and entry["destination"], CP_SPP_DIAG_TRACE_CORE_TYPE, "REPLACE destination must be a nonempty string")
             _require(type(entry["anchor_line"]) is str and entry["anchor_line"], CP_SPP_DIAG_TRACE_CORE_TYPE, "REPLACE anchor_line must be a nonempty string")
             _require(entry["placement"] == "eof-append", CP_SPP_DIAG_TRACE_CORE_SCHEMA, "REPLACE placement must be eof-append")
+            _require(type(entry["preimage_mode"]) is int and 0 <= entry["preimage_mode"] <= 0o7777, CP_SPP_DIAG_TRACE_CORE_TYPE, "REPLACE preimage_mode must be an integer permission")
+            _require(_is_sha256(entry["preimage_sha256"]), CP_SPP_DIAG_TRACE_CORE_TYPE, "REPLACE preimage_sha256 must be 64 lowercase hex characters")
+            _require(type(entry["postimage_mode"]) is int and 0 <= entry["postimage_mode"] <= 0o7777, CP_SPP_DIAG_TRACE_CORE_TYPE, "REPLACE postimage_mode must be an integer permission")
+            _require(_is_sha256(entry["postimage_sha256"]), CP_SPP_DIAG_TRACE_CORE_TYPE, "REPLACE postimage_sha256 must be 64 lowercase hex characters")
             replaces.append(
                 ReplaceTarget(
                     destination=entry["destination"],
                     anchor_line=entry["anchor_line"],
                     placement=entry["placement"],
+                    preimage_mode=entry["preimage_mode"],
+                    preimage_sha256=entry["preimage_sha256"],
+                    postimage_mode=entry["postimage_mode"],
+                    postimage_sha256=entry["postimage_sha256"],
                 )
             )
         else:

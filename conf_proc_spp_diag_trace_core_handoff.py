@@ -37,6 +37,7 @@ FRAGMENT_SYMBOLS = (
 EXPORT_NAME = ".config.export"
 CONFIG_NAME = ".config"
 TEMP_SUFFIX = ".spp-diag-trace-core-handoff-tmp"
+ANNOTATIONS_CONFIG = "debian.azure-fde-6.8/config/annotations"
 
 
 def _fail(
@@ -63,7 +64,16 @@ def require_handoff_argv(
 
     o_flag = "O=" + output_dir
     allowed = (
-        [annotations, "--export"],
+        [
+            annotations,
+            "-f",
+            ANNOTATIONS_CONFIG,
+            "--arch",
+            "amd64",
+            "--flavour",
+            "azure-fde",
+            "--export",
+        ],
         [make, o_flag, "olddefconfig"],
         [make, o_flag],
     )
@@ -72,7 +82,10 @@ def require_handoff_argv(
     _fail(
         CP_SPP_DIAG_TRACE_CORE_FORBIDDEN_COMMAND,
         "handoff argv is not allowlisted",
-        expected="annotations --export | make O=<dir> olddefconfig | make O=<dir>",
+        expected=(
+            "annotations -f debian.azure-fde-6.8/config/annotations --arch amd64 "
+            "--flavour azure-fde --export | make O=<dir> olddefconfig | make O=<dir>"
+        ),
         observed=" ".join(argv),
     )
 
@@ -167,6 +180,7 @@ def run_handoff_steps(
     *,
     annotations: str,
     make: str,
+    worktree: str,
     output_dir: str,
     fragment_path: Path,
 ) -> dict:
@@ -175,16 +189,25 @@ def run_handoff_steps(
     with hermetic_lockdown():
         exported = _run_handoff_tool(
             guard,
-            [annotations, "--export"],
+            [
+                annotations,
+                "-f",
+                ANNOTATIONS_CONFIG,
+                "--arch",
+                "amd64",
+                "--flavour",
+                "azure-fde",
+                "--export",
+            ],
             annotations=annotations,
             make=make,
             output_dir=output_dir,
-            cwd=output_dir,
+            cwd=worktree,
         )
         if exported.returncode != 0 or not exported.stdout:
             _fail(
                 CP_SPP_DIAG_TRACE_CORE_HANDOFF,
-                "annotations --export must exit 0 with nonempty stdout",
+                "annotations export must exit 0 with nonempty stdout",
                 path=annotations,
                 expected="exit 0 and nonempty export",
                 observed=f"exit {exported.returncode} bytes {len(exported.stdout)}",
@@ -205,7 +228,7 @@ def run_handoff_steps(
             annotations=annotations,
             make=make,
             output_dir=output_dir,
-            cwd=output_dir,
+            cwd=worktree,
         )
         if olddef.returncode != 0:
             _fail(
@@ -232,7 +255,7 @@ def run_handoff_steps(
             annotations=annotations,
             make=make,
             output_dir=output_dir,
-            cwd=output_dir,
+            cwd=worktree,
         )
         if built.returncode != 0:
             _fail(
@@ -280,6 +303,7 @@ def main(argv: list[str] | None = None) -> int:
             guard,
             annotations=annotations_abs,
             make=make_abs,
+            worktree=worktree,
             output_dir=output_dir,
             fragment_path=fragment,
         )

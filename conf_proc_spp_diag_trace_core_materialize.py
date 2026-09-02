@@ -17,6 +17,7 @@ from conf_proc_json import canonical_dumps
 from conf_proc_reasons import ApplianceError
 from conf_proc_spp_diag_trace_core_manifest import (
     CoreManifest,
+    ReplaceTarget,
     parse_core_manifest,
 )
 from conf_proc_spp_diag_trace_core_materialize_reasons import (
@@ -33,7 +34,9 @@ from conf_proc_spp_diag_trace_core_materialize_reasons import (
     CP_SPP_DIAG_TRACE_CORE_INPUT_UNMANIFESTED,
     CP_SPP_DIAG_TRACE_CORE_PARTIAL_APPLY,
     CP_SPP_DIAG_TRACE_CORE_PATH_ESCAPE,
+    CP_SPP_DIAG_TRACE_CORE_REPLACE_CHANGED,
     CP_SPP_DIAG_TRACE_CORE_REPLACE_MISSING,
+    CP_SPP_DIAG_TRACE_CORE_SCHEMA,
     CP_SPP_DIAG_TRACE_CORE_STAGING,
     CP_SPP_DIAG_TRACE_CORE_SYMLINK,
     CP_SPP_DIAG_TRACE_CORE_TOOL,
@@ -374,6 +377,68 @@ def _preflight_inputs(manifest: CoreManifest) -> None:
                     )
 
 
+def _replace_postimage(existing: bytes, anchor_line: str) -> bytes:
+    body = existing
+    if body and not body.endswith(b"\n"):
+        body += b"\n"
+    return body + anchor_line.encode("utf-8") + b"\n"
+
+
+def _validated_replace_images(
+    dest: str, replace: ReplaceTarget
+) -> tuple[bytes, int, bytes]:
+    _refuse_symlink(dest)
+    info = _lstat(dest)
+    if info is None or not stat.S_ISREG(info.st_mode):
+        _fail(
+            CP_SPP_DIAG_TRACE_CORE_REPLACE_MISSING,
+            "REPLACE destination is missing",
+            path=replace.destination,
+        )
+    existing = Path(dest).read_bytes()
+    anchor = replace.anchor_line.encode("utf-8")
+    if anchor in existing.splitlines() or anchor in existing:
+        _fail(
+            CP_SPP_DIAG_TRACE_CORE_PARTIAL_APPLY,
+            "REPLACE anchor line is already present",
+            path=replace.destination,
+            expected=f"absent {replace.anchor_line!r}",
+            observed="anchor line already in file",
+        )
+    mode = stat.S_IMODE(info.st_mode)
+    if mode != replace.preimage_mode:
+        _fail(
+            CP_SPP_DIAG_TRACE_CORE_REPLACE_CHANGED,
+            "REPLACE destination mode differs from the base preimage",
+            path=replace.destination,
+            expected=oct(replace.preimage_mode),
+            observed=oct(mode),
+        )
+    digest = _sha256_bytes(existing)
+    if digest != replace.preimage_sha256:
+        _fail(
+            CP_SPP_DIAG_TRACE_CORE_REPLACE_CHANGED,
+            "REPLACE destination digest differs from the base preimage",
+            path=replace.destination,
+            expected=replace.preimage_sha256,
+            observed=digest,
+        )
+    postimage = _replace_postimage(existing, replace.anchor_line)
+    postimage_digest = _sha256_bytes(postimage)
+    if (
+        replace.postimage_mode != replace.preimage_mode
+        or postimage_digest != replace.postimage_sha256
+    ):
+        _fail(
+            CP_SPP_DIAG_TRACE_CORE_SCHEMA,
+            "REPLACE postimage does not match its declared mode and digest",
+            path=replace.destination,
+            expected=f"mode={oct(replace.postimage_mode)} sha256={replace.postimage_sha256}",
+            observed=f"mode={oct(replace.preimage_mode)} sha256={postimage_digest}",
+        )
+    return existing, mode, postimage
+
+
 def _preflight_destinations(worktree: str, manifest: CoreManifest) -> None:
     for create in manifest.creates:
         dest = _inside_worktree(worktree, create.destination)
@@ -387,30 +452,7 @@ def _preflight_destinations(worktree: str, manifest: CoreManifest) -> None:
             )
     for replace in manifest.replaces:
         dest = _inside_worktree(worktree, replace.destination)
-        _refuse_symlink(dest)
-        info = _lstat(dest)
-        if info is None or not stat.S_ISREG(info.st_mode):
-            _fail(
-                CP_SPP_DIAG_TRACE_CORE_REPLACE_MISSING,
-                "REPLACE destination is missing",
-                path=replace.destination,
-            )
-        text = Path(dest).read_text(encoding="utf-8")
-        if replace.anchor_line in text.splitlines() or replace.anchor_line in text:
-            _fail(
-                CP_SPP_DIAG_TRACE_CORE_PARTIAL_APPLY,
-                "REPLACE anchor line is already present",
-                path=replace.destination,
-                expected=f"absent {replace.anchor_line!r}",
-                observed="anchor line already in file",
-            )
-
-
-def _replace_postimage(existing: bytes, anchor_line: str) -> bytes:
-    body = existing
-    if body and not body.endswith(b"\n"):
-        body += b"\n"
-    return body + anchor_line.encode("utf-8") + b"\n"
+        _validated_replace_images(dest, replace)
 
 
 def _apply(worktree: str, manifest: CoreManifest) -> None:
@@ -437,10 +479,17 @@ def _apply(worktree: str, manifest: CoreManifest) -> None:
             planned.append((dest, data, create.mode))
         for replace in manifest.replaces:
             dest = _inside_worktree(worktree, replace.destination)
-            existing = Path(dest).read_bytes()
-            original_mode = stat.S_IMODE(os.lstat(dest).st_mode)
+            existing, original_mode, postimage = _validated_replace_images(
+                dest, replace
+            )
             replace_originals[dest] = (existing, original_mode)
-            planned.append((dest, _replace_postimage(existing, replace.anchor_line), None))
+            planned.append(
+                (
+                    dest,
+                    postimage,
+                    replace.postimage_mode,
+                )
+            )
         create_dests = {
             _inside_worktree(worktree, item.destination) for item in manifest.creates
         }
@@ -530,7 +579,14 @@ def _derivation_record(manifest: CoreManifest, base_commit: str) -> dict:
             for item in manifest.creates
         ],
         "replaces": [
-            {"destination": item.destination, "anchor_line": item.anchor_line}
+            {
+                "destination": item.destination,
+                "anchor_line": item.anchor_line,
+                "preimage_mode": item.preimage_mode,
+                "preimage_sha256": item.preimage_sha256,
+                "postimage_mode": item.postimage_mode,
+                "postimage_sha256": item.postimage_sha256,
+            }
             for item in manifest.replaces
         ],
         "diagnostic_config_fragment": {
