@@ -242,7 +242,7 @@ def check_hcla_and_snp(vcek: x509.Certificate):
         "<5I", hcla, 1216
     )
     assert (data_size, runtime_version, runtime_report_type, hash_type) == (20 + claim_size, 1, 2, 1)
-    assert report_size == 1184 + data_size
+    assert report_size == 32 + 1184 + data_size
     claim_start = 1236
     claim_end = claim_start + claim_size
     runtime_json = hcla[claim_start:claim_end]
