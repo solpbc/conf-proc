@@ -337,6 +337,7 @@ def replay_spp_diag_ima_pcr10(
     if failure is None:
         return result
     source = None
+    measurement_byte_count = None
     expected_pcr10_sha256 = None
     result = None
     _fail(failure, location[0], location[1])

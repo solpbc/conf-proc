@@ -61,7 +61,7 @@ CK_NAMES = (
     b"sol-spp-diag-release-v1",
     b"sol-spp-diag-terminal-v1",
 )
-_FILL = bytes(2300)
+_VIRTUAL_BODY_BYTES = 2300
 _NG_DATA = (
     (40).to_bytes(4, "little")
     + b"sha256:\0"
@@ -287,26 +287,32 @@ def _expect_error(
     raise AssertionError(f"expected {reason}")
 
 
-_UNRELATED_DATA = _ima_buf_data(_FILL, _UNRELATED_EVENT)
-_UNRELATED_SHA1 = hashlib.sha1(_UNRELATED_DATA).digest()
 _NG_SHA1 = hashlib.sha1(_NG_DATA).digest()
-_OPAQUE_SHA1 = hashlib.sha1(_FILL).digest()
 _CK_BUF = bytes(range(256))
 _CK_DATA = tuple(_ima_buf_data(_CK_BUF, name) for name in CK_NAMES)
 _CK_SHA1 = tuple(hashlib.sha1(item).digest() for item in _CK_DATA)
+
+
+def _virtual_body(index: int) -> bytes:
+    seed = index.to_bytes(8, "little")
+    block = hashlib.sha256(b"spp-memory-entry-v1\0" + seed).digest()
+    repeats = (_VIRTUAL_BODY_BYTES - len(seed) + len(block) - 1) // len(block)
+    return (seed + block * repeats)[:_VIRTUAL_BODY_BYTES]
 
 
 def _virtual_spec(index: int) -> tuple[int, bytes, bytes, bytes]:
     if index < 3:
         return 10, b"ima-buf", _CK_DATA[index], _CK_SHA1[index]
     kind = index % 4
+    body = _virtual_body(index)
     if kind == 0:
-        return 10, b"ima-buf", _UNRELATED_DATA, _UNRELATED_SHA1
+        data = _ima_buf_data(body, _UNRELATED_EVENT)
+        return 10, b"ima-buf", data, hashlib.sha1(data).digest()
     if kind == 1:
         return 8, b"ima-ng", _NG_DATA, _NG_SHA1
     if kind == 2:
-        return 10, b"opaque", _FILL, _OPAQUE_SHA1
-    return 11, b"opaque", _FILL, _OPAQUE_SHA1
+        return 10, b"opaque", body, hashlib.sha1(body).digest()
+    return 11, b"opaque", body, hashlib.sha1(body).digest()
 
 
 def _virtual_pcr(entry_count: int) -> bytes:
@@ -903,6 +909,20 @@ def test_traceback_privacy() -> None:
         traceback = traceback.tb_next
     assert product_frames == ["replay_spp_diag_ima_pcr10", "_fail"]
 
+    count_secret = "count-secret-7f3d"
+    exc = _expect_error(TYPE, span=count_secret, entry_index=None, byte_offset=0)
+    traceback = exc.__traceback__
+    product_frames = []
+    while traceback is not None:
+        if traceback.tb_frame.f_code.co_filename.endswith("conf_proc_spp_diag_ima.py"):
+            product_frames.append(traceback.tb_frame.f_code.co_name)
+            assert count_secret not in traceback.tb_frame.f_locals.values()
+            for value in traceback.tb_frame.f_locals.values():
+                if type(value) is str:
+                    assert count_secret not in value
+        traceback = traceback.tb_next
+    assert product_frames == ["replay_spp_diag_ima_pcr10", "_fail"]
+
 
 def test_privacy_unexpected_exception() -> None:
     original = ima_mod.hashlib.sha256
@@ -961,6 +981,7 @@ def test_entry_cap_and_memory() -> None:
         return measured
 
     short_peak = peak(8)
+    assert _virtual_spec(6)[2] != _virtual_spec(10)[2]
     long_reader = VirtualImaReader(20000)
     assert long_reader.logical_length >= 32 * 1024 * 1024
     long_peak = peak(20000)
