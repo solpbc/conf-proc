@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+config SECURITY_SPP_DIAG_TRACE_CORE
+	bool "SPP diagnostic trace core (dormant)"
+	depends on CRYPTO_LIB_SHA256
+	default n
+	help
+	  Dormant in-memory SPP diagnostic trace core. Does not register
+	  LSM hooks or IMA measurements until a later activation patch.
