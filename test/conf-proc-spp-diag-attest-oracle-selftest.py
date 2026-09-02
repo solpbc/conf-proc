@@ -630,6 +630,14 @@ def _pem_body_space(raw):
     return raw[: newline + 1] + b" " + raw[newline + 1 :]
 
 
+def _pem_crlf(raw):
+    return raw.replace(b"\n", b"\r\n")
+
+
+def _pem_suffix(raw):
+    return raw + b"trailing\n"
+
+
 def _repin_ark(kit, cert):
     pem = cert.public_bytes(serialization.Encoding.PEM)
     der = cert.public_bytes(serialization.Encoding.DER)
@@ -1625,7 +1633,12 @@ def twin_pcr10():
 
 
 def twin_hcla_utf16le():
-    return _hcla_twin('{"keys":[]}'.encode("utf-16-le"))
+    kit = _kit()
+    compact = json.dumps(
+        {"keys": [kit._ak_jwk()]}, separators=(",", ":"), sort_keys=True
+    ).encode("ascii")
+    utf16 = compact.decode("ascii").encode("utf-16-le")
+    return _hcla_twin(utf16)
 
 
 def twin_hcla_ek_missing_key_ops():
@@ -1680,10 +1693,53 @@ def twin_pem_ak_internal_space():
     ), kit.expectations
 
 
+def twin_pem_ark_crlf():
+    kit = _kit()
+    return replace(kit.evidence, ark_pem=_pem_crlf(kit.evidence.ark_pem)), kit.expectations
+
+
+def twin_pem_ask_crlf():
+    kit = _kit()
+    return replace(kit.evidence, ask_pem=_pem_crlf(kit.evidence.ask_pem)), kit.expectations
+
+
+def twin_pem_vcek_crlf():
+    kit = _kit()
+    return replace(kit.evidence, vcek_pem=_pem_crlf(kit.evidence.vcek_pem)), kit.expectations
+
+
+def twin_pem_ak_crlf():
+    kit = _kit()
+    return replace(
+        kit.evidence, ak_public_pem=_pem_crlf(kit.evidence.ak_public_pem)
+    ), kit.expectations
+
+
+def twin_pem_ask_suffix():
+    kit = _kit()
+    return replace(kit.evidence, ask_pem=_pem_suffix(kit.evidence.ask_pem)), kit.expectations
+
+
+def twin_pem_vcek_suffix():
+    kit = _kit()
+    return replace(kit.evidence, vcek_pem=_pem_suffix(kit.evidence.vcek_pem)), kit.expectations
+
+
+def twin_pem_ak_suffix():
+    kit = _kit()
+    return replace(
+        kit.evidence, ak_public_pem=_pem_suffix(kit.evidence.ak_public_pem)
+    ), kit.expectations
+
+
 def twin_ak_parent_qn():
     kit = _kit()
-    return kit.evidence, replace(
-        kit.expectations, ak_parent_qualified_name=b"\x40\x00\x00\x0c"
+    parent = b"\x40\x00\x00\x0c"
+    name = _TPM_SHA256.to_bytes(2, "big") + _sha256(kit.tpmt)
+    qn = _TPM_SHA256.to_bytes(2, "big") + _sha256(parent + name)
+    msg = kit._quote_msg(qn, kit.extra, _PCR_BITMAP, kit.pcr_digest, 1)
+    return _quote_twin(
+        msg, expectations=replace(kit.expectations, ak_parent_qualified_name=parent)
     )
 
 
@@ -1732,6 +1788,20 @@ def twin_ask_aki_wrong():
     return _repin_ask(kit, cert)
 
 
+def twin_ask_ski_wrong():
+    kit = _kit()
+    ski = x509.SubjectKeyIdentifier(digest=bytes((0x11,)) * 20)
+    cert = kit._build_ask(add_ski=True, ski=ski)
+    return _repin_ask(kit, cert)
+
+
+def twin_ark_aki_wrong():
+    kit = _kit()
+    aki = x509.AuthorityKeyIdentifier(bytes((0x22,)) * 20, None, None)
+    cert = kit._build_ark(add_aki=True, aki=aki)
+    return _repin_ark(kit, cert)
+
+
 def twin_ark_pathlen_2():
     kit = _kit()
     cert = kit._build_ark(path_length=2)
@@ -1776,6 +1846,42 @@ def twin_vcek_amd_duplicate():
     return _vcek_twin(kit._amd(), duplicate_suffix="1")
 
 
+def twin_vcek_amd_hwid_raw63():
+    kit = _kit()
+    return _vcek_twin(kit._amd(), raw_der={"4": kit.chip[:63]})
+
+
+def twin_vcek_amd_hwid_raw65():
+    kit = _kit()
+    return _vcek_twin(kit._amd(), raw_der={"4": kit.chip + b"\x00"})
+
+
+def twin_vcek_amd_hwid_der_wrong_len():
+    kit = _kit()
+    return _vcek_twin(kit._amd(), raw_der={"4": b"\x04\x3f" + kit.chip[:63]})
+
+
+def twin_vcek_amd_hwid_tag_05():
+    kit = _kit()
+    return _vcek_twin(kit._amd(), raw_der={"4": b"\x05\x40" + kit.chip})
+
+
+def twin_vcek_amd_hwid_prefix_0000():
+    kit = _kit()
+    return _vcek_twin(kit._amd(), raw_der={"4": b"\x00\x00" + kit.chip})
+
+
+def twin_vcek_amd_hwid_longform():
+    kit = _kit()
+    return _vcek_twin(kit._amd(), raw_der={"4": b"\x04\x81\x40" + kit.chip})
+
+
+def twin_vcek_amd_hwid_raw_mismatch():
+    kit = _kit()
+    flipped = bytes((kit.chip[0] ^ 1,)) + kit.chip[1:]
+    return _vcek_twin(kit._amd(), raw_der={"4": flipped})
+
+
 def twin_vcek_duplicate_basic_constraints():
     kit = _kit()
     return _vcek_twin(
@@ -1789,6 +1895,12 @@ def twin_ca_crldp_http():
     kit = _kit()
     cert = kit._build_ark(crldp_uri="http://kdsintf.amd.com/vcek/v1/Genoa/crl")
     return _repin_ark(kit, cert)
+
+
+def twin_ca_crldp_ask_http():
+    kit = _kit()
+    cert = kit._build_ask(crldp_uri="http://kdsintf.amd.com/vcek/v1/Genoa/crl")
+    return _repin_ask(kit, cert)
 
 
 def twin_ca_crldp_userinfo():
@@ -1865,12 +1977,92 @@ def fresh_positive_crldp_only():
 
 def fresh_positive_vcek_ext_reorder():
     kit = _kit()
-    cert = kit._build_vcek(kit._amd(), order=_VCEK_REORDER)
+    cert = kit._build_vcek(
+        kit._amd(), order=_VCEK_REORDER, raw_der={"4": kit.chip}, ski_aki=True
+    )
     pem = cert.public_bytes(serialization.Encoding.PEM)
     _assert_ask_vcek(kit.evidence.ask_pem, pem)
+    amd_order = tuple(
+        extension.oid.dotted_string[len(_AMD_PREFIX) :]
+        for extension in cert.extensions
+        if extension.oid.dotted_string.startswith(_AMD_PREFIX)
+    )
+    assert amd_order == _VCEK_REORDER
+    hwid = cert.extensions.get_extension_for_oid(
+        ObjectIdentifier(_AMD_PREFIX + "4")
+    ).value
+    assert isinstance(hwid, x509.UnrecognizedExtension)
+    assert len(hwid.value) == 64
+    cert.extensions.get_extension_for_class(x509.SubjectKeyIdentifier)
+    cert.extensions.get_extension_for_class(x509.AuthorityKeyIdentifier)
     evidence = replace(kit.evidence, vcek_pem=pem)
     _check_fresh(evidence, kit.expectations)
     return evidence, kit.expectations
+
+
+def _sole_role_positive(rebuild):
+    kit = _kit()
+    evidence, expectations = rebuild(kit)
+    _check_fresh(evidence, expectations)
+    _assert_ask_vcek(evidence.ask_pem, evidence.vcek_pem)
+    _assert_ark_crl(evidence.ark_pem, evidence.ark_crl_der)
+    return evidence, expectations
+
+
+def fresh_positive_ark_ski_only():
+    return _sole_role_positive(lambda kit: _repin_ark(kit, kit._build_ark(add_ski=True)))
+
+
+def fresh_positive_ark_aki_only():
+    return _sole_role_positive(lambda kit: _repin_ark(kit, kit._build_ark(add_aki=True)))
+
+
+def fresh_positive_ark_crldp_only():
+    return _sole_role_positive(lambda kit: _repin_ark(kit, kit._build_ark(add_crldp=True)))
+
+
+def fresh_positive_ask_ski_only():
+    return _sole_role_positive(lambda kit: _repin_ask(kit, kit._build_ask(add_ski=True)))
+
+
+def fresh_positive_ask_aki_only():
+    return _sole_role_positive(lambda kit: _repin_ask(kit, kit._build_ask(add_aki=True)))
+
+
+def fresh_positive_ask_crldp_only():
+    return _sole_role_positive(lambda kit: _repin_ask(kit, kit._build_ask(add_crldp=True)))
+
+
+def fresh_positive_snp_report_version_256():
+    kit = _kit()
+    evidence, _unused = _report_twin(version=256)
+    expectations = replace(kit.expectations, snp_report_version=256)
+    _check_fresh(evidence, expectations)
+    return evidence, expectations
+
+
+def fresh_positive_snp_report_version_u32max():
+    kit = _kit()
+    evidence, _unused = _report_twin(version=2**32 - 1)
+    expectations = replace(kit.expectations, snp_report_version=2**32 - 1)
+    _check_fresh(evidence, expectations)
+    return evidence, expectations
+
+
+def fresh_positive_snp_vmpl_256():
+    kit = _kit()
+    evidence, _unused = _report_twin(vmpl=256)
+    expectations = replace(kit.expectations, snp_vmpl=256)
+    _check_fresh(evidence, expectations)
+    return evidence, expectations
+
+
+def fresh_positive_snp_vmpl_u32max():
+    kit = _kit()
+    evidence, _unused = _report_twin(vmpl=2**32 - 1)
+    expectations = replace(kit.expectations, snp_vmpl=2**32 - 1)
+    _check_fresh(evidence, expectations)
+    return evidence, expectations
 
 
 FRESH_POSITIVES = (
@@ -1882,6 +2074,16 @@ FRESH_POSITIVES = (
     ("ski_only", fresh_positive_ski_only),
     ("crldp_only", fresh_positive_crldp_only),
     ("vcek_ext_reorder", fresh_positive_vcek_ext_reorder),
+    ("ark_ski_only", fresh_positive_ark_ski_only),
+    ("ark_aki_only", fresh_positive_ark_aki_only),
+    ("ark_crldp_only", fresh_positive_ark_crldp_only),
+    ("ask_ski_only", fresh_positive_ask_ski_only),
+    ("ask_aki_only", fresh_positive_ask_aki_only),
+    ("ask_crldp_only", fresh_positive_ask_crldp_only),
+    ("snp_report_version_256", fresh_positive_snp_report_version_256),
+    ("snp_report_version_u32max", fresh_positive_snp_report_version_u32max),
+    ("snp_vmpl_256", fresh_positive_snp_vmpl_256),
+    ("snp_vmpl_u32max", fresh_positive_snp_vmpl_u32max),
 )
 
 
@@ -1951,6 +2153,13 @@ FRESH_TWINS = (
     ("pem_ask_internal_space", twin_pem_ask_internal_space),
     ("pem_vcek_internal_space", twin_pem_vcek_internal_space),
     ("pem_ak_internal_space", twin_pem_ak_internal_space),
+    ("pem_ark_crlf", twin_pem_ark_crlf),
+    ("pem_ask_crlf", twin_pem_ask_crlf),
+    ("pem_vcek_crlf", twin_pem_vcek_crlf),
+    ("pem_ak_crlf", twin_pem_ak_crlf),
+    ("pem_ask_suffix", twin_pem_ask_suffix),
+    ("pem_vcek_suffix", twin_pem_vcek_suffix),
+    ("pem_ak_suffix", twin_pem_ak_suffix),
     ("ak_parent_qn", twin_ak_parent_qn),
     ("crl_bad_pss_params", twin_crl_bad_pss_params),
     ("ark_not_self_issued", twin_ark_not_self_issued),
@@ -1958,6 +2167,8 @@ FRESH_TWINS = (
     ("vcek_wrong_issuer", twin_vcek_wrong_issuer),
     ("ark_ski_wrong", twin_ark_ski_wrong),
     ("ask_aki_wrong", twin_ask_aki_wrong),
+    ("ask_ski_wrong", twin_ask_ski_wrong),
+    ("ark_aki_wrong", twin_ark_aki_wrong),
     ("ark_pathlen_2", twin_ark_pathlen_2),
     ("ask_pathlen_1", twin_ask_pathlen_1),
     ("vcek_amd_missing", twin_vcek_amd_missing),
@@ -1966,8 +2177,16 @@ FRESH_TWINS = (
     ("vcek_amd_nonminimal", twin_vcek_amd_nonminimal),
     ("vcek_amd_critical", twin_vcek_amd_critical),
     ("vcek_amd_duplicate", twin_vcek_amd_duplicate),
+    ("vcek_amd_hwid_raw63", twin_vcek_amd_hwid_raw63),
+    ("vcek_amd_hwid_raw65", twin_vcek_amd_hwid_raw65),
+    ("vcek_amd_hwid_der_wrong_len", twin_vcek_amd_hwid_der_wrong_len),
+    ("vcek_amd_hwid_tag_05", twin_vcek_amd_hwid_tag_05),
+    ("vcek_amd_hwid_prefix_0000", twin_vcek_amd_hwid_prefix_0000),
+    ("vcek_amd_hwid_longform", twin_vcek_amd_hwid_longform),
+    ("vcek_amd_hwid_raw_mismatch", twin_vcek_amd_hwid_raw_mismatch),
     ("vcek_duplicate_basic_constraints", twin_vcek_duplicate_basic_constraints),
     ("ca_crldp_http", twin_ca_crldp_http),
+    ("ca_crldp_ask_http", twin_ca_crldp_ask_http),
     ("ca_crldp_userinfo", twin_ca_crldp_userinfo),
     ("ca_crldp_port", twin_ca_crldp_port),
     ("ca_crldp_query", twin_ca_crldp_query),

@@ -329,6 +329,16 @@ def _der_octet(value):
     return _der_body(value, 0x04)
 
 
+def _hwid_from_extension(raw):
+    if not isinstance(raw, bytes):
+        raise ValueError("der")
+    if len(raw) == 64:
+        return raw
+    if len(raw) == 66 and raw[0] == 0x04 and raw[1] == 0x40:
+        return raw[2:66]
+    raise ValueError("der")
+
+
 def _pem_to_der(raw, label):
     begin = ("-----BEGIN " + label + "-----").encode("ascii")
     end = ("-----END " + label + "-----").encode("ascii")
@@ -807,7 +817,9 @@ def _decode_amd_values(records):
     for suffix, tag in _AMD_SPECS:
         raw = by_suffix[suffix]
         try:
-            if tag == 0x02:
+            if suffix == "4":
+                values[suffix] = _hwid_from_extension(raw)
+            elif tag == 0x02:
                 values[suffix] = _der_uint(raw)
             elif tag == 0x16:
                 values[suffix] = _der_ia5(raw)

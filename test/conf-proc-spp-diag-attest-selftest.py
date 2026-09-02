@@ -13,10 +13,12 @@ import inspect
 import warnings
 from pathlib import Path
 
+from cryptography import x509
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.utils import CryptographyDeprecationWarning
+from cryptography.x509.oid import ObjectIdentifier
 
 import conf_proc_spp_diag_attest as attest_mod
 from conf_proc_spp_diag_attest import (
@@ -474,6 +476,14 @@ def test_type_stage() -> None:
     _expect_error(TYPE, ev, dataclasses.replace(exp, snp_report_version=2**32))
     _expect_error(POLICY, ev, dataclasses.replace(exp, snp_vmpl=256))
     _expect_error(POLICY, ev, dataclasses.replace(exp, snp_report_version=256))
+    for builder in (
+        _oracle.fresh_positive_snp_report_version_256,
+        _oracle.fresh_positive_snp_report_version_u32max,
+        _oracle.fresh_positive_snp_vmpl_256,
+        _oracle.fresh_positive_snp_vmpl_u32max,
+    ):
+        result = _appraise(*_to_production(*builder()))
+        assert result.status == "diagnostic_attestation_verified"
 
 
 def test_cap_stage() -> None:
@@ -517,6 +527,8 @@ def test_x509_root_crl() -> None:
             "vcek_wrong_issuer",
             "ark_ski_wrong",
             "ask_aki_wrong",
+            "ask_ski_wrong",
+            "ark_aki_wrong",
         },
     )
     ev, exp = _frozen_pair()
@@ -543,11 +555,38 @@ def test_hcla_snp() -> None:
     _expect_twins(SNP, lambda name: name in {"cpuid_family", "reserved_current", "reserved_reported"})
 
 
+def _vcek_oid4_payload(pem):
+    cert = x509.load_pem_x509_certificate(pem)
+    extension = cert.extensions.get_extension_for_oid(
+        ObjectIdentifier("1.3.6.1.4.1.3704.1.4")
+    ).value
+    assert isinstance(extension, x509.UnrecognizedExtension)
+    return extension.value
+
+
 def test_vcek_binding() -> None:
     oracle_ev, oracle_exp = _oracle.fresh_positive()
     ev, exp = _to_production(oracle_ev, oracle_exp)
     result = _appraise(ev, exp)
     assert result.status == "diagnostic_attestation_verified"
+    tagged = _vcek_oid4_payload(oracle_ev.vcek_pem)
+    assert len(tagged) == 66 and tagged[:2] == b"\x04\x40"
+    reorder_ev, reorder_exp = _oracle.fresh_positive_vcek_ext_reorder()
+    raw = _vcek_oid4_payload(reorder_ev.vcek_pem)
+    assert len(raw) == 64
+    reorder_result = _appraise(*_to_production(reorder_ev, reorder_exp))
+    assert reorder_result.status == "diagnostic_attestation_verified"
+    assert result.evidence_expectations_sha256 != reorder_result.evidence_expectations_sha256
+    assert result.quote_extra_data == reorder_result.quote_extra_data
+    assert result.snp_measurement == reorder_result.snp_measurement
+    assert result.snp_host_data == reorder_result.snp_host_data
+    assert result.reported_tcb == reorder_result.reported_tcb
+    assert result.pcr_sha256 == reorder_result.pcr_sha256
+    assert result.quote_clock == reorder_result.quote_clock
+    assert result.quote_reset_count == reorder_result.quote_reset_count
+    assert result.quote_restart_count == reorder_result.quote_restart_count
+    assert result.quote_safe == reorder_result.quote_safe
+    assert result.quote_firmware_version == reorder_result.quote_firmware_version
     _expect_twins(
         VCEK,
         lambda name: name.startswith("vcek_ext_")
