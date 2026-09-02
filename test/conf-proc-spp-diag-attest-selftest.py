@@ -204,6 +204,13 @@ def _expect_twins(reason, predicate):
             raise AssertionError("twin %s" % name) from exc
 
 
+def _find_twin(name):
+    for twin_name, builder in _oracle.FRESH_TWINS:
+        if twin_name == name:
+            return builder
+    raise AssertionError("missing twin: %s" % name)
+
+
 def _quote_clock_fields(raw: bytes):
     offset = 0
 
@@ -530,6 +537,12 @@ def test_ak_quote_pcr() -> None:
     _expect_twins(QUOTE, lambda name: name.startswith("quote_") and name != "quote_digest")
     _expect_twins(PCR, lambda name: name == "quote_digest")
     _expect_twins(PCR, lambda name: name.startswith("pcr_") or name == "pcr10")
+    # GHSA-8rjm-5f5f-h4q6: tpm2-tools PCR-selection confusion between the signed
+    # quote and a separately-supplied PCR values file. The PCR-file's own
+    # selection must independently match the quote's signed selection before
+    # any PCR value is trusted.
+    ghsa_ev, ghsa_exp = _to_production(*_find_twin("pcr_file_selection")())
+    _expect_error(PCR, ghsa_ev, ghsa_exp)
     ev, exp = _fresh_pair()
     tpmt = bytearray(ev.ak_tpmt_public)
     tpmt[-1] ^= 1

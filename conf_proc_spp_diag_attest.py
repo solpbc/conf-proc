@@ -313,11 +313,8 @@ def _der_uint(value):
 
 def _der_ia5(value):
     body = _der_body(value, 0x16)
-    if not _printable_ascii_bytes(body) and body != b"":
+    if not _printable_ascii_bytes(body):
         raise ValueError("der")
-    for item in body:
-        if item < 0x20 or item > 0x7E:
-            raise ValueError("der")
     return body
 
 
@@ -727,7 +724,7 @@ def _stage_x509(ctx):
     try:
         ark, ark_der = _load_cert_pem(evidence.ark_pem)
         ask, ask_der = _load_cert_pem(evidence.ask_pem)
-        vcek, vcek_der = _load_cert_pem(evidence.vcek_pem)
+        vcek, _vcek_der = _load_cert_pem(evidence.vcek_pem)
         ak_key, _ak_der = _load_public_pem(evidence.ak_public_pem)
         crl = _load_crl_der(evidence.ark_crl_der)
     except Exception:
@@ -784,7 +781,6 @@ def _stage_x509(ctx):
     ctx.vcek = vcek
     ctx.ark_der = ark_der
     ctx.ask_der = ask_der
-    ctx.vcek_der = vcek_der
     ctx.vcek_key = vcek_key
     ctx.ak_key = ak_key
     ctx.crl = crl
@@ -1044,7 +1040,6 @@ def _stage_ak(ctx):
     qualified = _TPM_ALG_SHA256.to_bytes(2, "big") + _sha256(
         ctx.expectations.ak_parent_qualified_name + name
     )
-    ctx.ak_name = name
     ctx.ak_qualified_name = qualified
     ctx.ak_rsa = key
     policy = b""
