@@ -109,6 +109,13 @@ _ARK_ASK_ALLOWED_OIDS = frozenset(
         ExtensionOID.CRL_DISTRIBUTION_POINTS,
     }
 )
+_ARK_ASK_OPTIONAL_OIDS = frozenset(
+    {
+        ExtensionOID.SUBJECT_KEY_IDENTIFIER,
+        ExtensionOID.AUTHORITY_KEY_IDENTIFIER,
+        ExtensionOID.CRL_DISTRIBUTION_POINTS,
+    }
+)
 _CRL_SUPPORTED_CRITICAL = frozenset(
     {
         ExtensionOID.CRL_NUMBER,
@@ -350,6 +357,8 @@ def _load_cert_pem(raw):
     cert = x509.load_der_x509_certificate(der)
     if cert.public_bytes(Encoding.DER) != der:
         raise ValueError("pem")
+    if cert.public_bytes(Encoding.PEM) != raw:
+        raise ValueError("pem")
     return cert, der
 
 
@@ -358,6 +367,9 @@ def _load_public_pem(raw):
     key = serialization.load_der_public_key(der)
     encoded = key.public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
     if encoded != der:
+        raise ValueError("pem")
+    pem = key.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)
+    if pem != raw:
         raise ValueError("pem")
     return key, der
 
@@ -597,15 +609,18 @@ def _stage_type(ctx):
         if not _is_bytes(value) or len(value) != size:
             _bad(CP_SPP_DIAG_ATTEST_TYPE)
     parent = expectations.ak_parent_qualified_name
-    if not _is_bytes(parent) or not hmac.compare_digest(parent, _AK_PARENT_QN):
+    if not _is_bytes(parent) or len(parent) != len(_AK_PARENT_QN):
         _bad(CP_SPP_DIAG_ATTEST_TYPE)
     version = expectations.snp_report_version
-    if not _is_int(version) or version < 0 or version > 255:
+    if not _is_int(version) or version < 0 or version > (2**32 - 1):
         _bad(CP_SPP_DIAG_ATTEST_TYPE)
     policy = expectations.snp_policy
     if not _is_int(policy) or policy < 0 or policy > (2**64 - 1):
         _bad(CP_SPP_DIAG_ATTEST_TYPE)
-    for name in ("snp_vmpl", "cpuid_family", "cpuid_model", "cpuid_step"):
+    vmpl = expectations.snp_vmpl
+    if not _is_int(vmpl) or vmpl < 0 or vmpl > (2**32 - 1):
+        _bad(CP_SPP_DIAG_ATTEST_TYPE)
+    for name in ("cpuid_family", "cpuid_model", "cpuid_step"):
         value = getattr(expectations, name)
         if not _is_int(value) or value < 0 or value > 255:
             _bad(CP_SPP_DIAG_ATTEST_TYPE)
@@ -647,7 +662,7 @@ def _stage_cap(ctx):
         _bad(CP_SPP_DIAG_ATTEST_CAP)
     if len(evidence.ak_tpmt_public) > MAX_AK_PUBLIC_BYTES:
         _bad(CP_SPP_DIAG_ATTEST_CAP)
-    if len(evidence.hcl_report) != HCLA_BYTES:
+    if len(evidence.hcl_report) > HCLA_BYTES:
         _bad(CP_SPP_DIAG_ATTEST_CAP)
     if len(evidence.quote_msg) > MAX_QUOTE_MSG_BYTES:
         _bad(CP_SPP_DIAG_ATTEST_CAP)
@@ -657,20 +672,58 @@ def _stage_cap(ctx):
         _bad(CP_SPP_DIAG_ATTEST_CAP)
 
 
-def _require_ca(cert, path_length, usage):
+def _https_crldp_uri_ok(uri):
+    if type(uri) is not str or not uri.startswith("https://"):
+        return False
+    if "?" in uri or "#" in uri or "@" in uri:
+        return False
+    rest = uri[8:]
+    if not rest:
+        return False
+    slash = rest.find("/")
+    host = rest if slash < 0 else rest[:slash]
+    if not host or ":" in host:
+        return False
+    return True
+
+
+def _require_crldp(value):
+    if not isinstance(value, x509.CRLDistributionPoints) or len(value) != 1:
+        _bad(CP_SPP_DIAG_ATTEST_X509)
+    point = value[0]
+    if point.relative_name is not None or point.reasons is not None or point.crl_issuer is not None:
+        _bad(CP_SPP_DIAG_ATTEST_X509)
+    names = point.full_name
+    if names is None or len(names) != 1:
+        _bad(CP_SPP_DIAG_ATTEST_X509)
+    name = names[0]
+    if not isinstance(name, x509.UniformResourceIdentifier):
+        _bad(CP_SPP_DIAG_ATTEST_X509)
+    if not _https_crldp_uri_ok(name.value):
+        _bad(CP_SPP_DIAG_ATTEST_X509)
+
+
+def _require_ca(cert, path_lengths, usage):
     basic = _extension(cert, x509.BasicConstraints)
     if not basic.critical:
         _bad(CP_SPP_DIAG_ATTEST_X509)
-    if basic.value != x509.BasicConstraints(ca=True, path_length=path_length):
+    if not basic.value.ca or basic.value.path_length not in path_lengths:
         _bad(CP_SPP_DIAG_ATTEST_X509)
     key_usage = _extension(cert, x509.KeyUsage)
     if not key_usage.critical:
         _bad(CP_SPP_DIAG_ATTEST_X509)
     if key_usage.value != usage:
         _bad(CP_SPP_DIAG_ATTEST_X509)
+    crldp = None
     for extension in cert.extensions:
         if extension.oid not in _ARK_ASK_ALLOWED_OIDS:
             _bad(CP_SPP_DIAG_ATTEST_X509)
+        if extension.oid in _ARK_ASK_OPTIONAL_OIDS and extension.critical:
+            _bad(CP_SPP_DIAG_ATTEST_X509)
+        if extension.oid == ExtensionOID.CRL_DISTRIBUTION_POINTS:
+            crldp = extension.value
+    if crldp is not None:
+        _require_crldp(crldp)
     key = _rsa_key(cert)
     if key.key_size != 4096:
         _bad(CP_SPP_DIAG_ATTEST_X509)
@@ -678,20 +731,52 @@ def _require_ca(cert, path_length, usage):
         _bad(CP_SPP_DIAG_ATTEST_X509)
 
 
-def _parse_amd_extensions(cert):
-    observed = []
-    parsed = {}
+def _require_ski_value(cert):
+    try:
+        extension = cert.extensions.get_extension_for_class(x509.SubjectKeyIdentifier)
+    except x509.ExtensionNotFound:
+        return
+    expected = x509.SubjectKeyIdentifier.from_public_key(cert.public_key())
+    if not hmac.compare_digest(extension.value.digest, expected.digest):
+        _bad(CP_SPP_DIAG_ATTEST_ROOT)
+
+
+def _require_aki_value(cert, issuer_public_key):
+    try:
+        extension = cert.extensions.get_extension_for_class(x509.AuthorityKeyIdentifier)
+    except x509.ExtensionNotFound:
+        return
+    aki = extension.value
+    expected = x509.AuthorityKeyIdentifier.from_issuer_public_key(issuer_public_key)
+    if aki.key_identifier is None or expected.key_identifier is None:
+        _bad(CP_SPP_DIAG_ATTEST_ROOT)
+    if not hmac.compare_digest(aki.key_identifier, expected.key_identifier):
+        _bad(CP_SPP_DIAG_ATTEST_ROOT)
+    if aki.authority_cert_issuer is not None or aki.authority_cert_serial_number is not None:
+        _bad(CP_SPP_DIAG_ATTEST_ROOT)
+
+
+def _duplicate_amd_extension(error):
+    if getattr(error, "oid", None) not in _AMD_OIDS:
+        _bad(CP_SPP_DIAG_ATTEST_X509)
+
+
+def _capture_amd_extensions(cert):
+    try:
+        items = list(cert.extensions)
+    except x509.DuplicateExtension as error:
+        _duplicate_amd_extension(error)
+        return [], None, None, True
+    records = []
     ski = None
     aki = None
-    for extension in cert.extensions:
+    for extension in items:
         oid = extension.oid
         if oid in _AMD_OIDS:
-            if extension.critical:
-                _bad(CP_SPP_DIAG_ATTEST_X509)
             if not isinstance(extension.value, x509.UnrecognizedExtension):
                 _bad(CP_SPP_DIAG_ATTEST_X509)
-            observed.append(oid)
-            parsed[oid.dotted_string] = extension.value.value
+            suffix = oid.dotted_string[len(_AMD_PREFIX) :]
+            records.append((suffix, extension.critical, extension.value.value))
             continue
         if oid == ExtensionOID.SUBJECT_KEY_IDENTIFIER:
             if extension.critical:
@@ -704,18 +789,33 @@ def _parse_amd_extensions(cert):
             aki = extension.value
             continue
         _bad(CP_SPP_DIAG_ATTEST_X509)
-    if tuple(observed) != _AMD_OIDS:
-        _bad(CP_SPP_DIAG_ATTEST_X509)
+    return records, ski, aki, False
+
+
+def _decode_amd_values(records):
+    by_suffix = {}
+    for suffix, critical, raw in records:
+        if critical:
+            _bad(CP_SPP_DIAG_ATTEST_VCEK)
+        if suffix in by_suffix:
+            _bad(CP_SPP_DIAG_ATTEST_VCEK)
+        by_suffix[suffix] = raw
+    expected = set(suffix for suffix, _tag in _AMD_SPECS)
+    if set(by_suffix) != expected:
+        _bad(CP_SPP_DIAG_ATTEST_VCEK)
     values = {}
     for suffix, tag in _AMD_SPECS:
-        raw = parsed[_AMD_PREFIX + suffix]
-        if tag == 0x02:
-            values[suffix] = _der_uint(raw)
-        elif tag == 0x16:
-            values[suffix] = _der_ia5(raw)
-        else:
-            values[suffix] = _der_octet(raw)
-    return values, ski, aki
+        raw = by_suffix[suffix]
+        try:
+            if tag == 0x02:
+                values[suffix] = _der_uint(raw)
+            elif tag == 0x16:
+                values[suffix] = _der_ia5(raw)
+            else:
+                values[suffix] = _der_octet(raw)
+        except Exception:
+            _bad(CP_SPP_DIAG_ATTEST_VCEK)
+    return values
 
 
 def _stage_x509(ctx):
@@ -725,18 +825,11 @@ def _stage_x509(ctx):
         ark, ark_der = _load_cert_pem(evidence.ark_pem)
         ask, ask_der = _load_cert_pem(evidence.ask_pem)
         vcek, _vcek_der = _load_cert_pem(evidence.vcek_pem)
-        ak_key, _ak_der = _load_public_pem(evidence.ak_public_pem)
         crl = _load_crl_der(evidence.ark_crl_der)
     except Exception:
         _bad(CP_SPP_DIAG_ATTEST_X509)
-    _require_ca(ark, 1, _ARK_KEY_USAGE)
-    _require_ca(ask, 0, _ASK_KEY_USAGE)
-    if ark.subject != ark.issuer:
-        _bad(CP_SPP_DIAG_ATTEST_X509)
-    if ask.issuer != ark.subject:
-        _bad(CP_SPP_DIAG_ATTEST_X509)
-    if vcek.issuer != ask.subject:
-        _bad(CP_SPP_DIAG_ATTEST_X509)
+    _require_ca(ark, frozenset({1, None}), _ARK_KEY_USAGE)
+    _require_ca(ask, frozenset({0}), _ASK_KEY_USAGE)
     if vcek.serial_number != 0:
         _bad(CP_SPP_DIAG_ATTEST_X509)
     vcek_key = vcek.public_key()
@@ -746,27 +839,21 @@ def _stage_x509(ctx):
         _bad(CP_SPP_DIAG_ATTEST_X509)
     if not _pss_sha384_ok(vcek):
         _bad(CP_SPP_DIAG_ATTEST_X509)
-    for cls in (x509.BasicConstraints, x509.KeyUsage):
-        try:
-            vcek.extensions.get_extension_for_class(cls)
-        except x509.ExtensionNotFound:
-            pass
-        else:
+    amd_records, ski, aki, amd_duplicate = _capture_amd_extensions(vcek)
+    if not amd_duplicate:
+        if (ski is None) != (aki is None):
             _bad(CP_SPP_DIAG_ATTEST_X509)
-    amd_values, ski, aki = _parse_amd_extensions(vcek)
-    if (ski is None) != (aki is None):
-        _bad(CP_SPP_DIAG_ATTEST_X509)
-    if ski is not None:
-        expected_ski = x509.SubjectKeyIdentifier.from_public_key(vcek_key)
-        if not hmac.compare_digest(ski.digest, expected_ski.digest):
-            _bad(CP_SPP_DIAG_ATTEST_X509)
-        ask_ski = x509.SubjectKeyIdentifier.from_public_key(ask.public_key())
-        if aki.key_identifier is None:
-            _bad(CP_SPP_DIAG_ATTEST_X509)
-        if not hmac.compare_digest(aki.key_identifier, ask_ski.digest):
-            _bad(CP_SPP_DIAG_ATTEST_X509)
-        if aki.authority_cert_issuer is not None or aki.authority_cert_serial_number is not None:
-            _bad(CP_SPP_DIAG_ATTEST_X509)
+        if ski is not None:
+            expected_ski = x509.SubjectKeyIdentifier.from_public_key(vcek_key)
+            if not hmac.compare_digest(ski.digest, expected_ski.digest):
+                _bad(CP_SPP_DIAG_ATTEST_X509)
+            ask_ski = x509.SubjectKeyIdentifier.from_public_key(ask.public_key())
+            if aki.key_identifier is None:
+                _bad(CP_SPP_DIAG_ATTEST_X509)
+            if not hmac.compare_digest(aki.key_identifier, ask_ski.digest):
+                _bad(CP_SPP_DIAG_ATTEST_X509)
+            if aki.authority_cert_issuer is not None or aki.authority_cert_serial_number is not None:
+                _bad(CP_SPP_DIAG_ATTEST_X509)
     for cert in (ark, ask, vcek):
         if not _in_window(
             _cert_time(cert, "not_valid_before"),
@@ -774,17 +861,15 @@ def _stage_x509(ctx):
             instant,
         ):
             _bad(CP_SPP_DIAG_ATTEST_X509)
-    if not _pss_sha384_ok(crl):
-        _bad(CP_SPP_DIAG_ATTEST_X509)
     ctx.ark = ark
     ctx.ask = ask
     ctx.vcek = vcek
     ctx.ark_der = ark_der
     ctx.ask_der = ask_der
     ctx.vcek_key = vcek_key
-    ctx.ak_key = ak_key
     ctx.crl = crl
-    ctx.amd_values = amd_values
+    ctx.amd_records = amd_records
+    ctx.amd_duplicate = amd_duplicate
     ctx.instant = instant
 
 
@@ -793,6 +878,16 @@ def _stage_root(ctx):
         _bad(CP_SPP_DIAG_ATTEST_ROOT)
     if not hmac.compare_digest(_sha256(ctx.ask_der), ctx.expectations.ask_der_sha256):
         _bad(CP_SPP_DIAG_ATTEST_ROOT)
+    if ctx.ark.subject != ctx.ark.issuer:
+        _bad(CP_SPP_DIAG_ATTEST_ROOT)
+    if ctx.ask.issuer != ctx.ark.subject:
+        _bad(CP_SPP_DIAG_ATTEST_ROOT)
+    if ctx.vcek.issuer != ctx.ask.subject:
+        _bad(CP_SPP_DIAG_ATTEST_ROOT)
+    _require_ski_value(ctx.ark)
+    _require_aki_value(ctx.ark, ctx.ark.public_key())
+    _require_ski_value(ctx.ask)
+    _require_aki_value(ctx.ask, ctx.ark.public_key())
     try:
         ark_key = _rsa_key(ctx.ark)
         ask_key = _rsa_key(ctx.ask)
@@ -809,6 +904,8 @@ def _stage_crl(ctx):
         _bad(CP_SPP_DIAG_ATTEST_CRL)
     crl = ctx.crl
     if crl.issuer != ctx.ark.subject:
+        _bad(CP_SPP_DIAG_ATTEST_CRL)
+    if not _pss_sha384_ok(crl):
         _bad(CP_SPP_DIAG_ATTEST_CRL)
     try:
         _verify_pss(_rsa_key(ctx.ark), crl.signature, crl.tbs_certlist_bytes)
@@ -865,7 +962,8 @@ def _stage_hcla(ctx):
     if tail != bytes(len(tail)):
         _bad(CP_SPP_DIAG_ATTEST_HCLA)
     try:
-        runtime = json.loads(claim, object_pairs_hook=_unique_object)
+        text = claim.decode("utf-8")
+        runtime = json.loads(text, object_pairs_hook=_unique_object)
     except Exception:
         _bad(CP_SPP_DIAG_ATTEST_HCLA)
     if type(runtime) is not dict or "keys" not in runtime:
@@ -878,6 +976,8 @@ def _stage_hcla(ctx):
     try:
         for item in keys:
             jwk = _parse_jwk(item)
+            if jwk["key_ops"] is None and jwk["kid"] != "HCLAkPub":
+                _bad(CP_SPP_DIAG_ATTEST_HCLA)
             if jwk["kid"] in kids:
                 _bad(CP_SPP_DIAG_ATTEST_HCLA)
             kids.append(jwk["kid"])
@@ -967,7 +1067,9 @@ def _stage_snp(ctx):
 
 
 def _stage_vcek(ctx):
-    values = ctx.amd_values
+    if ctx.amd_duplicate:
+        _bad(CP_SPP_DIAG_ATTEST_VCEK)
+    values = _decode_amd_values(ctx.amd_records)
     reported = ctx.reported_tcb
     if values["1"] != 0:
         _bad(CP_SPP_DIAG_ATTEST_VCEK)
@@ -994,7 +1096,12 @@ def _stage_vcek(ctx):
 
 
 def _stage_ak(ctx):
-    key = ctx.ak_key
+    try:
+        key, _ak_der = _load_public_pem(ctx.evidence.ak_public_pem)
+    except Exception:
+        _bad(CP_SPP_DIAG_ATTEST_AK)
+    if not hmac.compare_digest(ctx.expectations.ak_parent_qualified_name, _AK_PARENT_QN):
+        _bad(CP_SPP_DIAG_ATTEST_AK)
     if not isinstance(key, rsa.RSAPublicKey) or key.key_size != 2048:
         _bad(CP_SPP_DIAG_ATTEST_AK)
     numbers = key.public_numbers()
@@ -1044,6 +1151,7 @@ def _stage_ak(ctx):
     ctx.ak_rsa = key
     policy = b""
     tpmt_modulus = b""
+    _ak_der = b""
 
 
 def _stage_quote(ctx):

@@ -80,6 +80,8 @@ _KU_ASK = x509.KeyUsage(
     encipher_only=False,
     decipher_only=False,
 )
+_CRLDP_URI = "https://kdsintf.amd.com/vcek/v1/Genoa/crl"
+_VCEK_REORDER = ("2", "4", "3.1", "3.2", "3.3", "3.4", "3.5", "3.6", "3.7", "3.8", "1")
 
 
 @dataclass(frozen=True)
@@ -609,13 +611,52 @@ def _jwk(kid, ops, modulus, exponent=65537):
     }
 
 
+def _crldp(uri, extra=None):
+    points = [
+        x509.DistributionPoint(
+            full_name=[x509.UniformResourceIdentifier(uri)],
+            relative_name=None,
+            reasons=None,
+            crl_issuer=None,
+        )
+    ]
+    if extra is not None:
+        points.append(extra)
+    return x509.CRLDistributionPoints(points)
+
+
+def _pem_body_space(raw):
+    newline = raw.find(b"\n")
+    return raw[: newline + 1] + b" " + raw[newline + 1 :]
+
+
+def _repin_ark(kit, cert):
+    pem = cert.public_bytes(serialization.Encoding.PEM)
+    der = cert.public_bytes(serialization.Encoding.DER)
+    return replace(kit.evidence, ark_pem=pem), replace(
+        kit.expectations, ark_der_sha256=_sha256(der)
+    )
+
+
+def _repin_ask(kit, cert):
+    pem = cert.public_bytes(serialization.Encoding.PEM)
+    der = cert.public_bytes(serialization.Encoding.DER)
+    return replace(kit.evidence, ask_pem=pem), replace(
+        kit.expectations, ask_der_sha256=_sha256(der)
+    )
+
+
 class _Kit:
-    def __init__(self):
+    def __init__(self, ark_path_length=1, add_ski=False, add_aki=False, add_crldp=False):
         self.ark_key = rsa.generate_private_key(65537, 4096)
         self.ask_key = rsa.generate_private_key(65537, 4096)
         self.vcek_key = ec.generate_private_key(ec.SECP384R1())
         self.ak_key = rsa.generate_private_key(65537, 2048)
         self.ek_key = rsa.generate_private_key(65537, 2048)
+        self.ark_path_length = ark_path_length
+        self.add_ski = add_ski
+        self.add_aki = add_aki
+        self.add_crldp = add_crldp
         self.tcb = bytes((5, 2, 0, 0, 0, 0, 26, 219))
         self.chip = bytes((0x42,)) * 64
         self.product = b"GENOA-B0"
@@ -668,32 +709,116 @@ class _Kit:
             self.product if product is None else product,
         )
 
-    def _build_ark(self):
+    def _ca_extras(
+        self,
+        builder,
+        public_key,
+        issuer_public_key,
+        add_ski=None,
+        add_aki=None,
+        add_crldp=None,
+        ski=None,
+        aki=None,
+        crldp_uri=None,
+        crldp_value=None,
+    ):
+        use_ski = self.add_ski if add_ski is None else add_ski
+        use_aki = self.add_aki if add_aki is None else add_aki
+        use_crldp = self.add_crldp if add_crldp is None else add_crldp
+        if ski is not None:
+            builder = builder.add_extension(ski, False)
+        elif use_ski:
+            builder = builder.add_extension(
+                x509.SubjectKeyIdentifier.from_public_key(public_key),
+                False,
+            )
+        if aki is not None:
+            builder = builder.add_extension(aki, False)
+        elif use_aki:
+            builder = builder.add_extension(
+                x509.AuthorityKeyIdentifier.from_issuer_public_key(issuer_public_key),
+                False,
+            )
+        if crldp_value is not None:
+            builder = builder.add_extension(crldp_value, False)
+        elif use_crldp or crldp_uri is not None:
+            uri = _CRLDP_URI if crldp_uri is None else crldp_uri
+            builder = builder.add_extension(_crldp(uri), False)
+        return builder
+
+    def _build_ark(
+        self,
+        path_length=None,
+        issuer=None,
+        add_ski=None,
+        add_aki=None,
+        add_crldp=None,
+        ski=None,
+        aki=None,
+        crldp_uri=None,
+        crldp_value=None,
+    ):
         name = _cn("ARK-Fresh")
+        length = self.ark_path_length if path_length is None else path_length
         builder = (
             x509.CertificateBuilder()
             .subject_name(name)
-            .issuer_name(name)
+            .issuer_name(name if issuer is None else issuer)
             .public_key(self.ark_key.public_key())
             .serial_number(x509.random_serial_number())
             .not_valid_before(self.not_before)
             .not_valid_after(self.not_after)
-            .add_extension(x509.BasicConstraints(True, 1), True)
+            .add_extension(x509.BasicConstraints(True, length), True)
             .add_extension(_KU_ARK, True)
+        )
+        builder = self._ca_extras(
+            builder,
+            self.ark_key.public_key(),
+            self.ark_key.public_key(),
+            add_ski=add_ski,
+            add_aki=add_aki,
+            add_crldp=add_crldp,
+            ski=ski,
+            aki=aki,
+            crldp_uri=crldp_uri,
+            crldp_value=crldp_value,
         )
         return _sign_cert(builder, self.ark_key)
 
-    def _build_ask(self):
+    def _build_ask(
+        self,
+        path_length=0,
+        issuer=None,
+        add_ski=None,
+        add_aki=None,
+        add_crldp=None,
+        ski=None,
+        aki=None,
+        crldp_uri=None,
+        crldp_value=None,
+    ):
         builder = (
             x509.CertificateBuilder()
             .subject_name(_cn("ASK-Fresh"))
-            .issuer_name(self.ark_cert.subject)
+            .issuer_name(self.ark_cert.subject if issuer is None else issuer)
             .public_key(self.ask_key.public_key())
             .serial_number(x509.random_serial_number())
             .not_valid_before(self.not_before)
             .not_valid_after(self.not_after)
-            .add_extension(x509.BasicConstraints(True, 0), True)
+            .add_extension(x509.BasicConstraints(True, path_length), True)
             .add_extension(_KU_ASK, True)
+        )
+        builder = self._ca_extras(
+            builder,
+            self.ask_key.public_key(),
+            self.ark_key.public_key(),
+            add_ski=add_ski,
+            add_aki=add_aki,
+            add_crldp=add_crldp,
+            ski=ski,
+            aki=aki,
+            crldp_uri=crldp_uri,
+            crldp_value=crldp_value,
         )
         return _sign_cert(builder, self.ark_key)
 
@@ -706,23 +831,43 @@ class _Kit:
         ski_critical=False,
         aki_critical=False,
         extra_ext=None,
+        duplicate_extra=False,
+        order=None,
+        amd_critical=(),
+        duplicate_suffix=None,
+        issuer=None,
+        raw_der=None,
     ):
         builder = (
             x509.CertificateBuilder()
             .subject_name(_cn("VCEK-Fresh"))
-            .issuer_name(self.ask_cert.subject)
+            .issuer_name(self.ask_cert.subject if issuer is None else issuer)
             .public_key(self.vcek_key.public_key())
             .serial_number(1)
             .not_valid_before(self.not_before)
             .not_valid_after(self.not_after)
         )
-        for suffix, value in amd.items():
+        suffixes = order if order is not None else tuple(amd)
+        critical = frozenset(amd_critical)
+        for suffix in suffixes:
+            value = amd[suffix]
+            encoded = (
+                raw_der[suffix]
+                if raw_der is not None and suffix in raw_der
+                else _amd_der(suffix, value)
+            )
             builder = builder.add_extension(
                 x509.UnrecognizedExtension(
                     ObjectIdentifier(_AMD_PREFIX + suffix),
-                    _amd_der(suffix, value),
+                    encoded,
                 ),
-                False,
+                suffix in critical,
+            )
+        if duplicate_suffix is not None:
+            oid = ObjectIdentifier(_AMD_PREFIX + duplicate_suffix)
+            encoded = _amd_der(duplicate_suffix, amd[duplicate_suffix])
+            builder._extensions.append(
+                x509.Extension(oid, False, x509.UnrecognizedExtension(oid, encoded))
             )
         if ski_aki or ski is not None:
             if ski is None:
@@ -734,8 +879,10 @@ class _Kit:
                 aki = x509.AuthorityKeyIdentifier(ask_ski.digest, None, None)
             builder = builder.add_extension(aki, aki_critical)
         if extra_ext is not None:
-            ext, critical = extra_ext
-            builder = builder.add_extension(ext, critical)
+            ext, extra_critical = extra_ext
+            builder = builder.add_extension(ext, extra_critical)
+            if duplicate_extra:
+                builder._extensions.append(x509.Extension(ext.oid, extra_critical, ext))
         # cryptography 46 refuses serial 0 on the builder; VCEK ABI requires it.
         builder._serial_number = 0
         return _sign_cert(builder, self.ask_key)
@@ -789,9 +936,10 @@ class _Kit:
         cpuid=None,
         measurement=None,
         host=None,
+        version=None,
     ):
         buf = bytearray(1184)
-        struct.pack_into("<I", buf, 0x000, self.version)
+        struct.pack_into("<I", buf, 0x000, self.version if version is None else version)
         struct.pack_into("<Q", buf, 0x008, self.policy if policy is None else policy)
         struct.pack_into("<I", buf, 0x030, self.vmpl if vmpl is None else vmpl)
         struct.pack_into("<I", buf, 0x034, 1)
@@ -1197,17 +1345,24 @@ def twin_cpuid_family():
 
 def twin_cpuid_model_expectation():
     kit = _kit()
-    return kit.evidence, replace(kit.expectations, cpuid_model=0)
+    return _report_twin(cpuid=(0x19, 0, kit.cpuid[2]))
+
+
+def twin_cpuid_step_expectation():
+    kit = _kit()
+    return _report_twin(cpuid=(0x19, kit.cpuid[1], kit.cpuid[2] ^ 1))
+
+
+def twin_version_expectation():
+    return _report_twin(version=4)
 
 
 def twin_measurement_expectation():
-    kit = _kit()
-    return kit.evidence, replace(kit.expectations, snp_measurement=bytes(48))
+    return _report_twin(measurement=bytes(48))
 
 
 def twin_host_data_expectation():
-    kit = _kit()
-    return kit.evidence, replace(kit.expectations, snp_host_data=bytes(32))
+    return _report_twin(host=bytes(32))
 
 
 def twin_floor_current_boot():
@@ -1469,6 +1624,267 @@ def twin_pcr10():
     return _quote_twin(msg, pcrs=pcrs)
 
 
+def twin_hcla_utf16le():
+    return _hcla_twin('{"keys":[]}'.encode("utf-16-le"))
+
+
+def twin_hcla_ek_missing_key_ops():
+    kit = _kit()
+    ek = kit._ek_jwk()
+    del ek["key_ops"]
+    return _hcla_twin(kit._build_claim(kit._ak_jwk(), ek))
+
+
+def _hcla_u32_twin(offset, value):
+    kit = _kit()
+    blob = bytearray(kit.hcla)
+    struct.pack_into("<I", blob, offset, value)
+    return replace(kit.evidence, hcl_report=bytes(blob)), kit.expectations
+
+
+def twin_hcla_claim_size_zero():
+    return _hcla_u32_twin(0x4D0, 0)
+
+
+def twin_hcla_claim_overflow():
+    return _hcla_u32_twin(0x4D0, 1365)
+
+
+def twin_hcla_data_size_mismatch():
+    return _hcla_u32_twin(0x4C0, 1)
+
+
+def twin_hcla_report_size_mismatch():
+    return _hcla_u32_twin(0x008, 1)
+
+
+def twin_pem_ark_internal_space():
+    kit = _kit()
+    return replace(kit.evidence, ark_pem=_pem_body_space(kit.evidence.ark_pem)), kit.expectations
+
+
+def twin_pem_ask_internal_space():
+    kit = _kit()
+    return replace(kit.evidence, ask_pem=_pem_body_space(kit.evidence.ask_pem)), kit.expectations
+
+
+def twin_pem_vcek_internal_space():
+    kit = _kit()
+    return replace(kit.evidence, vcek_pem=_pem_body_space(kit.evidence.vcek_pem)), kit.expectations
+
+
+def twin_pem_ak_internal_space():
+    kit = _kit()
+    return replace(
+        kit.evidence, ak_public_pem=_pem_body_space(kit.evidence.ak_public_pem)
+    ), kit.expectations
+
+
+def twin_ak_parent_qn():
+    kit = _kit()
+    return kit.evidence, replace(
+        kit.expectations, ak_parent_qualified_name=b"\x40\x00\x00\x0c"
+    )
+
+
+def twin_crl_bad_pss_params():
+    kit = _kit()
+    builder = (
+        x509.CertificateRevocationListBuilder()
+        .issuer_name(kit.ark_cert.subject)
+        .last_update(kit.crl_last)
+        .next_update(kit.crl_next)
+    )
+    crl = builder.sign(kit.ark_key, hashes.SHA384(), rsa_padding=padding.PKCS1v15())
+    der = crl.public_bytes(serialization.Encoding.DER)
+    evidence = replace(kit.evidence, ark_crl_der=der)
+    expectations = replace(kit.expectations, ark_crl_der_sha256=_sha256(der))
+    return evidence, expectations
+
+
+def twin_ark_not_self_issued():
+    kit = _kit()
+    cert = kit._build_ark(issuer=_cn("ARK-Other"))
+    return _repin_ark(kit, cert)
+
+
+def twin_ask_wrong_issuer():
+    kit = _kit()
+    cert = kit._build_ask(issuer=_cn("not-ark"))
+    return _repin_ask(kit, cert)
+
+
+def twin_vcek_wrong_issuer():
+    return _vcek_twin(_kit()._amd(), issuer=_cn("not-ask"))
+
+
+def twin_ark_ski_wrong():
+    kit = _kit()
+    ski = x509.SubjectKeyIdentifier(digest=bytes((0x11,)) * 20)
+    cert = kit._build_ark(add_ski=True, ski=ski)
+    return _repin_ark(kit, cert)
+
+
+def twin_ask_aki_wrong():
+    kit = _kit()
+    aki = x509.AuthorityKeyIdentifier(bytes((0x22,)) * 20, None, None)
+    cert = kit._build_ask(add_aki=True, aki=aki)
+    return _repin_ask(kit, cert)
+
+
+def twin_ark_pathlen_2():
+    kit = _kit()
+    cert = kit._build_ark(path_length=2)
+    return _repin_ark(kit, cert)
+
+
+def twin_ask_pathlen_1():
+    kit = _kit()
+    cert = kit._build_ask(path_length=1)
+    return _repin_ask(kit, cert)
+
+
+def twin_vcek_amd_missing():
+    kit = _kit()
+    amd = kit._amd()
+    del amd["1"]
+    return _vcek_twin(amd)
+
+
+def twin_vcek_amd_wrong_tag():
+    kit = _kit()
+    return _vcek_twin(kit._amd(), raw_der={"1": b"\x04\x01\x00"})
+
+
+def twin_vcek_amd_trailing():
+    kit = _kit()
+    return _vcek_twin(kit._amd(), raw_der={"1": b"\x02\x01\x00\x00"})
+
+
+def twin_vcek_amd_nonminimal():
+    kit = _kit()
+    return _vcek_twin(kit._amd(), raw_der={"1": b"\x02\x81\x01\x00"})
+
+
+def twin_vcek_amd_critical():
+    kit = _kit()
+    return _vcek_twin(kit._amd(), amd_critical=("1",))
+
+
+def twin_vcek_amd_duplicate():
+    kit = _kit()
+    return _vcek_twin(kit._amd(), duplicate_suffix="1")
+
+
+def twin_vcek_duplicate_basic_constraints():
+    kit = _kit()
+    return _vcek_twin(
+        kit._amd(),
+        extra_ext=(x509.BasicConstraints(False, None), False),
+        duplicate_extra=True,
+    )
+
+
+def twin_ca_crldp_http():
+    kit = _kit()
+    cert = kit._build_ark(crldp_uri="http://kdsintf.amd.com/vcek/v1/Genoa/crl")
+    return _repin_ark(kit, cert)
+
+
+def twin_ca_crldp_userinfo():
+    kit = _kit()
+    cert = kit._build_ark(crldp_uri="https://user@kdsintf.amd.com/vcek/v1/Genoa/crl")
+    return _repin_ark(kit, cert)
+
+
+def twin_ca_crldp_port():
+    kit = _kit()
+    cert = kit._build_ark(crldp_uri="https://kdsintf.amd.com:443/vcek/v1/Genoa/crl")
+    return _repin_ark(kit, cert)
+
+
+def twin_ca_crldp_query():
+    kit = _kit()
+    cert = kit._build_ark(crldp_uri="https://kdsintf.amd.com/vcek/v1/Genoa/crl?foo=1")
+    return _repin_ark(kit, cert)
+
+
+def twin_ca_crldp_fragment():
+    kit = _kit()
+    cert = kit._build_ark(crldp_uri="https://kdsintf.amd.com/vcek/v1/Genoa/crl#bar")
+    return _repin_ark(kit, cert)
+
+
+def twin_ca_crldp_two_points():
+    kit = _kit()
+    extra = x509.DistributionPoint(
+        full_name=[x509.UniformResourceIdentifier(_CRLDP_URI + "/extra")],
+        relative_name=None,
+        reasons=None,
+        crl_issuer=None,
+    )
+    cert = kit._build_ark(crldp_value=_crldp(_CRLDP_URI, extra=extra))
+    return _repin_ark(kit, cert)
+
+
+def _positive_kit(**opts):
+    kit = _Kit(**opts)
+    _check_fresh(kit.evidence, kit.expectations)
+    _assert_ask_vcek(kit.evidence.ask_pem, kit.evidence.vcek_pem)
+    _assert_ark_crl(kit.evidence.ark_pem, kit.evidence.ark_crl_der)
+    return kit.evidence, kit.expectations
+
+
+def fresh_positive_ark_pathlen_none():
+    return _positive_kit(ark_path_length=None)
+
+
+def fresh_positive_ski_aki():
+    return _positive_kit(add_ski=True, add_aki=True)
+
+
+def fresh_positive_ark_pathlen_none_ski_aki():
+    return _positive_kit(ark_path_length=None, add_ski=True, add_aki=True)
+
+
+def fresh_positive_ski_aki_crldp():
+    return _positive_kit(add_ski=True, add_aki=True, add_crldp=True)
+
+
+def fresh_positive_ark_pathlen_none_ski_aki_crldp():
+    return _positive_kit(ark_path_length=None, add_ski=True, add_aki=True, add_crldp=True)
+
+
+def fresh_positive_ski_only():
+    return _positive_kit(add_ski=True)
+
+
+def fresh_positive_crldp_only():
+    return _positive_kit(add_crldp=True)
+
+
+def fresh_positive_vcek_ext_reorder():
+    kit = _kit()
+    cert = kit._build_vcek(kit._amd(), order=_VCEK_REORDER)
+    pem = cert.public_bytes(serialization.Encoding.PEM)
+    _assert_ask_vcek(kit.evidence.ask_pem, pem)
+    evidence = replace(kit.evidence, vcek_pem=pem)
+    _check_fresh(evidence, kit.expectations)
+    return evidence, kit.expectations
+
+
+FRESH_POSITIVES = (
+    ("ark_pathlen_none", fresh_positive_ark_pathlen_none),
+    ("ski_aki", fresh_positive_ski_aki),
+    ("ark_pathlen_none_ski_aki", fresh_positive_ark_pathlen_none_ski_aki),
+    ("ski_aki_crldp", fresh_positive_ski_aki_crldp),
+    ("ark_pathlen_none_ski_aki_crldp", fresh_positive_ark_pathlen_none_ski_aki_crldp),
+    ("ski_only", fresh_positive_ski_only),
+    ("crldp_only", fresh_positive_crldp_only),
+    ("vcek_ext_reorder", fresh_positive_vcek_ext_reorder),
+)
+
+
 FRESH_TWINS = (
     ("vcek_ext_1", twin_vcek_ext_1),
     ("vcek_ext_2", twin_vcek_ext_2),
@@ -1493,6 +1909,8 @@ FRESH_TWINS = (
     ("vmpl_expectation", twin_vmpl_expectation),
     ("cpuid_family", twin_cpuid_family),
     ("cpuid_model_expectation", twin_cpuid_model_expectation),
+    ("cpuid_step_expectation", twin_cpuid_step_expectation),
+    ("version_expectation", twin_version_expectation),
     ("measurement_expectation", twin_measurement_expectation),
     ("host_data_expectation", twin_host_data_expectation),
     ("floor_current_boot", twin_floor_current_boot),
@@ -1523,6 +1941,38 @@ FRESH_TWINS = (
     ("pcr_composite", twin_pcr_composite),
     ("pcr_baseline", twin_pcr_baseline),
     ("pcr10", twin_pcr10),
+    ("hcla_utf16le", twin_hcla_utf16le),
+    ("hcla_ek_missing_key_ops", twin_hcla_ek_missing_key_ops),
+    ("hcla_claim_size_zero", twin_hcla_claim_size_zero),
+    ("hcla_claim_overflow", twin_hcla_claim_overflow),
+    ("hcla_data_size_mismatch", twin_hcla_data_size_mismatch),
+    ("hcla_report_size_mismatch", twin_hcla_report_size_mismatch),
+    ("pem_ark_internal_space", twin_pem_ark_internal_space),
+    ("pem_ask_internal_space", twin_pem_ask_internal_space),
+    ("pem_vcek_internal_space", twin_pem_vcek_internal_space),
+    ("pem_ak_internal_space", twin_pem_ak_internal_space),
+    ("ak_parent_qn", twin_ak_parent_qn),
+    ("crl_bad_pss_params", twin_crl_bad_pss_params),
+    ("ark_not_self_issued", twin_ark_not_self_issued),
+    ("ask_wrong_issuer", twin_ask_wrong_issuer),
+    ("vcek_wrong_issuer", twin_vcek_wrong_issuer),
+    ("ark_ski_wrong", twin_ark_ski_wrong),
+    ("ask_aki_wrong", twin_ask_aki_wrong),
+    ("ark_pathlen_2", twin_ark_pathlen_2),
+    ("ask_pathlen_1", twin_ask_pathlen_1),
+    ("vcek_amd_missing", twin_vcek_amd_missing),
+    ("vcek_amd_wrong_tag", twin_vcek_amd_wrong_tag),
+    ("vcek_amd_trailing", twin_vcek_amd_trailing),
+    ("vcek_amd_nonminimal", twin_vcek_amd_nonminimal),
+    ("vcek_amd_critical", twin_vcek_amd_critical),
+    ("vcek_amd_duplicate", twin_vcek_amd_duplicate),
+    ("vcek_duplicate_basic_constraints", twin_vcek_duplicate_basic_constraints),
+    ("ca_crldp_http", twin_ca_crldp_http),
+    ("ca_crldp_userinfo", twin_ca_crldp_userinfo),
+    ("ca_crldp_port", twin_ca_crldp_port),
+    ("ca_crldp_query", twin_ca_crldp_query),
+    ("ca_crldp_fragment", twin_ca_crldp_fragment),
+    ("ca_crldp_two_points", twin_ca_crldp_two_points),
 )
 
 
@@ -1595,21 +2045,27 @@ def main():
     frozen_digest = _oracle_commitment(frozen_evidence, frozen_expectations)
     assert len(frozen_digest) == 32
     print("frozen oracle: ok")
-    print("frozen_commitment", frozen_digest.hex())
     fresh_evidence, fresh_expectations = fresh_positive()
     fresh_digest = _oracle_commitment(fresh_evidence, fresh_expectations)
     assert frozen_digest != fresh_digest
     print("fresh oracle: ok")
-    print("fresh_commitment", fresh_digest.hex())
     extra_evidence, extra_expectations = fresh_positive_attr_50472()
     _check_fresh(extra_evidence, extra_expectations)
     print("fresh attr 0x00050472: ok")
+    for name, builder in FRESH_POSITIVES:
+        evidence, expectations = builder()
+        assert type(evidence) is FrozenEvidence
+        assert type(expectations) is FrozenExpectations
+        print("positive", name, "ok")
     for name, builder in FRESH_TWINS:
         evidence, expectations = builder()
         assert type(evidence) is FrozenEvidence
         assert type(expectations) is FrozenExpectations
         print("twin", name, "ok")
-    print("spp diagnostic attestation oracle: ok (%d twins)" % len(FRESH_TWINS))
+    print(
+        "spp diagnostic attestation oracle: ok (%d twins, %d positives)"
+        % (len(FRESH_TWINS), len(FRESH_POSITIVES))
+    )
 
 
 if __name__ == "__main__":

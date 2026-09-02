@@ -133,6 +133,7 @@ test-spp-diag-attest-fixture:
 	PYTHONPATH=.:test $(PYTHON) $(SPP_DIAG_ATTEST_FIXTURE_TEST)
 
 test-spp-diag-attest:
+	PYTHONPATH=.:test $(PYTHON) $(SPP_DIAG_ATTEST_FIXTURE_TEST)
 	PYTHONPATH=.:test $(PYTHON) $(SPP_DIAG_ATTEST_ORACLE)
 	PYTHONPATH=.:test $(PYTHON) $(SPP_DIAG_ATTEST_TEST)
 
@@ -194,7 +195,7 @@ test-spp-diag-trace-sanitized:
 	./build/spp-diag-trace-policy2-selftest-sanitized
 	rm -f build/spp-diag-trace-policy2-selftest-sanitized
 
-ci: check test test-spp-diag-trace test-spp-diag-trace-oracle test-spp-diag-trace-chain test-spp-diag-trace-checkpoints test-spp-diag-trace-semantics test-spp-diag-ima-replay test-spp-diag-attest-fixture test-spp-diag-attest test-spp-diag-trace-sanitized
+ci: check test test-spp-diag-trace test-spp-diag-trace-oracle test-spp-diag-trace-chain test-spp-diag-trace-checkpoints test-spp-diag-trace-semantics test-spp-diag-ima-replay test-spp-diag-attest test-spp-diag-trace-sanitized
 	rm -rf build
 
 ratls-contract:

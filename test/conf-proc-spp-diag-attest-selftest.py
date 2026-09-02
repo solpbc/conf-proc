@@ -404,7 +404,9 @@ def test_positive_frozen_fixture() -> None:
 
 
 def test_positive_fresh_factory() -> None:
-    for builder in (_oracle.fresh_positive, _oracle.fresh_positive_attr_50472):
+    builders = [_oracle.fresh_positive, _oracle.fresh_positive_attr_50472]
+    builders.extend(builder for _name, builder in _oracle.FRESH_POSITIVES)
+    for builder in builders:
         oracle_ev, oracle_exp = builder()
         ev, exp = _to_production(oracle_ev, oracle_exp)
         result = _appraise(ev, exp)
@@ -448,8 +450,10 @@ def test_type_stage() -> None:
         value = getattr(exp, name)
         _expect_error(TYPE, ev, dataclasses.replace(exp, **{name: bytearray(value)}))
         _expect_error(TYPE, ev, dataclasses.replace(exp, **{name: BytesSubclass(value)}))
-    _expect_error(TYPE, ev, dataclasses.replace(exp, ak_parent_qualified_name=b"\x40\x00\x00\x0c"))
+    _expect_error(AK, ev, dataclasses.replace(exp, ak_parent_qualified_name=b"\x40\x00\x00\x0c"))
     _expect_error(TYPE, ev, dataclasses.replace(exp, ak_parent_qualified_name=bytearray(_PARENT_QN)))
+    _expect_error(TYPE, ev, dataclasses.replace(exp, ak_parent_qualified_name=_PARENT_QN[:-1]))
+    _expect_error(TYPE, ev, dataclasses.replace(exp, ak_parent_qualified_name=_PARENT_QN + b"\x00"))
     _expect_error(TYPE, ev, dataclasses.replace(exp, vcek_product_name=b""))
     _expect_error(TYPE, ev, dataclasses.replace(exp, vcek_product_name=bytes(65)))
     _expect_error(TYPE, ev, dataclasses.replace(exp, baseline_pcrs=list(exp.baseline_pcrs)))
@@ -464,7 +468,12 @@ def test_type_stage() -> None:
     _expect_error(TYPE, {}, exp)
     _expect_error(TYPE, ev, {})
     _expect_error(TYPE, ev, dataclasses.replace(exp, appraisal_unix=-1))
-    _expect_error(TYPE, ev, dataclasses.replace(exp, snp_vmpl=256))
+    _expect_error(TYPE, ev, dataclasses.replace(exp, snp_vmpl=-1))
+    _expect_error(TYPE, ev, dataclasses.replace(exp, snp_vmpl=2**32))
+    _expect_error(TYPE, ev, dataclasses.replace(exp, snp_report_version=-1))
+    _expect_error(TYPE, ev, dataclasses.replace(exp, snp_report_version=2**32))
+    _expect_error(POLICY, ev, dataclasses.replace(exp, snp_vmpl=256))
+    _expect_error(POLICY, ev, dataclasses.replace(exp, snp_report_version=256))
 
 
 def test_cap_stage() -> None:
@@ -486,7 +495,7 @@ def test_cap_stage() -> None:
         padded = value + bytes(cap + 1 - len(value))
         _expect_error(CAP, dataclasses.replace(ev, **{name: padded}), exp)
     assert len(ev.hcl_report) == HCLA_BYTES
-    _expect_error(CAP, dataclasses.replace(ev, hcl_report=ev.hcl_report[:-1]), exp)
+    _expect_error(HCLA, dataclasses.replace(ev, hcl_report=ev.hcl_report[:-1]), exp)
     _expect_error(CAP, dataclasses.replace(ev, hcl_report=ev.hcl_report + b"\x00"), exp)
 
 
@@ -495,7 +504,20 @@ def test_x509_root_crl() -> None:
         X509,
         lambda name: name.startswith("vcek_ski")
         or name.startswith("vcek_aki")
-        or name == "vcek_extra_extension",
+        or name == "vcek_extra_extension"
+        or name.startswith(("pem_ark_", "pem_ask_", "pem_vcek_", "ca_crldp_"))
+        or name in {"ark_pathlen_2", "ask_pathlen_1", "vcek_duplicate_basic_constraints"},
+    )
+    _expect_twins(
+        ROOT,
+        lambda name: name
+        in {
+            "ark_not_self_issued",
+            "ask_wrong_issuer",
+            "vcek_wrong_issuer",
+            "ark_ski_wrong",
+            "ask_aki_wrong",
+        },
     )
     ev, exp = _frozen_pair()
     flipped_ark = bytearray(exp.ark_der_sha256)
@@ -507,7 +529,7 @@ def test_x509_root_crl() -> None:
     flipped_crl = bytearray(exp.ark_crl_der_sha256)
     flipped_crl[0] ^= 1
     _expect_error(CRL, ev, dataclasses.replace(exp, ark_crl_der_sha256=bytes(flipped_crl)))
-    _expect_twins(CRL, lambda name: name == "ask_revoked")
+    _expect_twins(CRL, lambda name: name in {"ask_revoked", "crl_bad_pss_params"})
     _expect_error(X509, dataclasses.replace(ev, ark_pem=ev.ark_pem + b"\x00"), exp)
     _expect_error(X509, dataclasses.replace(ev, ark_pem=ev.ark_pem + ev.ark_pem), exp)
 
@@ -529,11 +551,13 @@ def test_vcek_binding() -> None:
     _expect_twins(
         VCEK,
         lambda name: name.startswith("vcek_ext_")
+        or name.startswith("vcek_amd_")
         or name in {"chip_id_mismatch", "reported_tcb_mismatch"},
     )
 
 
 def test_ak_quote_pcr() -> None:
+    _expect_twins(AK, lambda name: name.startswith("pem_ak_") or name == "ak_parent_qn")
     _expect_twins(QUOTE, lambda name: name.startswith("quote_") and name != "quote_digest")
     _expect_twins(PCR, lambda name: name == "quote_digest")
     _expect_twins(PCR, lambda name: name.startswith("pcr_") or name == "pcr10")
@@ -570,6 +594,8 @@ def test_policy_and_commitment() -> None:
         "debug_bit",
         "vmpl_expectation",
         "cpuid_model_expectation",
+        "cpuid_step_expectation",
+        "version_expectation",
         "measurement_expectation",
         "host_data_expectation",
         "floor_current_boot",
@@ -605,6 +631,60 @@ def test_policy_and_commitment() -> None:
     ima[0] ^= 1
     mutated_ima = dataclasses.replace(oracle_exp, ima_pcr10=bytes(ima))
     assert _oracle._oracle_commitment(oracle_ev, mutated_ima) != original
+
+
+def test_reason_precedence() -> None:
+    ev, exp = _frozen_pair()
+    padded = ev.ark_pem + bytes(MAX_CERT_PEM_BYTES + 1 - len(ev.ark_pem))
+    _expect_error(
+        TYPE,
+        dataclasses.replace(ev, ark_pem=padded),
+        dataclasses.replace(exp, snp_vmpl=True),
+    )
+    _expect_error(
+        CAP,
+        dataclasses.replace(ev, hcl_report=ev.hcl_report + b"\x00", ark_pem=b"not-pem"),
+        exp,
+    )
+    newline = ev.ark_pem.find(b"\n")
+    messy = ev.ark_pem[: newline + 1] + b" " + ev.ark_pem[newline + 1 :]
+    flipped_ark = bytearray(exp.ark_der_sha256)
+    flipped_ark[0] ^= 1
+    _expect_error(
+        X509,
+        dataclasses.replace(ev, ark_pem=messy),
+        dataclasses.replace(exp, ark_der_sha256=bytes(flipped_ark)),
+    )
+    flipped_crl = bytearray(exp.ark_crl_der_sha256)
+    flipped_crl[0] ^= 1
+    _expect_error(
+        ROOT,
+        ev,
+        dataclasses.replace(
+            exp,
+            ark_der_sha256=bytes(flipped_ark),
+            ark_crl_der_sha256=bytes(flipped_crl),
+        ),
+    )
+    flipped_extra = bytearray(exp.quote_extra_data)
+    flipped_extra[0] ^= 1
+    _expect_error(
+        AK,
+        ev,
+        dataclasses.replace(
+            exp,
+            ak_parent_qualified_name=b"\x40\x00\x00\x0c",
+            quote_extra_data=bytes(flipped_extra),
+        ),
+    )
+    oracle_ev, oracle_exp = _oracle.twin_hcla_ek_missing_key_ops()
+    floor = oracle_exp.minimum_tcb
+    oracle_exp = dataclasses.replace(
+        oracle_exp,
+        minimum_tcb=dataclasses.replace(floor, boot_loader=floor.boot_loader + 1),
+    )
+    hcla_ev, hcla_exp = _to_production(oracle_ev, oracle_exp)
+    _expect_error(HCLA, hcla_ev, hcla_exp)
 
 
 def test_privacy_and_independence() -> None:
@@ -722,6 +802,7 @@ TESTS = (
     test_vcek_binding,
     test_ak_quote_pcr,
     test_policy_and_commitment,
+    test_reason_precedence,
     test_privacy_and_independence,
 )
 
