@@ -6,6 +6,14 @@ Wants=network-online.target
 [Service]
 User=azureuser
 WorkingDirectory=/home/azureuser/conf-proc
+Environment=WANDB_MODE=disabled
+Environment=WANDB_DISABLED=true
+Environment=SENTRY_DSN=
+Environment=HF_HUB_DISABLE_TELEMETRY=1
+Environment=DO_NOT_TRACK=1
+IPAddressDeny=any
+IPAddressAllow=127.0.0.0/8
+IPAddressAllow=::1/128
 ExecStart=/home/azureuser/asrenv/bin/python /home/azureuser/conf-proc/asr_shim.py --host 127.0.0.1 --port 8100 --model-path /opt/spp-asr/parakeet-tdt-0.6b-v3.nemo --model-sha256 3cbdc85877e668ca7b82d0d56770eb1fac76691f55d6b97545e8d61ca588d10d
 Restart=always
 RestartSec=10
