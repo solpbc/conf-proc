@@ -3285,7 +3285,7 @@ int spp_diag_trace_core_runtime_handle_command(const u8 *cmd_raw, size_t len)
 		spin_unlock_irqrestore(&spp_diag_trace_core_lock, flags);
 
 		ima_err = ima_measure_critical_data(
-			"sol_spp_diag_trace", "sol-spp-diag-sealed-v1",
+			"sol_spp_diag_trace", "sol-spp-diag-terminal-v1",
 			sealed_record, sizeof(sealed_record), false, NULL, 0);
 
 		spin_lock_irqsave(&spp_diag_trace_core_lock, flags);

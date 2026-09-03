@@ -318,9 +318,9 @@ static void test_advance_phase_and_seal_happy_path(void)
 
 	/* Verify IMA measurement record */
 	ima_call = host_ima_last_call();
-	ASSERT(ima_call->calls == 3, "three IMA measurements made (ready, released, sealed)");
+	ASSERT(ima_call->calls == 3, "three IMA measurements made (ready, released, terminal)");
 	ASSERT(strcmp(ima_call->event_label, "sol_spp_diag_trace") == 0, "event label is sol_spp_diag_trace");
-	ASSERT(strcmp(ima_call->event_name, "sol-spp-diag-sealed-v1") == 0, "event name is sol-spp-diag-sealed-v1");
+	ASSERT(strcmp(ima_call->event_name, "sol-spp-diag-terminal-v1") == 0, "event name is sol-spp-diag-terminal-v1");
 	ASSERT(ima_call->buf_len == 256, "record length is 256 bytes");
 
 	/* Verify IMA record content field offsets:
