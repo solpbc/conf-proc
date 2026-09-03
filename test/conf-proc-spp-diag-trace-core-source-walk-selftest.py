@@ -30,6 +30,7 @@ ALLOW_PREFIXES = (
     "spp-diag-trace-core-src/manifest.json",
     "spp-diag-trace-core-src/config.fragment",
     "spp-diag-trace-core-src/config.bootstrap.fragment",
+    "spp-diag-trace-core-src/config.runtime.fragment",
     "Makefile",
 )
 
@@ -53,6 +54,7 @@ NONSOURCE_PATHS = {
     "spp-diag-trace-core-src/manifest.json",
     "spp-diag-trace-core-src/config.fragment",
     "spp-diag-trace-core-src/config.bootstrap.fragment",
+    "spp-diag-trace-core-src/config.runtime.fragment",
 }
 SPDX_RE = re.compile(r"SPDX-License-Identifier:\s*(\S+)")
 
@@ -69,6 +71,16 @@ KUNIT_BOOTSTRAP_CASE_NAMES = (
     "parser_contract",
     "production_gate_transitions",
     "checkpoint_transitions",
+)
+
+KUNIT_RUNTIME_FILE = "spp-diag-trace-core-src/security/spp_diag_trace_core/runtime_kunit.c"
+KUNIT_RUNTIME_SUITE_REGISTRATION = "kunit_test_suite(spp_diag_trace_core_runtime_suite)"
+KUNIT_RUNTIME_CASE_NAMES = (
+    "runtime_root_binding",
+    "runtime_task_lifecycle",
+    "runtime_exec_lifecycle",
+    "runtime_securityfs_control",
+    "runtime_sealing_kthread_race",
 )
 
 MAKE_VAR_RE = re.compile(r"^([A-Za-z0-9_]+)\s*:=\s*(.*)$")
@@ -309,6 +321,52 @@ def bootstrap_wiring_check(root: Path = ROOT) -> list[str]:
     return violations
 
 
+def runtime_kunit_case_check_text(text: str) -> tuple[int, list[str]]:
+    violations: list[str] = []
+    if KUNIT_RUNTIME_SUITE_REGISTRATION not in text:
+        violations.append(f"missing {KUNIT_RUNTIME_SUITE_REGISTRATION!r}")
+    found = [name for name in KUNIT_RUNTIME_CASE_NAMES if f"KUNIT_CASE({name})" in text]
+    missing = [name for name in KUNIT_RUNTIME_CASE_NAMES if name not in found]
+    if missing:
+        violations.append(f"missing runtime KUNIT_CASE entries: {missing}")
+    return len(found), violations
+
+
+def runtime_source_walk_check(root: Path = ROOT) -> list[str]:
+    violations: list[str] = []
+    k3_files = (
+        root / "spp-diag-trace-core-src/security/spp_diag_trace_core/runtime_state.c",
+        root / "spp-diag-trace-core-src/security/spp_diag_trace_core/runtime_fs.c",
+        root / "spp-diag-trace-core-src/security/spp_diag_trace_core/runtime_redirect.h",
+        root / "spp-diag-trace-core-src/security/spp_diag_trace_core/runtime_types.h",
+        root / "spp-diag-trace-core-src/security/spp_diag_trace_core/runtime_kunit.c",
+        root / "spp-diag-trace-core-src/include/linux/spp_diag_trace_runtime.h",
+    )
+    forbidden_lsm = (
+        "LSM_HOOK_INIT",
+        "security_add_hooks",
+        "struct security_hook_list",
+        "register_lsm",
+        "call_int_hook",
+        "call_void_hook",
+    )
+    for p in k3_files:
+        if not p.exists():
+            violations.append(f"missing K3 file: {p.name}")
+            continue
+        text = p.read_text(encoding="utf-8")
+        if "SPDX-License-Identifier: GPL-2.0-only" not in text:
+            violations.append(f"{p.name}: missing GPL-2.0-only SPDX header")
+        if "conf_proc_spp_diag_trace.h" in text or "conf_proc_spp_diag_trace.c" in text:
+            violations.append(f"{p.name}: forbidden include of conf_proc_spp_diag_trace.h/.c")
+        if "conf_proc_spp_diag_trace_semantics" in text:
+            violations.append(f"{p.name}: forbidden reference to semantic reducer")
+        for hook_pat in forbidden_lsm:
+            if hook_pat in text:
+                violations.append(f"{p.name}: forbidden real LSM hook registration pattern: {hook_pat}")
+    return violations
+
+
 def main() -> int:
     # --- AC9: dormancy walk (unchanged behavior) ---
     scanned, hits = walk()
@@ -469,6 +527,25 @@ def main() -> int:
         print(f"FAIL bootstrap-wiring-check {wiring_violations}")
         return 1
     print("ok   bootstrap-wiring-check")
+
+    runtime_text = (ROOT / KUNIT_RUNTIME_FILE).read_text(encoding="utf-8")
+    runtime_count, runtime_violations = runtime_kunit_case_check_text(runtime_text)
+    if runtime_violations or runtime_count == 0:
+        print(f"FAIL runtime-kunit-case-check {runtime_violations}")
+        return 1
+    mutated_runtime = runtime_text.replace(
+        f"KUNIT_CASE({KUNIT_RUNTIME_CASE_NAMES[0]}),", "", 1
+    )
+    if not runtime_kunit_case_check_text(mutated_runtime)[1]:
+        print("FAIL runtime-kunit-case-check did not flag a removed case")
+        return 1
+    print(f"ok   runtime-kunit-case-check-clean cases={runtime_count}")
+
+    runtime_violations = runtime_source_walk_check()
+    if runtime_violations:
+        print(f"FAIL runtime-source-walk-check {runtime_violations}")
+        return 1
+    print("ok   runtime-source-walk-check")
 
     return 0
 

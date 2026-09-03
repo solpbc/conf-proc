@@ -3,6 +3,7 @@
 #define SPP_DIAG_TRACE_CORE_SHIM_LINUX_INIT_H
 
 #define __init
+#define core_initcall(fn) static int (*__host_initcall_##fn)(void) __attribute__((unused)) = fn
 
 extern char *saved_command_line;
 extern unsigned int saved_command_line_len;

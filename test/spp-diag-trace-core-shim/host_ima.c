@@ -5,6 +5,7 @@
 
 static struct host_ima_call last_call;
 static int ima_result;
+static void (*ima_hook)(const struct host_ima_call *call);
 
 int ima_measure_critical_data(const char *event_label, const char *event_name,
 			      const void *buf, size_t buf_len, bool hash,
@@ -20,6 +21,8 @@ int ima_measure_critical_data(const char *event_label, const char *event_name,
 	if (buf_len <= sizeof(last_call.record))
 		memcpy(last_call.record, buf, buf_len);
 	last_call.calls++;
+	if (ima_hook)
+		ima_hook(&last_call);
 	return ima_result;
 }
 
@@ -35,11 +38,17 @@ void host_ima_reset(void)
 	last_call.calls = 0;
 	memset(last_call.record, 0, sizeof(last_call.record));
 	ima_result = 0;
+	ima_hook = NULL;
 }
 
 void host_ima_set_result(int result)
 {
 	ima_result = result;
+}
+
+void host_ima_set_hook(void (*hook)(const struct host_ima_call *call))
+{
+	ima_hook = hook;
 }
 
 const struct host_ima_call *host_ima_last_call(void)

@@ -8,6 +8,7 @@
 #include <linux/sched.h>
 
 #include <linux/spp_diag_trace_bootstrap.h>
+#include <linux/spp_diag_trace_runtime.h>
 
 #include "core.h"
 
@@ -65,9 +66,20 @@ void __init spp_diag_trace_bootstrap_release(void)
 		fail_stop("spp diag trace RELEASE measurement");
 		return;
 	}
-	if (spp_diag_trace_core_bootstrap_release_measured() ||
-	    spp_diag_trace_core_bootstrap_publish()) {
+	if (spp_diag_trace_core_bootstrap_release_measured()) {
 		fail_stop("spp diag trace release publication");
+		return;
+	}
+	if (!spp_diag_trace_runtime_ready()) {
+		fail_stop("spp diag trace runtime readiness");
+		return;
+	}
+	if (spp_diag_trace_core_bootstrap_publish()) {
+		fail_stop("spp diag trace release publication");
+		return;
+	}
+	if (spp_diag_trace_runtime_bind_root(current)) {
+		fail_stop("spp diag trace runtime bind root");
 		return;
 	}
 }

@@ -16,6 +16,8 @@ from conf_proc_json import canonical_dumps
 from conf_proc_reasons import ApplianceError
 from conf_proc_spp_diag_trace_core_manifest import (
     BOOTSTRAP_API_SYMBOLS,
+    CORE_API_SYMBOLS,
+    RUNTIME_API_SYMBOLS,
     CoreManifest,
     parse_core_manifest,
 )
@@ -42,12 +44,19 @@ K1_FRAGMENT_SYMBOLS = (
 FRAGMENT_SYMBOLS = {
     "enabled": K1_FRAGMENT_SYMBOLS + ("CONFIG_SECURITY_SPP_DIAG_TRACE_CORE_BOOTSTRAP",),
     "disabled": K1_FRAGMENT_SYMBOLS,
+    "runtime": K1_FRAGMENT_SYMBOLS + (
+        "CONFIG_SECURITY_SPP_DIAG_TRACE_CORE_BOOTSTRAP",
+        "CONFIG_SECURITY_SPP_DIAG_TRACE_CORE_RUNTIME",
+        "CONFIG_SECURITYFS",
+    ),
 }
 EXPORT_NAME = ".config.export"
 CONFIG_NAME = ".config"
 TEMP_SUFFIX = ".spp-diag-trace-core-handoff-tmp"
 ANNOTATIONS_CONFIG = "debian.azure-fde-6.8/config/annotations"
 CORE_OBJECT_TARGET = "security/spp_diag_trace_core/core.o"
+RUNTIME_STATE_TARGET = "security/spp_diag_trace_core/runtime_state.o"
+RUNTIME_FS_TARGET = "security/spp_diag_trace_core/runtime_fs.o"
 VMLINUX_TARGET = "vmlinux"
 CANONICAL_CERT_TARGETS = (
     "debian/canonical-certs.pem",
@@ -76,11 +85,13 @@ def require_handoff_argv(
     nm: str,
     enabled_output_dir: str,
     disabled_output_dir: str,
+    runtime_output_dir: str,
 ) -> None:
-    """Refuse any argv outside the exact dual-build and inspection shapes."""
+    """Refuse any argv outside the exact triple-build and inspection shapes."""
 
     enabled_o = "O=" + enabled_output_dir
     disabled_o = "O=" + disabled_output_dir
+    runtime_o = "O=" + runtime_output_dir
     allowed = (
         [
             annotations,
@@ -98,8 +109,14 @@ def require_handoff_argv(
         [make, enabled_o, VMLINUX_TARGET],
         [make, disabled_o, "olddefconfig"],
         [make, disabled_o, VMLINUX_TARGET],
+        [make, runtime_o, "olddefconfig"],
+        [make, runtime_o, CORE_OBJECT_TARGET],
+        [make, runtime_o, RUNTIME_STATE_TARGET],
+        [make, runtime_o, RUNTIME_FS_TARGET],
+        [make, runtime_o, VMLINUX_TARGET],
         [nm, "-g", "--defined-only", os.path.join(enabled_output_dir, VMLINUX_TARGET)],
         [nm, "-g", "--defined-only", os.path.join(disabled_output_dir, VMLINUX_TARGET)],
+        [nm, "-g", "--defined-only", os.path.join(runtime_output_dir, VMLINUX_TARGET)],
     )
     if argv in allowed:
         return
@@ -108,8 +125,8 @@ def require_handoff_argv(
         "handoff argv is not allowlisted",
         expected=(
             "annotations -f debian.azure-fde-6.8/config/annotations --arch amd64 "
-            "--flavour azure-fde --export; exact certificate preparation; enabled "
-            "and disabled olddefconfig/vmlinux builds; enabled core.o; final nm"
+            "--flavour azure-fde --export; exact certificate preparation; enabled, "
+            "disabled, and runtime olddefconfig/vmlinux builds; core.o and runtime objects; final nm"
         ),
         observed=" ".join(argv),
     )
@@ -124,6 +141,7 @@ def _run_handoff_tool(
     nm: str,
     enabled_output_dir: str,
     disabled_output_dir: str,
+    runtime_output_dir: str,
     cwd: str,
 ):
     require_handoff_argv(
@@ -133,6 +151,7 @@ def _run_handoff_tool(
         nm=nm,
         enabled_output_dir=enabled_output_dir,
         disabled_output_dir=disabled_output_dir,
+        runtime_output_dir=runtime_output_dir,
     )
     try:
         return guard.run_tool(argv, cwd=cwd, check=False)
@@ -235,12 +254,12 @@ def _validate_config_y(leg: str, y_lines: list[str], config_path: str) -> None:
         _fail(CP_SPP_DIAG_TRACE_CORE_HANDOFF, "STATIC_USERMODEHELPER is enabled", path=config_path)
 
 
-def _validate_output_dirs(worktree: str, output_dirs: tuple[str, str]) -> None:
+def _validate_output_dirs(worktree: str, output_dirs: tuple[str, ...]) -> None:
     output_reals = tuple(os.path.realpath(path) for path in output_dirs)
-    if output_reals[0] == output_reals[1]:
+    if len(set(output_reals)) != len(output_reals):
         _fail(
             CP_SPP_DIAG_TRACE_CORE_HANDOFF,
-            "enabled and disabled output directories must differ",
+            "output directories must differ",
             observed=" ".join(output_dirs),
         )
     worktree_real = os.path.realpath(worktree)
@@ -314,6 +333,7 @@ def _prepare_config(
     output_dir: str,
     enabled_output_dir: str,
     disabled_output_dir: str,
+    runtime_output_dir: str,
 ) -> dict:
     export_path = os.path.join(output_dir, EXPORT_NAME)
     config_path = os.path.join(output_dir, CONFIG_NAME)
@@ -333,6 +353,7 @@ def _prepare_config(
         nm=nm,
         enabled_output_dir=enabled_output_dir,
         disabled_output_dir=disabled_output_dir,
+        runtime_output_dir=runtime_output_dir,
         cwd=worktree,
     )
     if olddef.returncode != 0:
@@ -351,7 +372,7 @@ def _prepare_config(
 def _build(
     guard: HermeticGuard,
     *,
-    bootstrap_enabled: bool,
+    leg: str,
     annotations: str,
     make: str,
     nm: str,
@@ -359,9 +380,18 @@ def _build(
     output_dir: str,
     enabled_output_dir: str,
     disabled_output_dir: str,
+    runtime_output_dir: str,
     core_api_symbols: tuple[str, ...],
 ) -> dict:
-    targets = (CORE_OBJECT_TARGET, VMLINUX_TARGET) if bootstrap_enabled else (VMLINUX_TARGET,)
+    if leg == "enabled":
+        targets = (CORE_OBJECT_TARGET, VMLINUX_TARGET)
+    elif leg == "disabled":
+        targets = (VMLINUX_TARGET,)
+    elif leg == "runtime":
+        targets = (CORE_OBJECT_TARGET, RUNTIME_STATE_TARGET, RUNTIME_FS_TARGET, VMLINUX_TARGET)
+    else:
+        targets = (VMLINUX_TARGET,)
+
     for target in targets:
         built = _run_handoff_tool(
             guard,
@@ -371,6 +401,7 @@ def _build(
             nm=nm,
             enabled_output_dir=enabled_output_dir,
             disabled_output_dir=disabled_output_dir,
+            runtime_output_dir=runtime_output_dir,
             cwd=worktree,
         )
         if built.returncode != 0:
@@ -395,6 +426,7 @@ def _build(
         nm=nm,
         enabled_output_dir=enabled_output_dir,
         disabled_output_dir=disabled_output_dir,
+        runtime_output_dir=runtime_output_dir,
         cwd=worktree,
     )
     if inspected.returncode != 0 or not inspected.stdout:
@@ -412,6 +444,50 @@ def _build(
             path=artifact,
             expected="start_kernel",
         )
+
+    if leg == "runtime":
+        k3_core_symbols = tuple(s for s in core_api_symbols if s != "spp_diag_trace_core_append")
+        present = tuple(symbol for symbol in k3_core_symbols if symbol in symbols)
+        if present != k3_core_symbols:
+            _fail(
+                CP_SPP_DIAG_TRACE_CORE_HANDOFF,
+                "runtime vmlinux is missing core API symbols",
+                path=artifact,
+                expected=" ".join(k3_core_symbols),
+                observed=" ".join(present),
+            )
+        if "spp_diag_trace_core_append" in symbols:
+            _fail(
+                CP_SPP_DIAG_TRACE_CORE_HANDOFF,
+                "runtime vmlinux unexpectedly exports raw append symbol",
+                path=artifact,
+            )
+        bootstrap_present = tuple(symbol for symbol in BOOTSTRAP_API_SYMBOLS if symbol in symbols)
+        if bootstrap_present != BOOTSTRAP_API_SYMBOLS:
+            _fail(
+                CP_SPP_DIAG_TRACE_CORE_HANDOFF,
+                "runtime vmlinux is missing bootstrap API symbols",
+                path=artifact,
+                expected=" ".join(BOOTSTRAP_API_SYMBOLS),
+                observed=" ".join(bootstrap_present),
+            )
+        runtime_present = tuple(symbol for symbol in RUNTIME_API_SYMBOLS if symbol in symbols)
+        if runtime_present != RUNTIME_API_SYMBOLS:
+            _fail(
+                CP_SPP_DIAG_TRACE_CORE_HANDOFF,
+                "runtime vmlinux is missing runtime API symbols",
+                path=artifact,
+                expected=" ".join(RUNTIME_API_SYMBOLS),
+                observed=" ".join(runtime_present),
+            )
+        return {
+            "vmlinux_sha256": _sha256_file(artifact),
+            "vmlinux_size": os.path.getsize(artifact),
+            "core_api_symbols": list(present),
+            "bootstrap_api_symbols": list(bootstrap_present),
+            "runtime_api_symbols": list(runtime_present),
+        }
+
     present = tuple(symbol for symbol in core_api_symbols if symbol in symbols)
     if present != core_api_symbols:
         _fail(
@@ -422,7 +498,7 @@ def _build(
             observed=" ".join(present),
         )
     bootstrap_present = tuple(symbol for symbol in BOOTSTRAP_API_SYMBOLS if symbol in symbols)
-    if bootstrap_enabled and bootstrap_present != BOOTSTRAP_API_SYMBOLS:
+    if leg == "enabled" and bootstrap_present != BOOTSTRAP_API_SYMBOLS:
         _fail(
             CP_SPP_DIAG_TRACE_CORE_HANDOFF,
             "enabled vmlinux is missing bootstrap API symbols",
@@ -430,13 +506,22 @@ def _build(
             expected=" ".join(BOOTSTRAP_API_SYMBOLS),
             observed=" ".join(bootstrap_present),
         )
-    if not bootstrap_enabled and bootstrap_present:
+    if leg == "disabled" and bootstrap_present:
         _fail(
             CP_SPP_DIAG_TRACE_CORE_HANDOFF,
             "K1-on/K2-off vmlinux contains bootstrap API symbols",
             path=artifact,
             expected="no bootstrap API symbols",
             observed=" ".join(bootstrap_present),
+        )
+    runtime_present = tuple(symbol for symbol in RUNTIME_API_SYMBOLS if symbol in symbols)
+    if runtime_present:
+        _fail(
+            CP_SPP_DIAG_TRACE_CORE_HANDOFF,
+            f"{leg} vmlinux unexpectedly contains runtime API symbols",
+            path=artifact,
+            expected="no runtime API symbols",
+            observed=" ".join(runtime_present),
         )
     return {
         "vmlinux_sha256": _sha256_file(artifact),
@@ -455,6 +540,7 @@ def run_handoff_steps(
     worktree: str,
     enabled_output_dir: str,
     disabled_output_dir: str,
+    runtime_output_dir: str,
     fragments: dict[str, bytes],
     core_api_symbols: tuple[str, ...],
 ) -> dict:
@@ -476,6 +562,7 @@ def run_handoff_steps(
             nm=nm,
             enabled_output_dir=enabled_output_dir,
             disabled_output_dir=disabled_output_dir,
+            runtime_output_dir=runtime_output_dir,
             cwd=worktree,
         )
         if exported.returncode != 0 or not exported.stdout:
@@ -498,6 +585,7 @@ def run_handoff_steps(
             output_dir=enabled_output_dir,
             enabled_output_dir=enabled_output_dir,
             disabled_output_dir=disabled_output_dir,
+            runtime_output_dir=runtime_output_dir,
         )
         disabled = _prepare_config(
             guard,
@@ -511,6 +599,21 @@ def run_handoff_steps(
             output_dir=disabled_output_dir,
             enabled_output_dir=enabled_output_dir,
             disabled_output_dir=disabled_output_dir,
+            runtime_output_dir=runtime_output_dir,
+        )
+        runtime = _prepare_config(
+            guard,
+            exported=exported.stdout,
+            fragment=fragments["runtime"],
+            leg="runtime",
+            annotations=annotations,
+            make=make,
+            nm=nm,
+            worktree=worktree,
+            output_dir=runtime_output_dir,
+            enabled_output_dir=enabled_output_dir,
+            disabled_output_dir=disabled_output_dir,
+            runtime_output_dir=runtime_output_dir,
         )
         cert_paths = tuple(os.path.join(worktree, target) for target in CANONICAL_CERT_TARGETS)
         if any(os.path.lexists(path) for path in cert_paths):
@@ -528,6 +631,7 @@ def run_handoff_steps(
                 nm=nm,
                 enabled_output_dir=enabled_output_dir,
                 disabled_output_dir=disabled_output_dir,
+                runtime_output_dir=runtime_output_dir,
                 cwd=worktree,
             )
             if certificates.returncode != 0:
@@ -547,7 +651,7 @@ def run_handoff_steps(
             enabled.update(
                 _build(
                     guard,
-                    bootstrap_enabled=True,
+                    leg="enabled",
                     annotations=annotations,
                     make=make,
                     nm=nm,
@@ -555,13 +659,14 @@ def run_handoff_steps(
                     output_dir=enabled_output_dir,
                     enabled_output_dir=enabled_output_dir,
                     disabled_output_dir=disabled_output_dir,
+                    runtime_output_dir=runtime_output_dir,
                     core_api_symbols=core_api_symbols,
                 )
             )
             disabled.update(
                 _build(
                     guard,
-                    bootstrap_enabled=False,
+                    leg="disabled",
                     annotations=annotations,
                     make=make,
                     nm=nm,
@@ -569,6 +674,22 @@ def run_handoff_steps(
                     output_dir=disabled_output_dir,
                     enabled_output_dir=enabled_output_dir,
                     disabled_output_dir=disabled_output_dir,
+                    runtime_output_dir=runtime_output_dir,
+                    core_api_symbols=core_api_symbols,
+                )
+            )
+            runtime.update(
+                _build(
+                    guard,
+                    leg="runtime",
+                    annotations=annotations,
+                    make=make,
+                    nm=nm,
+                    worktree=worktree,
+                    output_dir=runtime_output_dir,
+                    enabled_output_dir=enabled_output_dir,
+                    disabled_output_dir=disabled_output_dir,
+                    runtime_output_dir=runtime_output_dir,
                     core_api_symbols=core_api_symbols,
                 )
             )
@@ -584,7 +705,7 @@ def run_handoff_steps(
                         f"could not remove generated certificate input: {exc}",
                         path=path,
                     )
-    return {"enabled": enabled, "disabled": disabled}
+    return {"enabled": enabled, "disabled": disabled, "runtime": runtime}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -600,6 +721,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--nm-sha256", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--disabled-output-dir", required=True)
+    parser.add_argument("--runtime-output-dir", required=True)
     parser.add_argument("--manifest", default=str(DEFAULT_MANIFEST))
     parser.add_argument("--derivation-out", default="")
     args = parser.parse_args(argv)
@@ -608,11 +730,12 @@ def main(argv: list[str] | None = None) -> int:
         worktree = os.path.abspath(args.worktree)
         output_dir = os.path.abspath(args.output_dir)
         disabled_output_dir = os.path.abspath(args.disabled_output_dir)
+        runtime_output_dir = os.path.abspath(args.runtime_output_dir)
         git_abs = os.path.abspath(args.git)
         annotations_abs = os.path.abspath(args.annotations)
         make_abs = os.path.abspath(args.make)
         nm_abs = os.path.abspath(args.nm)
-        _validate_output_dirs(worktree, (output_dir, disabled_output_dir))
+        _validate_output_dirs(worktree, (output_dir, disabled_output_dir, runtime_output_dir))
         guard = build_handoff_guard(
             git_abs=git_abs,
             git_sha256=args.git_sha256,
@@ -638,6 +761,7 @@ def main(argv: list[str] | None = None) -> int:
             worktree=worktree,
             enabled_output_dir=output_dir,
             disabled_output_dir=disabled_output_dir,
+            runtime_output_dir=runtime_output_dir,
             fragments=fragments,
             core_api_symbols=manifest.core_api_symbols,
         )

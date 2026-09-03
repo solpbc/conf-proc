@@ -21,6 +21,7 @@ int ima_measure_critical_data(const char *event_label, const char *event_name,
 			      u8 *digest, size_t digest_len);
 void host_ima_reset(void);
 void host_ima_set_result(int result);
+void host_ima_set_hook(void (*hook)(const struct host_ima_call *call));
 const struct host_ima_call *host_ima_last_call(void);
 
 #endif

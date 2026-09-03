@@ -15,3 +15,12 @@ config SECURITY_SPP_DIAG_TRACE_CORE_BOOTSTRAP
 	help
 	  Bootstrap the SPP diagnostic trace core at kernel initialization and
 	  gate pre-release userspace execution until the diagnostic release.
+
+config SECURITY_SPP_DIAG_TRACE_CORE_RUNTIME
+	bool "SPP diagnostic trace core runtime producer"
+	depends on SECURITY_SPP_DIAG_TRACE_CORE_BOOTSTRAP && SECURITYFS
+	default n
+	help
+	  Runtime provenance producer for the SPP diagnostic trace core.
+	  Manages process lifecycle tracking, provenance event generation,
+	  and securityfs control interfaces.

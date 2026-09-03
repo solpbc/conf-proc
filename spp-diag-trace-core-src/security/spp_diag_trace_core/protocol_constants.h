@@ -171,6 +171,12 @@
 #define SPP_DIAG_TRACE_MAGIC_HEADER_BYTES \
 	'S', 'P', 'P', 'T', 'R', 'C', '1', 0x00
 
+#define SPP_DIAG_TRACE_MAGIC_COMMAND_BYTES \
+	'S', 'P', 'P', 'C', 'M', 'D', '1', 0x00
+
+#define SPP_DIAG_TRACE_MAGIC_IMA_BYTES \
+	'S', 'P', 'P', 'I', 'M', 'A', '1', 0x00
+
 #define SPP_DIAG_TRACE_PREIMAGE_DOMAIN_BYTES \
 	's', 'o', 'l', '-', 's', 'p', 'p', '-', 'd', 'i',\
 	'a', 'g', '-', 't', 'r', 'a', 'c', 'e', '-', 'h',\

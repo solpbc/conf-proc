@@ -111,6 +111,8 @@ def render_header(
     enum_items: list[tuple[str, str]],
     source_commit: tuple[int, ...],
     magic_header: tuple[int, ...],
+    magic_command: tuple[int, ...],
+    magic_ima: tuple[int, ...],
     preimage_domain: tuple[int, ...],
     frame_domain: tuple[int, ...],
 ) -> str:
@@ -134,6 +136,14 @@ def render_header(
     lines.append("")
     lines.append(
         f"#define SPP_DIAG_TRACE_MAGIC_HEADER_BYTES \\\n\t{format_byte_macro(magic_header)}"
+    )
+    lines.append("")
+    lines.append(
+        f"#define SPP_DIAG_TRACE_MAGIC_COMMAND_BYTES \\\n\t{format_byte_macro(magic_command)}"
+    )
+    lines.append("")
+    lines.append(
+        f"#define SPP_DIAG_TRACE_MAGIC_IMA_BYTES \\\n\t{format_byte_macro(magic_ima)}"
     )
     lines.append("")
     lines.append(
@@ -162,12 +172,18 @@ def extract(header_text: str, source_text: str) -> str:
         raise ValueError("no WIRE_ enum values parsed")
     source_commit = parse_named_array(source_text, "SPP_DIAG_TRACE_SOURCE_COMMIT")
     magic_header = parse_named_array(source_text, "k_magic_header")
+    magic_command = parse_named_array(source_text, "k_magic_command")
+    magic_ima = parse_named_array(source_text, "k_magic_ima")
     preimage_domain = parse_named_array(source_text, "k_preimage_domain")
     frame_domain = parse_named_array(source_text, "k_frame_preimage_domain")
     if len(source_commit) != 20:
         raise ValueError("SOURCE_COMMIT length mismatch")
     if len(magic_header) != 8:
         raise ValueError("header magic length mismatch")
+    if len(magic_command) != 8:
+        raise ValueError("command magic length mismatch")
+    if len(magic_ima) != 8:
+        raise ValueError("ima magic length mismatch")
     if len(preimage_domain) != 28:
         raise ValueError("header domain length mismatch")
     if len(frame_domain) != 27:
@@ -177,6 +193,8 @@ def extract(header_text: str, source_text: str) -> str:
         enum_items,
         source_commit,
         magic_header,
+        magic_command,
+        magic_ima,
         preimage_domain,
         frame_domain,
     )

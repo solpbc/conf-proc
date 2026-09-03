@@ -7,13 +7,24 @@
 #include <linux/types.h>
 
 #include "protocol_constants.h"
+#include "runtime_redirect.h"
+#include "runtime_types.h"
+#include <linux/spp_diag_trace_runtime.h>
 
+#ifndef SPP_DIAG_TRACE_CORE_OP_MAX_FRAMES
 #if IS_ENABLED(CONFIG_KUNIT)
 #define SPP_DIAG_TRACE_CORE_OP_MAX_FRAMES 8u
-#define SPP_DIAG_TRACE_CORE_OP_MAX_STREAM_BYTES 1024ull
 #else
 #define SPP_DIAG_TRACE_CORE_OP_MAX_FRAMES SPP_DIAG_TRACE_MAX_FRAMES
+#endif
+#endif
+
+#ifndef SPP_DIAG_TRACE_CORE_OP_MAX_STREAM_BYTES
+#if IS_ENABLED(CONFIG_KUNIT)
+#define SPP_DIAG_TRACE_CORE_OP_MAX_STREAM_BYTES 1024ull
+#else
 #define SPP_DIAG_TRACE_CORE_OP_MAX_STREAM_BYTES SPP_DIAG_TRACE_MAX_STREAM_BYTES
+#endif
 #endif
 
 #if IS_ENABLED(CONFIG_KUNIT)
@@ -65,6 +76,51 @@ int spp_diag_trace_core_append(u16 event_type, u16 flags,
 			       const void *payload, size_t payload_length);
 int spp_diag_trace_core_mark_failure(int reason);
 
+#if IS_ENABLED(CONFIG_SECURITY_SPP_DIAG_TRACE_CORE_RUNTIME)
+int spp_diag_trace_core_runtime_install_arrays(
+	struct spp_diag_trace_task_record *tasks, size_t task_cap,
+	struct spp_diag_trace_operation_record *ops, size_t op_cap);
+bool spp_diag_trace_core_runtime_is_ready(void);
+int spp_diag_trace_core_runtime_bind_root(const void *task_token);
+int spp_diag_trace_core_runtime_open_operation(u64 task_ordinal, u16 kind, u64 *out_op_ordinal);
+int spp_diag_trace_core_runtime_close_operation(u64 task_ordinal, u64 op_ordinal, u16 kind);
+int spp_diag_trace_core_runtime_task_alloc_attempt(
+	const void *parent_token, u64 clone_flags);
+int spp_diag_trace_core_runtime_task_created(
+	const void *parent_token, const void *child_token,
+	u32 pid, u32 tgid, u64 clone_flags);
+int spp_diag_trace_core_runtime_task_exit(
+	const void *task_token, u32 exit_code);
+int spp_diag_trace_core_runtime_exec_attempt(
+	const void *task_token, const char *local_path, size_t path_len,
+	u32 pid, u32 tgid);
+int spp_diag_trace_core_runtime_exec_commit(
+	const void *task_token, u32 pid, u32 tgid);
+int spp_diag_trace_core_runtime_file_open_attempt(
+	const void *task_token, const char *local_path, size_t path_len,
+	u16 access, u16 modifiers, u32 dirfd, u64 *out_op_ordinal);
+int spp_diag_trace_core_runtime_file_policy_decision(
+	const void *task_token, u64 operation_ordinal,
+	const struct spp_diag_trace_fact_file_policy *fact);
+int spp_diag_trace_core_runtime_mapping_policy_decision(
+	const void *task_token,
+	const struct spp_diag_trace_fact_mapping_policy *fact,
+	u64 *out_op_ordinal);
+int spp_diag_trace_core_runtime_network_policy_decision(
+	const void *task_token,
+	const struct spp_diag_trace_fact_network_policy *fact,
+	u64 *out_op_ordinal);
+int spp_diag_trace_core_runtime_operation_return(
+	const void *task_token, u64 operation_ordinal, u16 kind, s64 result);
+bool spp_diag_trace_core_runtime_is_sealed(void);
+int spp_diag_trace_core_runtime_handle_command(const u8 *cmd_raw, size_t len);
+struct file;
+ssize_t spp_diag_trace_core_runtime_stream_read(char *ubuf, size_t count, loff_t *ppos);
+loff_t spp_diag_trace_core_runtime_stream_llseek(struct file *file, loff_t offset, int whence);
+int spp_diag_trace_runtime_fs_init(void);
+void spp_diag_trace_runtime_fs_exit(void);
+#endif
+
 #if IS_ENABLED(CONFIG_SECURITY_SPP_DIAG_TRACE_CORE_BOOTSTRAP)
 int spp_diag_trace_core_bootstrap_ima_available(void);
 int spp_diag_trace_core_bootstrap_gate(const char *path, size_t path_length,
@@ -97,6 +153,9 @@ void spp_diag_trace_core_inject_init_fault(int stage);
 void spp_diag_trace_core_set_pre_lock_barrier(void (*fn)(void *), void *arg);
 void spp_diag_trace_core_set_op_caps(u32 max_frames, u64 max_stream_bytes);
 int spp_diag_trace_core_test_checked_add_u64(u64 a, u64 b, u64 *out);
+int spp_diag_trace_core_test_get_task_record(size_t index, struct spp_diag_trace_task_record *out);
+int spp_diag_trace_core_test_get_op_record(size_t index, struct spp_diag_trace_operation_record *out);
+void spp_diag_trace_core_set_read_copy_hook(void (*hook)(bool lock_held));
 #endif
 
 #endif

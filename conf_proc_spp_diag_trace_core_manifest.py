@@ -27,6 +27,10 @@ CREATE_DESTINATIONS: Final = (
     "security/spp_diag_trace_core/bootstrap.c", "security/spp_diag_trace_core/gate.c",
     "security/spp_diag_trace_core/release.c", "security/spp_diag_trace_core/bootstrap_kunit.c",
     "include/linux/spp_diag_trace_bootstrap.h",
+    "security/spp_diag_trace_core/runtime_redirect.h", "security/spp_diag_trace_core/runtime_types.h",
+    "security/spp_diag_trace_core/runtime_state.c", "security/spp_diag_trace_core/runtime_fs.c",
+    "security/spp_diag_trace_core/runtime_kunit.c",
+    "include/linux/spp_diag_trace_runtime.h",
 )
 REPLACE_MAKEFILE_LINE: Final = "obj-$(CONFIG_SECURITY_SPP_DIAG_TRACE_CORE) += spp_diag_trace_core/"
 REPLACE_KCONFIG_LINE: Final = 'source "security/spp_diag_trace_core/Kconfig"'
@@ -42,6 +46,22 @@ CORE_API_SYMBOLS: Final = (
 BOOTSTRAP_API_SYMBOLS: Final = (
     "spp_diag_trace_bootstrap_init", "spp_diag_trace_bootstrap_bprm_check",
     "spp_diag_trace_bootstrap_ima_ready", "spp_diag_trace_bootstrap_release",
+)
+RUNTIME_API_SYMBOLS: Final = (
+    "spp_diag_trace_core_runtime_bind_root",
+    "spp_diag_trace_core_runtime_task_alloc_attempt",
+    "spp_diag_trace_core_runtime_task_created",
+    "spp_diag_trace_core_runtime_task_exit",
+    "spp_diag_trace_core_runtime_exec_attempt",
+    "spp_diag_trace_core_runtime_exec_commit",
+    "spp_diag_trace_core_runtime_file_open_attempt",
+    "spp_diag_trace_core_runtime_file_policy_decision",
+    "spp_diag_trace_core_runtime_mapping_policy_decision",
+    "spp_diag_trace_core_runtime_network_policy_decision",
+    "spp_diag_trace_core_runtime_operation_return",
+    "spp_diag_trace_core_runtime_handle_command",
+    "spp_diag_trace_core_runtime_read_stream",
+    "spp_diag_trace_core_runtime_is_sealed",
 )
 
 _TOP_KEYS: Final = frozenset({"schema", "manifest_version", "expected_base_commit", "core_api_symbols", "protocol_authority", "diagnostic_config_fragments", "inputs", "targets"})
@@ -100,7 +120,7 @@ class CoreManifest:
     expected_base_commit: str
     core_api_symbols: tuple[str, ...]
     protocol_authority: AuthorityBlobs
-    diagnostic_config_fragments: tuple[FragmentBlob, FragmentBlob]
+    diagnostic_config_fragments: tuple[FragmentBlob, FragmentBlob, FragmentBlob]
     inputs: tuple[InputBlob, ...]
     creates: tuple[CreateTarget, ...]
     replaces: tuple[ReplaceTarget, ...]
@@ -149,14 +169,14 @@ def parse_core_manifest(data: bytes) -> CoreManifest:
     authority = AuthorityBlobs(**authority_raw)
 
     fragments_raw = raw["diagnostic_config_fragments"]
-    _require(type(fragments_raw) is list and len(fragments_raw) == 2, CP_SPP_DIAG_TRACE_CORE_SCHEMA, "exactly enabled and disabled fragments are required")
+    _require(type(fragments_raw) is list and len(fragments_raw) == 3, CP_SPP_DIAG_TRACE_CORE_SCHEMA, "exactly enabled, disabled, and runtime fragments are required")
     fragments: list[FragmentBlob] = []
     for item in fragments_raw:
         _require(type(item) is dict and set(item) == _FRAGMENT_KEYS, CP_SPP_DIAG_TRACE_CORE_SCHEMA, "fragment entry has unexpected fields")
-        _require(item["leg"] in ("enabled", "disabled"), CP_SPP_DIAG_TRACE_CORE_SCHEMA, "fragment leg must be enabled or disabled")
+        _require(item["leg"] in ("enabled", "disabled", "runtime"), CP_SPP_DIAG_TRACE_CORE_SCHEMA, "fragment leg must be enabled, disabled, or runtime")
         _require(type(item["path"]) is str and item["path"] and _is_sha256(item["sha256"]), CP_SPP_DIAG_TRACE_CORE_TYPE, "fragment path and digest are invalid")
         fragments.append(FragmentBlob(item["leg"], item["path"], item["sha256"]))
-    _require(tuple(item.leg for item in fragments) == ("enabled", "disabled"), CP_SPP_DIAG_TRACE_CORE_SCHEMA, "fragment legs must be enabled then disabled")
+    _require(tuple(item.leg for item in fragments) == ("enabled", "disabled", "runtime"), CP_SPP_DIAG_TRACE_CORE_SCHEMA, "fragment legs must be enabled, disabled, then runtime")
 
     inputs_raw = raw["inputs"]
     _require(type(inputs_raw) is list and inputs_raw, CP_SPP_DIAG_TRACE_CORE_TYPE, "inputs must be a nonempty array")

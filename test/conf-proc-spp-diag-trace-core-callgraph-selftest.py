@@ -23,6 +23,23 @@ BOOTSTRAP_ENTRIES = (
     "spp_diag_trace_bootstrap_ima_ready",
     "spp_diag_trace_bootstrap_release",
 )
+RUNTIME_ENTRIES = (
+    "spp_diag_trace_core_runtime_bind_root",
+    "spp_diag_trace_core_runtime_task_alloc_attempt",
+    "spp_diag_trace_core_runtime_task_created",
+    "spp_diag_trace_core_runtime_task_exit",
+    "spp_diag_trace_core_runtime_exec_attempt",
+    "spp_diag_trace_core_runtime_exec_commit",
+    "spp_diag_trace_core_runtime_file_open_attempt",
+    "spp_diag_trace_core_runtime_file_policy_decision",
+    "spp_diag_trace_core_runtime_mapping_policy_decision",
+    "spp_diag_trace_core_runtime_network_policy_decision",
+    "spp_diag_trace_core_runtime_operation_return",
+    "spp_diag_trace_core_runtime_handle_command",
+    "spp_diag_trace_core_runtime_stream_read",
+    "spp_diag_trace_core_runtime_is_sealed",
+)
+
 ALLOWED_LOCK = "spp_diag_trace_core_shim_lock"
 LOCK_LEAVES = {
     "spp_diag_trace_core_shim_lock",
@@ -154,10 +171,10 @@ def main() -> int:
     if os.environ.get("SPP_DIAG_TRACE_CORE_FORCE_FAIL") == "1":
         print("FAIL callgraph forced")
         return 1
-    if len(sys.argv) not in (6, 7):
+    if len(sys.argv) not in (6, 7, 8):
         raise SystemExit(
             "usage: conf-proc-spp-diag-trace-core-callgraph-selftest.py "
-            "CORE.O NEG_VMALLOC.O NEG_SLEEP.O NEG_MUTEX.O NEG_ALT_LOCK.O [BOOTSTRAP.O]"
+            "CORE.O NEG_VMALLOC.O NEG_SLEEP.O NEG_MUTEX.O NEG_ALT_LOCK.O [BOOTSTRAP.O] [RUNTIME.O]"
         )
     core_obj = Path(sys.argv[1])
     neg_objs = [
@@ -197,7 +214,7 @@ def main() -> int:
             )
             return 1
         print(f"ok   callgraph-negative {path.name} caught={expected} hits={hits}")
-    if len(sys.argv) == 7:
+    if len(sys.argv) >= 7:
         bootstrap_obj = Path(sys.argv[6])
         bootstrap_graph = parse_calls(bootstrap_obj)
         missing = [name for name in BOOTSTRAP_ENTRIES if name not in bootstrap_graph]
@@ -210,6 +227,19 @@ def main() -> int:
             print(f"FAIL bootstrap callgraph forbidden {forbidden}")
             return 1
         print(f"ok   bootstrap-callgraph entries={len(BOOTSTRAP_ENTRIES)}")
+    if len(sys.argv) == 8:
+        runtime_obj = Path(sys.argv[7])
+        runtime_graph = parse_calls(runtime_obj)
+        missing = [name for name in RUNTIME_ENTRIES if name not in runtime_graph]
+        if missing:
+            print(f"FAIL runtime callgraph missing entries {missing}")
+            return 1
+        reachable, callees = walk(runtime_graph, RUNTIME_ENTRIES)
+        forbidden = sorted(name for name in FORBIDDEN if name in reachable or name in callees)
+        if forbidden:
+            print(f"FAIL runtime callgraph forbidden {forbidden}")
+            return 1
+        print(f"ok   runtime-callgraph entries={len(RUNTIME_ENTRIES)}")
     return 0
 
 

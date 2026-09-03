@@ -11,6 +11,7 @@
 char *saved_command_line;
 unsigned int saved_command_line_len;
 struct task_struct host_current_task;
+struct task_struct *host_current_task_ptr = NULL;
 
 static jmp_buf *panic_target;
 static const char *panic_text;

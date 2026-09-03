@@ -2,13 +2,17 @@
 #ifndef SPP_DIAG_TRACE_CORE_SHIM_LINUX_SCHED_H
 #define SPP_DIAG_TRACE_CORE_SHIM_LINUX_SCHED_H
 
+#define PF_KTHREAD 0x00200000
+
 struct task_struct {
 	int pid;
 	int tgid;
+	unsigned int flags;
 };
 
 extern struct task_struct host_current_task;
-#define current (&host_current_task)
+extern struct task_struct *host_current_task_ptr;
+#define current (host_current_task_ptr ? host_current_task_ptr : &host_current_task)
 
 static inline int task_pid_nr(const struct task_struct *task)
 {
