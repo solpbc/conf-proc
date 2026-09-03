@@ -45,8 +45,10 @@ int spp_diag_trace_runtime_init(void)
 		return err;
 	}
 	err = spp_diag_trace_runtime_fs_init();
-	if (err)
+	if (err) {
+		spp_diag_trace_core_mark_failure(WIRE_STATE);
 		return err;
+	}
 	return 0;
 }
 
@@ -145,7 +147,7 @@ int spp_diag_trace_runtime_file_open_attempt(
 
 	if (spp_diag_trace_core_runtime_is_sealed())
 		return SPP_DIAG_TRACE_ERR_INACTIVE;
-	if (!task_token || !fact)
+	if (!task_token || !fact || !out_op_ordinal)
 		return spp_diag_trace_core_mark_failure(WIRE_NULL);
 	if (!fact->path || fact->path_len == 0 ||
 	    fact->path_len > SPP_DIAG_TRACE_MAX_PATH_BYTES)
@@ -181,7 +183,7 @@ int spp_diag_trace_runtime_mapping_policy_decision(
 {
 	if (spp_diag_trace_core_runtime_is_sealed())
 		return SPP_DIAG_TRACE_ERR_INACTIVE;
-	if (!task_token || !fact)
+	if (!task_token || !fact || !out_op_ordinal)
 		return spp_diag_trace_core_mark_failure(WIRE_NULL);
 
 	return spp_diag_trace_core_runtime_mapping_policy_decision(
@@ -197,7 +199,7 @@ int spp_diag_trace_runtime_network_policy_decision(
 
 	if (spp_diag_trace_core_runtime_is_sealed())
 		return SPP_DIAG_TRACE_ERR_INACTIVE;
-	if (!task_token || !fact)
+	if (!task_token || !fact || !out_op_ordinal)
 		return spp_diag_trace_core_mark_failure(WIRE_NULL);
 
 	/* Copy fact struct locally immediately before any other work (poison resistance) */
@@ -208,8 +210,7 @@ int spp_diag_trace_runtime_network_policy_decision(
 }
 
 int spp_diag_trace_runtime_operation_return(const void *task_token,
-					    u64 operation_ordinal,
-					    u16 kind, s64 result)
+					    u64 operation_ordinal, s64 result)
 {
 	if (spp_diag_trace_core_runtime_is_sealed())
 		return SPP_DIAG_TRACE_ERR_INACTIVE;
@@ -217,17 +218,17 @@ int spp_diag_trace_runtime_operation_return(const void *task_token,
 		return spp_diag_trace_core_mark_failure(WIRE_NULL);
 
 	return spp_diag_trace_core_runtime_operation_return(task_token,
-							    operation_ordinal,
-							    kind,
-							    result);
+						    operation_ordinal,
+						    result);
 }
 
 /*
- * core_initcall (level 1) allocates runtime bookkeeping arrays early during
- * kernel boot, well before kernel_init_freeable() executes release.
+ * securityfs itself registers at core_initcall.  fs_initcall makes that
+ * dependency ordered rather than link-order-dependent while still allocating
+ * all runtime state before kernel_init_freeable() executes release.
  */
 static int __init spp_diag_trace_runtime_initcall(void)
 {
 	return spp_diag_trace_runtime_init();
 }
-core_initcall(spp_diag_trace_runtime_initcall);
+fs_initcall(spp_diag_trace_runtime_initcall);

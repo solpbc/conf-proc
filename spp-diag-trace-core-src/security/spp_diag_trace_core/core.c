@@ -1214,6 +1214,7 @@ static int append_locked(u16 event_type, u16 flags, u64 task_ordinal,
 	return WIRE_OK;
 }
 
+#if !IS_ENABLED(CONFIG_SECURITY_SPP_DIAG_TRACE_CORE_RUNTIME) || IS_ENABLED(CONFIG_KUNIT)
 int spp_diag_trace_core_append(u16 event_type, u16 flags, u64 task_ordinal,
 			       u64 parent_task_ordinal, u64 operation_ordinal,
 			       u16 phase, const void *payload,
@@ -1248,6 +1249,7 @@ int spp_diag_trace_core_append(u16 event_type, u16 flags, u64 task_ordinal,
 	spin_unlock_irqrestore(&spp_diag_trace_core_lock, irqflags);
 	return err;
 }
+#endif
 
 #if IS_ENABLED(CONFIG_SECURITY_SPP_DIAG_TRACE_CORE_BOOTSTRAP)
 static void encode_bootstrap_record_locked(u16 kind, u8 out[256])
@@ -1577,6 +1579,7 @@ spp_diag_trace_core_runtime_open_op_locked(struct spp_diag_trace_task_record *ta
 	return WIRE_OK;
 }
 
+#if IS_ENABLED(CONFIG_KUNIT)
 int spp_diag_trace_core_runtime_open_operation(u64 task_ordinal, u16 kind, u64 *out_op_ordinal)
 {
 	unsigned long flags;
@@ -1661,6 +1664,7 @@ out:
 	spin_unlock_irqrestore(&spp_diag_trace_core_lock, flags);
 	return err;
 }
+#endif
 
 int spp_diag_trace_core_runtime_bind_root(const void *task_token)
 {
@@ -2506,7 +2510,7 @@ out:
 }
 
 int spp_diag_trace_core_runtime_operation_return(
-	const void *task_token, u64 operation_ordinal, u16 kind, s64 result)
+	const void *task_token, u64 operation_ordinal, s64 result)
 {
 	unsigned long flags;
 	int err = WIRE_OK;
@@ -2514,6 +2518,7 @@ int spp_diag_trace_core_runtime_operation_return(
 	struct spp_diag_trace_task_record *task;
 	struct spp_diag_trace_operation_record *op = NULL;
 	u64 op_slot;
+	u16 kind;
 	u8 payload[16];
 
 	spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
@@ -2552,8 +2557,13 @@ int spp_diag_trace_core_runtime_operation_return(
 	}
 	op = &core.runtime_ops[op_slot];
 	if (op->operation_ordinal != operation_ordinal ||
-	    op->task_ordinal != task->task_ordinal ||
-	    op->kind != kind) {
+	    op->task_ordinal != task->task_ordinal) {
+		err = fail_sticky(WIRE_STATE);
+		goto out;
+	}
+	kind = op->kind;
+	if (kind < SPP_DIAG_TRACE_RUNTIME_OP_FILE_OPEN ||
+	    kind > SPP_DIAG_TRACE_RUNTIME_OP_EXEC) {
 		err = fail_sticky(WIRE_STATE);
 		goto out;
 	}
@@ -2931,22 +2941,29 @@ loff_t spp_diag_trace_core_runtime_stream_llseek(struct file *file, loff_t offse
 	stream_len = core.stream_len;
 	spin_unlock_irqrestore(&spp_diag_trace_core_lock, flags);
 
+	if (file->f_pos < 0 || file->f_pos > (loff_t)stream_len)
+		return -EINVAL;
+
 	switch (whence) {
 	case SEEK_SET:
+		if (offset < 0 || offset > (loff_t)stream_len)
+			return -EINVAL;
 		new_pos = offset;
 		break;
 	case SEEK_CUR:
+		if (offset < -file->f_pos ||
+		    offset > (loff_t)stream_len - file->f_pos)
+			return -EINVAL;
 		new_pos = file->f_pos + offset;
 		break;
 	case SEEK_END:
+		if (offset > 0 || offset < -(loff_t)stream_len)
+			return -EINVAL;
 		new_pos = (loff_t)stream_len + offset;
 		break;
 	default:
 		return -EINVAL;
 	}
-
-	if (new_pos < 0 || (size_t)new_pos > stream_len)
-		return -EINVAL;
 
 	file->f_pos = new_pos;
 	return new_pos;

@@ -114,8 +114,7 @@ int spp_diag_trace_runtime_network_policy_decision(const void *task_token,
 						   const struct spp_diag_trace_fact_network_policy *fact,
 						   u64 *out_op_ordinal);
 int spp_diag_trace_runtime_operation_return(const void *task_token,
-					    u64 operation_ordinal,
-					    u16 kind, s64 result);
+					    u64 operation_ordinal, s64 result);
 #else
 static inline int spp_diag_trace_runtime_init(void) { return 0; }
 static inline int spp_diag_trace_runtime_ready(void) { return 1; }
@@ -152,9 +151,8 @@ static inline int spp_diag_trace_runtime_network_policy_decision(const void *tas
 								 u64 *out_op_ordinal)
 { (void)task_token; (void)fact; (void)out_op_ordinal; return 0; }
 static inline int spp_diag_trace_runtime_operation_return(const void *task_token,
-							  u64 operation_ordinal,
-							  u16 kind, s64 result)
-{ (void)task_token; (void)operation_ordinal; (void)kind; (void)result; return 0; }
+							  u64 operation_ordinal, s64 result)
+{ (void)task_token; (void)operation_ordinal; (void)result; return 0; }
 #endif
 
 #endif

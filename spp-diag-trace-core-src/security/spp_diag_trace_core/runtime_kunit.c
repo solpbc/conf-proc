@@ -115,7 +115,7 @@ static void runtime_exec_lifecycle(struct kunit *test)
 	init_and_publish_runtime();
 	KUNIT_ASSERT_EQ(test, spp_diag_trace_runtime_exec_attempt(&host_current_task, &attempt_fact), 0);
 	KUNIT_ASSERT_EQ(test, spp_diag_trace_runtime_exec_commit(&host_current_task, &commit_fact), 0);
-	KUNIT_ASSERT_EQ(test, spp_diag_trace_runtime_operation_return(&host_current_task, 2, SPP_DIAG_TRACE_OPERATION_EXEC, 0), 0);
+	KUNIT_ASSERT_EQ(test, spp_diag_trace_runtime_operation_return(&host_current_task, 2, 0), 0);
 	KUNIT_EXPECT_TRUE(test, spp_diag_trace_core_is_green() != 0);
 }
 

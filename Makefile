@@ -354,8 +354,8 @@ test-spp-diag-trace-core-runtime:
 	nm build/spp-diag-trace-core-k3off.o | grep -q ' spp_diag_trace_core_append$$'
 	! nm build/spp-diag-trace-core-k3off.o | grep -q ' spp_diag_trace_core_append_gated$$'
 	$(CC) $(CORE_CFLAGS) -DCONFIG_SECURITY_SPP_DIAG_TRACE_CORE_BOOTSTRAP=1 -DCONFIG_SECURITY_SPP_DIAG_TRACE_CORE_RUNTIME=1 $(SPP_DIAG_TRACE_CORE_HOST_INC) -c $(SPP_DIAG_TRACE_CORE_SRC) -o build/spp-diag-trace-core-k3on.o
-	! nm build/spp-diag-trace-core-k3on.o | grep -q ' spp_diag_trace_core_append$$'
-	nm build/spp-diag-trace-core-k3on.o | grep -q ' spp_diag_trace_core_append_gated$$'
+	! nm build/spp-diag-trace-core-k3on.o | grep -Eq ' spp_diag_trace_core_append(_gated)?$$'
+	! nm build/spp-diag-trace-core-k3on.o | grep -Eq ' spp_diag_trace_core_runtime_(open|close)_operation$$'
 	if nm build/spp-diag-trace-core-k3on.o | grep -Ei 'reset|inject_fault|inject_init_fault|pre_lock_barrier|set_op_caps|snapshot|test_checked_add_u64|test_get_task_record|test_get_op_record|set_read_copy_hook'; then echo "KUnit seam present in non-KUnit object"; exit 1; fi
 	$(CC) $(CORE_CFLAGS) -pthread -DCONFIG_KUNIT=1 -DCONFIG_SECURITY_SPP_DIAG_TRACE_CORE_BOOTSTRAP=1 -DCONFIG_SECURITY_SPP_DIAG_TRACE_CORE_RUNTIME=1 $(SPP_DIAG_TRACE_CORE_HOST_INC) $(SPP_DIAG_TRACE_CORE_SRC) $(SPP_DIAG_TRACE_CORE_BOOTSTRAP_SRC) $(SPP_DIAG_TRACE_CORE_RUNTIME_SRC) $(SPP_DIAG_TRACE_CORE_BOOTSTRAP_HOST_LIB) $(SPP_DIAG_TRACE_CORE_RUNTIME_TEST) -o build/spp-diag-trace-core-runtime-selftest
 	./build/spp-diag-trace-core-runtime-selftest

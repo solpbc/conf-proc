@@ -70,10 +70,12 @@ int spp_diag_trace_core_init(const u8 challenge[32],
 			     const u8 control_plan_address[32],
 			     const u8 command_line_sha256[32]);
 int spp_diag_trace_core_is_green(void);
+#if !IS_ENABLED(CONFIG_SECURITY_SPP_DIAG_TRACE_CORE_RUNTIME) || IS_ENABLED(CONFIG_KUNIT)
 int spp_diag_trace_core_append(u16 event_type, u16 flags,
 			       u64 task_ordinal, u64 parent_task_ordinal,
 			       u64 operation_ordinal, u16 phase,
 			       const void *payload, size_t payload_length);
+#endif
 int spp_diag_trace_core_mark_failure(int reason);
 
 #if IS_ENABLED(CONFIG_SECURITY_SPP_DIAG_TRACE_CORE_RUNTIME)
@@ -82,8 +84,6 @@ int spp_diag_trace_core_runtime_install_arrays(
 	struct spp_diag_trace_operation_record *ops, size_t op_cap);
 bool spp_diag_trace_core_runtime_is_ready(void);
 int spp_diag_trace_core_runtime_bind_root(const void *task_token);
-int spp_diag_trace_core_runtime_open_operation(u64 task_ordinal, u16 kind, u64 *out_op_ordinal);
-int spp_diag_trace_core_runtime_close_operation(u64 task_ordinal, u64 op_ordinal, u16 kind);
 int spp_diag_trace_core_runtime_task_alloc_attempt(
 	const void *parent_token, u64 clone_flags);
 int spp_diag_trace_core_runtime_task_created(
@@ -111,7 +111,7 @@ int spp_diag_trace_core_runtime_network_policy_decision(
 	const struct spp_diag_trace_fact_network_policy *fact,
 	u64 *out_op_ordinal);
 int spp_diag_trace_core_runtime_operation_return(
-	const void *task_token, u64 operation_ordinal, u16 kind, s64 result);
+	const void *task_token, u64 operation_ordinal, s64 result);
 bool spp_diag_trace_core_runtime_is_sealed(void);
 int spp_diag_trace_core_runtime_handle_command(const u8 *cmd_raw, size_t len);
 struct file;
@@ -153,6 +153,10 @@ void spp_diag_trace_core_inject_init_fault(int stage);
 void spp_diag_trace_core_set_pre_lock_barrier(void (*fn)(void *), void *arg);
 void spp_diag_trace_core_set_op_caps(u32 max_frames, u64 max_stream_bytes);
 int spp_diag_trace_core_test_checked_add_u64(u64 a, u64 b, u64 *out);
+int spp_diag_trace_core_runtime_open_operation(u64 task_ordinal, u16 kind,
+					      u64 *out_op_ordinal);
+int spp_diag_trace_core_runtime_close_operation(u64 task_ordinal,
+					       u64 op_ordinal, u16 kind);
 int spp_diag_trace_core_test_get_task_record(size_t index, struct spp_diag_trace_task_record *out);
 int spp_diag_trace_core_test_get_op_record(size_t index, struct spp_diag_trace_operation_record *out);
 void spp_diag_trace_core_set_read_copy_hook(void (*hook)(bool lock_held));

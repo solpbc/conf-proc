@@ -60,7 +60,7 @@ RUNTIME_API_SYMBOLS: Final = (
     "spp_diag_trace_core_runtime_network_policy_decision",
     "spp_diag_trace_core_runtime_operation_return",
     "spp_diag_trace_core_runtime_handle_command",
-    "spp_diag_trace_core_runtime_read_stream",
+    "spp_diag_trace_core_runtime_stream_read",
     "spp_diag_trace_core_runtime_is_sealed",
 )
 

@@ -549,6 +549,12 @@ static void test_stream_read_and_seek_post_seal(void)
 	/* Seek negative returns -EINVAL */
 	ASSERT(stream_fops->llseek(&mock_file, -1, SEEK_SET) == -EINVAL, "seek negative invalid");
 
+	/* Extreme offsets are rejected without signed overflow. */
+	ASSERT(stream_fops->llseek(&mock_file, INT64_MAX, SEEK_CUR) == -EINVAL,
+	       "extreme positive SEEK_CUR invalid");
+	ASSERT(stream_fops->llseek(&mock_file, INT64_MIN, SEEK_END) == -EINVAL,
+	       "extreme negative SEEK_END invalid");
+
 	printf("PASS: test_stream_read_and_seek_post_seal\n");
 }
 
@@ -641,7 +647,7 @@ static void test_post_seal_terminal_behavior_and_entry_point_cutoff(void)
 	ASSERT(spp_diag_trace_runtime_file_policy_decision(root, 1, &fp) == SPP_DIAG_TRACE_ERR_INACTIVE, "file_policy returns ERR_INACTIVE");
 	ASSERT(spp_diag_trace_runtime_mapping_policy_decision(root, &mp, &op_ord) == SPP_DIAG_TRACE_ERR_INACTIVE, "mapping returns ERR_INACTIVE");
 	ASSERT(spp_diag_trace_runtime_network_policy_decision(root, &np, &op_ord) == SPP_DIAG_TRACE_ERR_INACTIVE, "network returns ERR_INACTIVE");
-	ASSERT(spp_diag_trace_runtime_operation_return(root, 1, 1, 0) == SPP_DIAG_TRACE_ERR_INACTIVE, "return returns ERR_INACTIVE");
+	ASSERT(spp_diag_trace_runtime_operation_return(root, 1, 0) == SPP_DIAG_TRACE_ERR_INACTIVE, "return returns ERR_INACTIVE");
 
 	/* Subsequent control write returns -ESHUTDOWN */
 	build_command(cmd, SPP_DIAG_TRACE_CMD_SEAL, 15);

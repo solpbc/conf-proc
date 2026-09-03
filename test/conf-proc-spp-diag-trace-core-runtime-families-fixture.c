@@ -193,34 +193,34 @@ int main(void)
 	if (spp_diag_trace_runtime_exec_attempt(root_ts, &exec_attempt_fact) ||
 	    spp_diag_trace_runtime_exec_attempt(root_ts, &exec_attempt_fact) ||
 	    spp_diag_trace_runtime_exec_commit(root_ts, &exec_commit_fact) ||
-	    spp_diag_trace_runtime_operation_return(root_ts, 2, SPP_DIAG_TRACE_OPERATION_EXEC, 0))
+	    spp_diag_trace_runtime_operation_return(root_ts, 2, 0))
 		return 2;
 
 	/* 2. FILE_OPEN family (op 3) */
 	if (spp_diag_trace_runtime_file_open_attempt(root_ts, &file_open_fact, &op_file) ||
 	    spp_diag_trace_runtime_file_policy_decision(root_ts, op_file, &file_policy_fact) ||
-	    spp_diag_trace_runtime_operation_return(root_ts, op_file, SPP_DIAG_TRACE_OPERATION_FILE_OPEN, 0))
+	    spp_diag_trace_runtime_operation_return(root_ts, op_file, 0))
 		return 3;
 
 	/* 3. MMAP family (op 4) */
 	if (spp_diag_trace_runtime_mapping_policy_decision(root_ts, &mmap_fact, &op_mmap) ||
-	    spp_diag_trace_runtime_operation_return(root_ts, op_mmap, SPP_DIAG_TRACE_OPERATION_MMAP, 0))
+	    spp_diag_trace_runtime_operation_return(root_ts, op_mmap, 0))
 		return 4;
 
 	/* 4. MPROTECT family (op 5, multi-row + deny) */
 	if (spp_diag_trace_runtime_mapping_policy_decision(root_ts, &mprotect_fact1, &op_mprotect1) ||
 	    spp_diag_trace_runtime_mapping_policy_decision(root_ts, &mprotect_fact2, &op_mprotect2) ||
-	    spp_diag_trace_runtime_operation_return(root_ts, op_mprotect1, SPP_DIAG_TRACE_OPERATION_MPROTECT, -1))
+	    spp_diag_trace_runtime_operation_return(root_ts, op_mprotect1, -1))
 		return 5;
 
 	/* 5. CONNECT family (op 6) */
 	if (spp_diag_trace_runtime_network_policy_decision(root_ts, &connect_fact, &op_connect) ||
-	    spp_diag_trace_runtime_operation_return(root_ts, op_connect, SPP_DIAG_TRACE_OPERATION_CONNECT, 0))
+	    spp_diag_trace_runtime_operation_return(root_ts, op_connect, 0))
 		return 6;
 
 	/* 6. SENDMSG family (op 7) */
 	if (spp_diag_trace_runtime_network_policy_decision(root_ts, &sendmsg_fact, &op_sendmsg) ||
-	    spp_diag_trace_runtime_operation_return(root_ts, op_sendmsg, SPP_DIAG_TRACE_OPERATION_SENDMSG, -13))
+	    spp_diag_trace_runtime_operation_return(root_ts, op_sendmsg, -13))
 		return 7;
 
 	if (spp_diag_trace_core_snapshot(snapshot_buffer, sizeof(snapshot_buffer), &required))

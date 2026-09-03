@@ -250,7 +250,7 @@ static void test_exec_multipass_commit_return_and_poison(void)
 	ASSERT(spp_diag_trace_runtime_exec_commit(root_ts, &commit) == 0, "exec commit");
 
 	/* 4. Operation Return */
-	ASSERT(spp_diag_trace_runtime_operation_return(root_ts, 2, SPP_DIAG_TRACE_RUNTIME_OP_EXEC, 0) == 0, "exec return");
+	ASSERT(spp_diag_trace_runtime_operation_return(root_ts, 2, 0) == 0, "exec return");
 	ASSERT(spp_diag_trace_core_is_green() == 1, "is green after full exec lifecycle");
 
 	/* Inspect trace stream frames */
@@ -469,7 +469,7 @@ static void test_file_open_lifecycle(void)
 	ASSERT(spp_diag_trace_runtime_file_policy_decision(root_ts, op_ord, &policy) == 0, "file policy decision");
 
 	/* 3. Operation return */
-	ASSERT(spp_diag_trace_runtime_operation_return(root_ts, op_ord, SPP_DIAG_TRACE_RUNTIME_OP_FILE_OPEN, 0) == 0, "file open return");
+	ASSERT(spp_diag_trace_runtime_operation_return(root_ts, op_ord, 0) == 0, "file open return");
 	ASSERT(spp_diag_trace_core_is_green() == 1, "is green after file open lifecycle");
 
 	/* Check stream */
@@ -628,7 +628,7 @@ static void test_mmap_lifecycle_and_overlap(void)
 	{
 		setup_published_runtime(&root_ts);
 		ASSERT(spp_diag_trace_runtime_mapping_policy_decision(root_ts, &mmap_fact, &op_ord) == 0, "mmap succeeds");
-		ASSERT(spp_diag_trace_runtime_operation_return(root_ts, op_ord, SPP_DIAG_TRACE_RUNTIME_OP_MMAP, 0) == 0, "mmap return");
+		ASSERT(spp_diag_trace_runtime_operation_return(root_ts, op_ord, 0) == 0, "mmap return");
 		ASSERT(spp_diag_trace_core_is_green() == 1, "is green after mmap close");
 	}
 
@@ -730,7 +730,7 @@ static void test_mprotect_lifecycle_and_deny_cutoff(void)
 		setup_published_runtime(&root_ts);
 		ASSERT(spp_diag_trace_runtime_mapping_policy_decision(root_ts, &row1, &op_ord1) == 0, "clean mprotect row 1");
 		ASSERT(spp_diag_trace_runtime_mapping_policy_decision(root_ts, &row2, &op_ord2) == 0, "clean mprotect row 2");
-		ASSERT(spp_diag_trace_runtime_operation_return(root_ts, op_ord1, SPP_DIAG_TRACE_RUNTIME_OP_MPROTECT, 0) == 0, "mprotect return");
+		ASSERT(spp_diag_trace_runtime_operation_return(root_ts, op_ord1, 0) == 0, "mprotect return");
 		ASSERT(spp_diag_trace_core_is_green() == 1, "is green after multi-row mprotect return");
 	}
 
@@ -881,8 +881,8 @@ static void test_network_simultaneous_connect_and_sendmsg(void)
 	ASSERT(op_connect != op_sendmsg, "connect and sendmsg have distinct operation ordinals");
 	ASSERT(spp_diag_trace_core_is_green() == 1, "is green with both live");
 
-	ASSERT(spp_diag_trace_runtime_operation_return(root_ts, op_connect, SPP_DIAG_TRACE_RUNTIME_OP_CONNECT, 0) == 0, "connect returns");
-	ASSERT(spp_diag_trace_runtime_operation_return(root_ts, op_sendmsg, SPP_DIAG_TRACE_RUNTIME_OP_SENDMSG, 0) == 0, "sendmsg returns");
+	ASSERT(spp_diag_trace_runtime_operation_return(root_ts, op_connect, 0) == 0, "connect returns");
+	ASSERT(spp_diag_trace_runtime_operation_return(root_ts, op_sendmsg, 0) == 0, "sendmsg returns");
 	ASSERT(spp_diag_trace_core_is_green() == 1, "is green after both return");
 
 	printf("PASS: test_network_simultaneous_connect_and_sendmsg\n");
@@ -963,19 +963,19 @@ static void test_uncommitted_exec_denial_return_semantics(void)
 	/* 1. Uncommitted exec returning positive result is rejected with sticky red */
 	setup_published_runtime(&root_ts);
 	ASSERT(spp_diag_trace_runtime_exec_attempt(root_ts, &attempt) == 0, "attempt");
-	ASSERT(spp_diag_trace_runtime_operation_return(root_ts, 2, SPP_DIAG_TRACE_RUNTIME_OP_EXEC, 1) != 0, "positive return rejected");
+	ASSERT(spp_diag_trace_runtime_operation_return(root_ts, 2, 1) != 0, "positive return rejected");
 	ASSERT(spp_diag_trace_core_is_green() == 0, "sticky red after positive uncommitted return");
 
 	/* 2. Uncommitted exec returning zero (success) result is rejected with sticky red */
 	setup_published_runtime(&root_ts);
 	ASSERT(spp_diag_trace_runtime_exec_attempt(root_ts, &attempt) == 0, "attempt");
-	ASSERT(spp_diag_trace_runtime_operation_return(root_ts, 2, SPP_DIAG_TRACE_RUNTIME_OP_EXEC, 0) != 0, "zero return rejected");
+	ASSERT(spp_diag_trace_runtime_operation_return(root_ts, 2, 0) != 0, "zero return rejected");
 	ASSERT(spp_diag_trace_core_is_green() == 0, "sticky red after zero uncommitted return");
 
 	/* 3. Uncommitted exec returning strictly negative result succeeds and core remains green */
 	setup_published_runtime(&root_ts);
 	ASSERT(spp_diag_trace_runtime_exec_attempt(root_ts, &attempt) == 0, "attempt");
-	ASSERT(spp_diag_trace_runtime_operation_return(root_ts, 2, SPP_DIAG_TRACE_RUNTIME_OP_EXEC, -13) == 0, "negative return succeeds");
+	ASSERT(spp_diag_trace_runtime_operation_return(root_ts, 2, -13) == 0, "negative return succeeds");
 	ASSERT(spp_diag_trace_core_is_green() == 1, "green after negative uncommitted return");
 
 	printf("PASS: test_uncommitted_exec_denial_return_semantics\n");

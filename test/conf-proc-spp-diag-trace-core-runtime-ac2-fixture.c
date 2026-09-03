@@ -266,7 +266,7 @@ int main(int argc, char **argv)
 
 	/* seq 10: OPERATION_RETURN (child 2, op 3) */
 	if (!mutate_op_close) {
-		if (spp_diag_trace_runtime_operation_return(&child2, 3, SPP_DIAG_TRACE_OPERATION_EXEC, 0)) {
+		if (spp_diag_trace_runtime_operation_return(&child2, 3, 0)) {
 			fprintf(stderr, "op return child2 op 3 failed\n");
 			return 1;
 		}
@@ -357,7 +357,7 @@ int main(int argc, char **argv)
 	}
 
 	/* seq 17: OPERATION_RETURN (child 3, op 5) */
-	if (spp_diag_trace_runtime_operation_return(&child3, 5, SPP_DIAG_TRACE_OPERATION_FILE_OPEN, 5)) {
+	if (spp_diag_trace_runtime_operation_return(&child3, 5, 5)) {
 		fprintf(stderr, "op return child3 op 5 failed\n");
 		return 1;
 	}
@@ -388,7 +388,7 @@ int main(int argc, char **argv)
 	}
 
 	/* seq 19: OPERATION_RETURN (child 3, op 6) */
-	if (spp_diag_trace_runtime_operation_return(&child3, 6, SPP_DIAG_TRACE_OPERATION_MMAP, 0x71000000)) {
+	if (spp_diag_trace_runtime_operation_return(&child3, 6, 0x71000000)) {
 		fprintf(stderr, "op return child3 op 6 failed\n");
 		return 1;
 	}
@@ -431,7 +431,7 @@ int main(int argc, char **argv)
 	}
 
 	/* seq 22: OPERATION_RETURN (child 3, op 7) */
-	if (spp_diag_trace_runtime_operation_return(&child3, 7, SPP_DIAG_TRACE_OPERATION_FILE_OPEN, -5)) {
+	if (spp_diag_trace_runtime_operation_return(&child3, 7, -5)) {
 		fprintf(stderr, "op return child3 op 7 failed\n");
 		return 1;
 	}
@@ -492,7 +492,7 @@ int main(int argc, char **argv)
 	}
 
 	/* seq 28: OPERATION_RETURN (child 4, op 9) */
-	if (spp_diag_trace_runtime_operation_return(&child4, 9, SPP_DIAG_TRACE_OPERATION_EXEC, -8)) {
+	if (spp_diag_trace_runtime_operation_return(&child4, 9, -8)) {
 		fprintf(stderr, "op return child4 op 9 failed\n");
 		return 1;
 	}
@@ -529,7 +529,7 @@ int main(int argc, char **argv)
 		}
 
 		/* seq 32: OPERATION_RETURN (root, op 10) */
-		if (spp_diag_trace_runtime_operation_return(&root_task, get_task_open_op(1), SPP_DIAG_TRACE_OPERATION_FILE_OPEN, -2)) {
+		if (spp_diag_trace_runtime_operation_return(&root_task, get_task_open_op(1), -2)) {
 			fprintf(stderr, "op return root op 10 failed\n");
 			return 1;
 		}
@@ -568,7 +568,7 @@ int main(int argc, char **argv)
 	}
 
 	/* seq 35: OPERATION_RETURN (root, op 11) */
-	if (spp_diag_trace_runtime_operation_return(&root_task, get_task_open_op(1), SPP_DIAG_TRACE_OPERATION_FILE_OPEN, -2)) {
+	if (spp_diag_trace_runtime_operation_return(&root_task, get_task_open_op(1), -2)) {
 		fprintf(stderr, "op return root op 11 failed\n");
 		return 1;
 	}
@@ -596,7 +596,7 @@ int main(int argc, char **argv)
 	}
 
 	/* seq 38: OPERATION_RETURN (root, op 12) */
-	if (spp_diag_trace_runtime_operation_return(&root_task, get_task_open_op(1), SPP_DIAG_TRACE_OPERATION_FILE_OPEN, -2)) {
+	if (spp_diag_trace_runtime_operation_return(&root_task, get_task_open_op(1), -2)) {
 		fprintf(stderr, "op return root op 12 failed\n");
 		return 1;
 	}
@@ -635,7 +635,7 @@ int main(int argc, char **argv)
 	}
 
 	/* seq 41: OPERATION_RETURN (root, op 13) */
-	if (spp_diag_trace_runtime_operation_return(&root_task, get_task_open_op(1), SPP_DIAG_TRACE_OPERATION_CONNECT, -13)) {
+	if (spp_diag_trace_runtime_operation_return(&root_task, get_task_open_op(1), -13)) {
 		fprintf(stderr, "op return root op 13 failed\n");
 		return 1;
 	}
@@ -674,7 +674,7 @@ int main(int argc, char **argv)
 	}
 
 	/* seq 44: OPERATION_RETURN (root, op 14) */
-	if (spp_diag_trace_runtime_operation_return(&root_task, get_task_open_op(1), SPP_DIAG_TRACE_OPERATION_CONNECT, -13)) {
+	if (spp_diag_trace_runtime_operation_return(&root_task, get_task_open_op(1), -13)) {
 		fprintf(stderr, "op return root op 14 failed\n");
 		return 1;
 	}
@@ -713,7 +713,7 @@ int main(int argc, char **argv)
 	}
 
 	/* seq 47: OPERATION_RETURN (root, op 15) */
-	if (spp_diag_trace_runtime_operation_return(&root_task, get_task_open_op(1), SPP_DIAG_TRACE_OPERATION_SENDMSG, -1)) {
+	if (spp_diag_trace_runtime_operation_return(&root_task, get_task_open_op(1), -1)) {
 		fprintf(stderr, "op return root op 15 failed\n");
 		return 1;
 	}
@@ -753,7 +753,7 @@ int main(int argc, char **argv)
 	/* seq 50: OPERATION_RETURN (root, op 16) */
 	{
 		int res = flag_successful_denial_canary ? 0 : -13;
-		if (spp_diag_trace_runtime_operation_return(&root_task, get_task_open_op(1), SPP_DIAG_TRACE_OPERATION_EXEC, res)) {
+		if (spp_diag_trace_runtime_operation_return(&root_task, get_task_open_op(1), res)) {
 			fprintf(stderr, "op return root op 16 failed\n");
 			return 1;
 		}
@@ -781,7 +781,7 @@ int main(int argc, char **argv)
 	}
 
 	/* seq 53: OPERATION_RETURN (root, op 17) */
-	if (spp_diag_trace_runtime_operation_return(&root_task, get_task_open_op(1), SPP_DIAG_TRACE_OPERATION_EXEC, -13)) {
+	if (spp_diag_trace_runtime_operation_return(&root_task, get_task_open_op(1), -13)) {
 		fprintf(stderr, "op return root op 17 failed\n");
 		return 1;
 	}
@@ -808,7 +808,7 @@ int main(int argc, char **argv)
 	}
 
 	/* seq 56: OPERATION_RETURN (root, op 18) */
-	if (spp_diag_trace_runtime_operation_return(&root_task, get_task_open_op(1), SPP_DIAG_TRACE_OPERATION_EXEC, -13)) {
+	if (spp_diag_trace_runtime_operation_return(&root_task, get_task_open_op(1), -13)) {
 		fprintf(stderr, "op return root op 18 failed\n");
 		return 1;
 	}
@@ -857,7 +857,7 @@ int main(int argc, char **argv)
 	}
 
 	/* seq 60: OPERATION_RETURN (root, op 19) */
-	if (spp_diag_trace_runtime_operation_return(&root_task, get_task_open_op(1), SPP_DIAG_TRACE_OPERATION_FILE_OPEN, 7)) {
+	if (spp_diag_trace_runtime_operation_return(&root_task, get_task_open_op(1), 7)) {
 		fprintf(stderr, "op return root op 19 failed\n");
 		return 1;
 	}
@@ -888,7 +888,7 @@ int main(int argc, char **argv)
 	}
 
 	/* seq 62: OPERATION_RETURN (root, op 20) */
-	if (spp_diag_trace_runtime_operation_return(&root_task, get_task_open_op(1), SPP_DIAG_TRACE_OPERATION_MMAP, 0x72000000)) {
+	if (spp_diag_trace_runtime_operation_return(&root_task, get_task_open_op(1), 0x72000000)) {
 		fprintf(stderr, "op return root op 20 failed\n");
 		return 1;
 	}
@@ -944,7 +944,7 @@ int main(int argc, char **argv)
 	}
 
 	/* seq 65: OPERATION_RETURN (root, op 21) */
-	if (spp_diag_trace_runtime_operation_return(&root_task, get_task_open_op(1), SPP_DIAG_TRACE_OPERATION_MPROTECT, 0)) {
+	if (spp_diag_trace_runtime_operation_return(&root_task, get_task_open_op(1), 0)) {
 		fprintf(stderr, "op return root op 21 failed\n");
 		return 1;
 	}

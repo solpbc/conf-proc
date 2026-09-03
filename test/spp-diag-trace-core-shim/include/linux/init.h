@@ -4,6 +4,7 @@
 
 #define __init
 #define core_initcall(fn) static int (*__host_initcall_##fn)(void) __attribute__((unused)) = fn
+#define fs_initcall(fn) static int (*__host_initcall_##fn)(void) __attribute__((unused)) = fn
 
 extern char *saved_command_line;
 extern unsigned int saved_command_line_len;

@@ -11,6 +11,7 @@
 #include <linux/kmod.h>
 #include <linux/panic.h>
 #include <linux/sched.h>
+#include <linux/security.h>
 #include <linux/spp_diag_trace_bootstrap.h>
 #include <linux/spp_diag_trace_runtime.h>
 #include <linux/vmalloc.h>
@@ -113,12 +114,25 @@ static void test_runtime_not_ready_fails_release(void)
 	CHECK(spp_diag_trace_core_is_green() == 0, "core failed when runtime not ready");
 }
 
+static void test_runtime_registration_failure_is_not_ready(void)
+{
+	reset_all();
+	spp_diag_trace_bootstrap_init();
+	spp_diag_trace_bootstrap_ima_ready();
+	host_securityfs_set_fail_dir(1);
+
+	CHECK(spp_diag_trace_runtime_init() != 0, "runtime registration failure returns error");
+	CHECK(!spp_diag_trace_runtime_ready(), "registration failure leaves runtime not ready");
+	CHECK(spp_diag_trace_core_is_green() == 0, "registration failure is sticky red");
+}
+
 int main(void)
 {
 	printf("=== Running conf-proc SPP diagnostic trace core runtime selftest ===\n");
 	test_target_sizes();
 	test_runtime_bootstrap_and_root_bind();
 	test_runtime_not_ready_fails_release();
+	test_runtime_registration_failure_is_not_ready();
 
 	if (failures == 0) {
 		printf("All runtime selftest checks passed successfully.\n");
