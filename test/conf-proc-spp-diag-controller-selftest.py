@@ -145,7 +145,10 @@ def test_poison_import_failure_terminates() -> None:
         assert exc.phase == 4
     assert len(recorder.poweroff_calls) == 1
     assert recorder.poweroff_calls[0][:8] == b"SPPFLR1\x00"
-    assert recorder.poweroff_calls[0][9] == 4  # current_phase byte (offset 8 is the reason-code index)
+    assert len(recorder.poweroff_calls[0]) == 112
+    assert int.from_bytes(recorder.poweroff_calls[0][12:16], "big") == 4
+    assert recorder.poweroff_calls[0][16:48] == IDENTITY.challenge
+    assert recorder.poweroff_calls[0][48:80] == IDENTITY.run_identity
     phases_written = [int.from_bytes(c[112:114], "big") for c in recorder.control_writes]
     assert phases_written == [2, 3, 4]
     assert recorder.read_calls == 0

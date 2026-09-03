@@ -12,7 +12,6 @@ quote command is constructed and issued here, appraised only later, elsewhere.
 
 from __future__ import annotations
 
-import subprocess
 from dataclasses import dataclass
 from typing import Callable, Final
 
@@ -20,10 +19,15 @@ from conf_proc_spp_diag_pcr import SPP_DIAG_PCR_SELECTION
 from conf_proc_spp_diagbundle_protocol import quote_qualifying_data
 
 
-# Fixed persistent AK handle convention for this appliance (senior-engineer decision;
-# not given by any upstream literal spec).
-FIXED_AK_HANDLE: Final = "0x81010002"
+FIXED_AK_HANDLE: Final = "0x81000003"
 FIXED_HASH_ALGORITHM: Final = "sha256"
+TPM2_QUOTE_PATH: Final = "/usr/bin/tpm2_quote"
+QUOTE_OUTPUT_MSG: Final = "/run/spp-diag/quote.msg"
+QUOTE_OUTPUT_SIG: Final = "/run/spp-diag/quote.sig"
+QUOTE_OUTPUT_PCRS: Final = "/run/spp-diag/quote.pcrs"
+QUOTE_ENVIRONMENT: Final = {"LANG": "C", "LC_ALL": "C", "TZ": "UTC"}
+QUOTE_DEADLINE_SECONDS: Final = 30.0
+QUOTE_OUTPUT_CAP_BYTES: Final = 1_048_576
 
 
 @dataclass(frozen=True)
@@ -40,13 +44,10 @@ def build_quote_invocation(
     signed_image_binding_address: str,
     target_profile_id: str,
     control_plan_address: str,
-    quote_msg_out: str,
-    quote_sig_out: str,
-    quote_pcrs_out: str,
 ) -> QuoteInvocation:
     """Build the exact tpm2_quote argv using only the shared-module PCR selection and
     the shared quote-qualifying-data constructor -- fields fixed, no caller-declared
-    command surface beyond the six output/identity parameters above."""
+    command surface beyond the identity parameters above."""
 
     qd_hex = quote_qualifying_data(
         challenge=challenge.hex(),
@@ -59,33 +60,43 @@ def build_quote_invocation(
     qualifying_data = bytes.fromhex(qd_hex)
     pcr_list = ",".join(str(index) for index in SPP_DIAG_PCR_SELECTION)
     argv = (
-        "tpm2_quote",
+        TPM2_QUOTE_PATH,
         "-c",
         FIXED_AK_HANDLE,
         "-l",
         f"{FIXED_HASH_ALGORITHM}:{pcr_list}",
         "-q",
         qualifying_data.hex(),
-        "-m",
-        quote_msg_out,
-        "-s",
-        quote_sig_out,
-        "-o",
-        quote_pcrs_out,
         "-g",
         FIXED_HASH_ALGORITHM,
+        "--scheme",
+        "rsassa",
+        "-m",
+        QUOTE_OUTPUT_MSG,
+        "-s",
+        QUOTE_OUTPUT_SIG,
+        "-o",
+        QUOTE_OUTPUT_PCRS,
     )
     return QuoteInvocation(argv=argv, qualifying_data=qualifying_data)
 
 
 @dataclass
 class QuoteOps:
-    run_tool: Callable[[tuple[str, ...]], "subprocess.CompletedProcess"]
+    run_tool: Callable[[tuple[str, ...], dict[str, str], float, int], object]
 
 
-def run_quote(ops: QuoteOps, invocation: QuoteInvocation) -> "subprocess.CompletedProcess":
-    return ops.run_tool(invocation.argv)
+class SppDiagQuoteError(RuntimeError):
+    pass
 
 
-def real_run_tool(argv: tuple[str, ...]) -> "subprocess.CompletedProcess":
-    return subprocess.run(list(argv), capture_output=True, check=False)
+def run_quote(ops: QuoteOps, invocation: QuoteInvocation) -> object:
+    result = ops.run_tool(
+        invocation.argv,
+        dict(QUOTE_ENVIRONMENT),
+        QUOTE_DEADLINE_SECONDS,
+        QUOTE_OUTPUT_CAP_BYTES,
+    )
+    if getattr(result, "returncode", None) != 0:
+        raise SppDiagQuoteError("TPM quote child failed")
+    return result

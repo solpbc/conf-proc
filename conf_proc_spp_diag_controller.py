@@ -139,57 +139,57 @@ class ControllerTerminated(Exception):
 _PHASE_DEADLINE_SECONDS: Final = 30.0
 
 
-def _terminate(ops: ControllerOps, reason_code: str, phase: int) -> None:
+def _terminate(ops: ControllerOps, identity: ControllerIdentity, reason_code: str, phase: int) -> None:
     assert reason_code in ALL_SPPFLR1_REASONS
-    record = encode_failure_terminal(reason_code, phase)
+    record = encode_failure_terminal(reason_code, phase, identity.challenge, identity.run_identity)
     ops.request_poweroff(record)
     raise ControllerTerminated(reason_code, phase)
 
 
 def _advance(ops: ControllerOps, identity: ControllerIdentity, phase_number: int, deadline: float) -> None:
     if ops.monotonic() > deadline:
-        _terminate(ops, SPPFLR1_DEADLINE, phase_number)
+        _terminate(ops, identity, SPPFLR1_DEADLINE, phase_number)
     command = encode_command(_CMD_ADVANCE_PHASE, phase_number, identity.challenge, identity.run_identity, identity.control_plan_address)
     try:
         ops.write_control(command)
     except Exception:
-        _terminate(ops, SPPFLR1_CONTROL_WRITE, phase_number)
+        _terminate(ops, identity, SPPFLR1_CONTROL_WRITE, phase_number)
 
 
 def _run_poison_phases(ops: ControllerOps, identity: ControllerIdentity, deadline: float) -> None:
     _advance(ops, identity, 4, deadline)
     if not ops.import_probe(_POISON_IMPORT_MODULE):
-        _terminate(ops, SPPFLR1_CHILD_SUPERVISION, 4)
+        _terminate(ops, identity, SPPFLR1_CHILD_SUPERVISION, 4)
     _advance(ops, identity, 5, deadline)
     if not ops.cdll_probe(_POISON_MODULE_PATH):
-        _terminate(ops, SPPFLR1_CHILD_SUPERVISION, 5)
+        _terminate(ops, identity, SPPFLR1_CHILD_SUPERVISION, 5)
     _advance(ops, identity, 6, deadline)
     if not ops.cdll_probe(_POISON_LIBRARY_SONAME):
-        _terminate(ops, SPPFLR1_CHILD_SUPERVISION, 6)
+        _terminate(ops, identity, SPPFLR1_CHILD_SUPERVISION, 6)
 
 
 def _run_network_phases(ops: ControllerOps, identity: ControllerIdentity, deadline: float) -> None:
     _advance(ops, identity, 7, deadline)
     if not ops.connect_probe("ipv4", _REMOTE_PACKAGE_ENDPOINT):
-        _terminate(ops, SPPFLR1_NETWORK_DENIAL, 7)
+        _terminate(ops, identity, SPPFLR1_NETWORK_DENIAL, 7)
     _advance(ops, identity, 8, deadline)
     if not ops.connect_probe("ipv6", _REMOTE_MODEL_ENDPOINT):
-        _terminate(ops, SPPFLR1_NETWORK_DENIAL, 8)
+        _terminate(ops, identity, SPPFLR1_NETWORK_DENIAL, 8)
     _advance(ops, identity, 9, deadline)
     if not ops.connect_probe("udp", _REMOTE_PLUGIN_ENDPOINT):
-        _terminate(ops, SPPFLR1_NETWORK_DENIAL, 9)
+        _terminate(ops, identity, SPPFLR1_NETWORK_DENIAL, 9)
 
 
 def _run_exec_phases(ops: ControllerOps, identity: ControllerIdentity, deadline: float) -> None:
     _advance(ops, identity, 10, deadline)
     if not ops.exec_probe(_WRITABLE_EXEC_CANARY):
-        _terminate(ops, SPPFLR1_CANARY_EXEC, 10)
+        _terminate(ops, identity, SPPFLR1_CANARY_EXEC, 10)
     _advance(ops, identity, 11, deadline)
     if not ops.exec_probe(_ATTACHED_DISK_EXEC_CANARY):
-        _terminate(ops, SPPFLR1_CANARY_EXEC, 11)
+        _terminate(ops, identity, SPPFLR1_CANARY_EXEC, 11)
     _advance(ops, identity, 12, deadline)
     if not ops.exec_probe(_REMOTE_CODE_EXEC_CANARY):
-        _terminate(ops, SPPFLR1_CANARY_EXEC, 12)
+        _terminate(ops, identity, SPPFLR1_CANARY_EXEC, 12)
 
 
 def run_controller(ops: ControllerOps, identity: ControllerIdentity) -> bytes:
@@ -210,17 +210,17 @@ def run_controller(ops: ControllerOps, identity: ControllerIdentity) -> bytes:
 
     _advance(ops, identity, 13, deadline)  # jit_cache
     if not ops.jit_probe():
-        _terminate(ops, SPPFLR1_CHILD_SUPERVISION, 13)
+        _terminate(ops, identity, SPPFLR1_CHILD_SUPERVISION, 13)
 
     _advance(ops, identity, 14, deadline)  # evidence_finalize
 
     if ops.monotonic() > deadline:
-        _terminate(ops, SPPFLR1_DEADLINE, _CMD_SEAL_PHASE)
+        _terminate(ops, identity, SPPFLR1_DEADLINE, _CMD_SEAL_PHASE)
     seal_command = encode_command(_CMD_SEAL, _CMD_SEAL_PHASE, identity.challenge, identity.run_identity, identity.control_plan_address)
     try:
         ops.write_control(seal_command)
     except Exception:
-        _terminate(ops, SPPFLR1_CONTROL_WRITE, _CMD_SEAL_PHASE)
+        _terminate(ops, identity, SPPFLR1_CONTROL_WRITE, _CMD_SEAL_PHASE)
 
     return ops.read_stream(64 * 1024 * 1024)
 

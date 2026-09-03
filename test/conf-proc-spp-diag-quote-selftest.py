@@ -12,7 +12,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from conf_proc_spp_diag_pcr import SPP_DIAG_PCR_SELECTION
-from conf_proc_spp_diag_quote import FIXED_AK_HANDLE, QuoteOps, build_quote_invocation, run_quote
+from conf_proc_spp_diag_quote import FIXED_AK_HANDLE, QuoteOps, SppDiagQuoteError, build_quote_invocation, run_quote
 
 
 BASE_KWARGS = dict(
@@ -22,22 +22,32 @@ BASE_KWARGS = dict(
     signed_image_binding_address="bb" * 32,
     target_profile_id="target-1",
     control_plan_address="cc" * 32,
-    quote_msg_out="/tmp/quote.msg",
-    quote_sig_out="/tmp/quote.sig",
-    quote_pcrs_out="/tmp/quote.pcrs",
 )
 
 
 def test_argv_uses_shared_pcr_selection() -> None:
     invocation = build_quote_invocation(**BASE_KWARGS)
     expected_pcr_list = ",".join(str(i) for i in SPP_DIAG_PCR_SELECTION)
-    assert f"sha256:{expected_pcr_list}" in invocation.argv
-    assert FIXED_AK_HANDLE in invocation.argv
-    assert invocation.argv[0] == "tpm2_quote"
-    assert invocation.argv[invocation.argv.index("-q") + 1] == invocation.qualifying_data.hex()
-    assert invocation.argv[invocation.argv.index("-m") + 1] == "/tmp/quote.msg"
-    assert invocation.argv[invocation.argv.index("-s") + 1] == "/tmp/quote.sig"
-    assert invocation.argv[invocation.argv.index("-o") + 1] == "/tmp/quote.pcrs"
+    assert FIXED_AK_HANDLE == "0x81000003"
+    assert invocation.argv == (
+        "/usr/bin/tpm2_quote",
+        "-c",
+        "0x81000003",
+        "-l",
+        f"sha256:{expected_pcr_list}",
+        "-q",
+        invocation.qualifying_data.hex(),
+        "-g",
+        "sha256",
+        "--scheme",
+        "rsassa",
+        "-m",
+        "/run/spp-diag/quote.msg",
+        "-s",
+        "/run/spp-diag/quote.sig",
+        "-o",
+        "/run/spp-diag/quote.pcrs",
+    )
 
 
 def test_mutations_change_qualifying_data() -> None:
@@ -60,8 +70,8 @@ def test_recording_fake_receives_exact_argv() -> None:
     invocation = build_quote_invocation(**BASE_KWARGS)
     recorded = []
 
-    def fake_run_tool(argv):
-        recorded.append(argv)
+    def fake_run_tool(argv, environment, deadline_seconds, output_cap_bytes):
+        recorded.append((argv, environment, deadline_seconds, output_cap_bytes))
 
         class Result:
             returncode = 0
@@ -71,7 +81,20 @@ def test_recording_fake_receives_exact_argv() -> None:
     ops = QuoteOps(run_tool=fake_run_tool)
     run_quote(ops, invocation)
     assert len(recorded) == 1
-    assert recorded[0] == invocation.argv
+    assert recorded[0] == (invocation.argv, {"LANG": "C", "LC_ALL": "C", "TZ": "UTC"}, 30.0, 1_048_576)
+
+
+def test_nonzero_child_fails_closed() -> None:
+    class Result:
+        returncode = 1
+
+    ops = QuoteOps(run_tool=lambda _argv, _env, _deadline, _cap: Result())
+    try:
+        run_quote(ops, build_quote_invocation(**BASE_KWARGS))
+    except SppDiagQuoteError:
+        pass
+    else:
+        raise AssertionError("nonzero quote child accepted")
 
 
 def test_module_does_not_import_appraiser() -> None:
@@ -93,6 +116,7 @@ def main() -> int:
         test_argv_uses_shared_pcr_selection,
         test_mutations_change_qualifying_data,
         test_recording_fake_receives_exact_argv,
+        test_nonzero_child_fails_closed,
         test_module_does_not_import_appraiser,
     ]
     for test in tests:
