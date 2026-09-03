@@ -1,28 +1,19 @@
 /* SPDX-License-Identifier: AGPL-3.0-only */
 /* Copyright (c) 2026 sol pbc */
 
-/*
- * Header-free CUDA-driver child for the SPP diagnostic appliance.
- *
- * Dlopens libcuda.so.1 by SONAME and resolves the small fixed subset of the
- * CUDA Driver API this program needs via dlsym -- no CUDA headers or link
- * libraries. The needed entry-point prototypes are hand-declared below,
- * matching the stable public CUDA Driver ABI.
- *
- * Invocation: spp-diag-cuda-driver <32-byte-hex-nonce>
- * Output: a 32-byte-hex witness result on stdout, nothing else, exit 0 on
- * success. Any driver-call failure prints one line to stderr and exits
- * nonzero without printing a result line.
- */
+/* Fixed CUDA-driver child for the non-serving SPP diagnostic appliance. */
 
 #define _GNU_SOURCE
 
-#include <ctype.h>
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 typedef int CUresult;
 typedef int CUdevice;
@@ -32,166 +23,260 @@ typedef struct CUfunc_st *CUfunction;
 typedef unsigned long long CUdeviceptr;
 
 #define CUDA_SUCCESS 0
+#define RESULT_BYTES 32U
+#define MAX_MODEL_BYTES (8U * 1024U * 1024U)
+
+#ifndef SPP_DIAG_MODEL_PATH
+#define SPP_DIAG_MODEL_PATH "/opt/solstone/models/synthetic-fixture-v1.bin"
+#endif
 
 typedef CUresult (*cuInit_t)(unsigned int);
+typedef CUresult (*cuDeviceGetCount_t)(int *);
 typedef CUresult (*cuDeviceGet_t)(CUdevice *, int);
-typedef CUresult (*cuCtxCreate_t)(CUcontext *, unsigned int, CUdevice);
+typedef CUresult (*cuCtxCreate_v2_t)(CUcontext *, unsigned int, CUdevice);
+typedef CUresult (*cuCtxDestroy_v2_t)(CUcontext);
+typedef CUresult (*cuCtxSynchronize_t)(void);
 typedef CUresult (*cuModuleLoadData_t)(CUmodule *, const void *);
 typedef CUresult (*cuModuleGetFunction_t)(CUfunction *, CUmodule, const char *);
-typedef CUresult (*cuMemAlloc_t)(CUdeviceptr *, size_t);
-typedef CUresult (*cuMemcpyHtoD_t)(CUdeviceptr, const void *, size_t);
-typedef CUresult (*cuMemcpyDtoH_t)(void *, CUdeviceptr, size_t);
-typedef CUresult (*cuMemFree_t)(CUdeviceptr);
+typedef CUresult (*cuModuleUnload_t)(CUmodule);
+typedef CUresult (*cuMemAlloc_v2_t)(CUdeviceptr *, size_t);
+typedef CUresult (*cuMemcpyHtoD_v2_t)(CUdeviceptr, const void *, size_t);
+typedef CUresult (*cuMemcpyDtoH_v2_t)(void *, CUdeviceptr, size_t);
+typedef CUresult (*cuMemFree_v2_t)(CUdeviceptr);
 typedef CUresult (*cuLaunchKernel_t)(
     CUfunction, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int,
     void *, void **, void **
 );
-typedef CUresult (*cuCtxDestroy_t)(CUcontext);
 
-/* Fixed literal PTX-shaped payload identifying the witness operation. This
- * program never compiles or executes real PTX -- the payload is a stable
- * identifying constant that the driver-side module loader (real or fake)
- * validates, exactly like a real cuModuleLoadData call validates its module
- * image bytes. */
-static const char k_witness_module[] =
-    ".version 8.0\n.target spp_diag_witness_v1\n.address_size 64\n"
-    ".visible .entry spp_diag_witness(.param .u64 in, .param .u64 out) { ret; }\n";
+/* One thread owns each result byte. It XOR-reduces the corresponding
+ * stride-32 model lane into the caller's deterministic 32-byte seed. */
+static const char k_witness_ptx[] =
+    ".version 8.0\n"
+    ".target sm_90\n"
+    ".address_size 64\n"
+    ".visible .entry spp_diag_witness(\n"
+    "    .param .u64 model,\n"
+    "    .param .u64 seed,\n"
+    "    .param .u64 output,\n"
+    "    .param .u64 model_size\n"
+    ")\n"
+    "{\n"
+    "    .reg .pred %p<2>;\n"
+    "    .reg .b32 %r<5>;\n"
+    "    .reg .b64 %rd<10>;\n"
+    "    ld.param.u64 %rd1, [model];\n"
+    "    ld.param.u64 %rd2, [seed];\n"
+    "    ld.param.u64 %rd3, [output];\n"
+    "    ld.param.u64 %rd4, [model_size];\n"
+    "    mov.u32 %r1, %tid.x;\n"
+    "    setp.ge.u32 %p1, %r1, 32;\n"
+    "    @%p1 bra DONE;\n"
+    "    cvt.u64.u32 %rd5, %r1;\n"
+    "    add.u64 %rd6, %rd2, %rd5;\n"
+    "    ld.global.u8 %r2, [%rd6];\n"
+    "LOOP:\n"
+    "    setp.ge.u64 %p1, %rd5, %rd4;\n"
+    "    @%p1 bra STORE;\n"
+    "    add.u64 %rd7, %rd1, %rd5;\n"
+    "    ld.global.u8 %r3, [%rd7];\n"
+    "    xor.b32 %r2, %r2, %r3;\n"
+    "    add.u64 %rd5, %rd5, 32;\n"
+    "    bra LOOP;\n"
+    "STORE:\n"
+    "    cvt.u64.u32 %rd8, %r1;\n"
+    "    add.u64 %rd9, %rd3, %rd8;\n"
+    "    st.global.u8 [%rd9], %r2;\n"
+    "DONE:\n"
+    "    ret;\n"
+    "}\n";
 
 static const char k_witness_function[] = "spp_diag_witness";
+static const unsigned char k_output_magic[8] = {'S', 'P', 'P', 'G', 'P', 'U', 'O', '1'};
 
-#define WITNESS_BYTES 32
-
-static int parse_hex32(const char *hex, unsigned char *out) {
-    if (strlen(hex) != WITNESS_BYTES * 2) {
+static int parse_lower_hex32(const char *hex, unsigned char out[RESULT_BYTES]) {
+    static const char digits[] = "0123456789abcdef";
+    if (strlen(hex) != RESULT_BYTES * 2U) {
         return -1;
     }
-    for (int i = 0; i < WITNESS_BYTES; i++) {
-        char high = hex[i * 2];
-        char low = hex[i * 2 + 1];
-        if (!isxdigit((unsigned char)high) || !isxdigit((unsigned char)low)) {
+    for (size_t index = 0; index < RESULT_BYTES; index++) {
+        const char *high = strchr(digits, hex[index * 2U]);
+        const char *low = strchr(digits, hex[index * 2U + 1U]);
+        if (high == NULL || low == NULL) {
             return -1;
         }
-        char byte_str[3] = {high, low, '\0'};
-        out[i] = (unsigned char)strtoul(byte_str, NULL, 16);
+        out[index] = (unsigned char)(((high - digits) << 4) | (low - digits));
     }
     return 0;
 }
 
-static void print_hex32(const unsigned char *data) {
-    for (int i = 0; i < WITNESS_BYTES; i++) {
-        printf("%02x", data[i]);
+static int write_output_record(const unsigned char result[RESULT_BYTES]) {
+    unsigned char record[48] = {0};
+    memcpy(record, k_output_magic, sizeof(k_output_magic));
+    record[9] = 1;  /* wire version, big-endian u16 */
+    record[11] = 1; /* algorithm id, big-endian u16 */
+    record[15] = RESULT_BYTES; /* payload length, big-endian u32 */
+    memcpy(record + 16, result, RESULT_BYTES);
+    if (fwrite(record, 1, sizeof(record), stdout) != sizeof(record) || fflush(stdout) != 0) {
+        return -1;
     }
-    printf("\n");
+    return 0;
 }
 
 int main(int argc, char **argv) {
-    if (argc != 2) {
-        fprintf(stderr, "usage: spp-diag-cuda-driver <32-byte-hex-nonce>\n");
-        return 2;
-    }
-    unsigned char nonce[WITNESS_BYTES];
-    if (parse_hex32(argv[1], nonce) != 0) {
-        fprintf(stderr, "spp-diag-cuda-driver: malformed nonce\n");
+    int infer_mode = 0;
+    unsigned char seed[RESULT_BYTES] = {0};
+    if (argc == 2 && strcmp(argv[1], "cold") == 0) {
+        infer_mode = 0;
+    } else if (argc == 3 && strcmp(argv[1], "infer") == 0 && parse_lower_hex32(argv[2], seed) == 0) {
+        infer_mode = 1;
+    } else {
+        fprintf(stderr, "spp-diag-cuda-driver: invalid invocation\n");
         return 2;
     }
 
-    void *handle = dlopen("libcuda.so.1", RTLD_NOW);
+    int model_fd = -1;
+    void *model = MAP_FAILED;
+    size_t model_size = 0;
+    if (infer_mode) {
+        model_fd = open(SPP_DIAG_MODEL_PATH, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        if (model_fd < 0) {
+            fprintf(stderr, "spp-diag-cuda-driver: model open failed\n");
+            return 3;
+        }
+        struct stat model_stat;
+        if (fstat(model_fd, &model_stat) != 0 || !S_ISREG(model_stat.st_mode) || model_stat.st_size < 1 ||
+            (uintmax_t)model_stat.st_size > MAX_MODEL_BYTES) {
+            fprintf(stderr, "spp-diag-cuda-driver: model stat failed\n");
+            close(model_fd);
+            return 3;
+        }
+        model_size = (size_t)model_stat.st_size;
+        model = mmap(NULL, model_size, PROT_READ, MAP_PRIVATE, model_fd, 0);
+        if (model == MAP_FAILED) {
+            fprintf(stderr, "spp-diag-cuda-driver: model mmap failed\n");
+            close(model_fd);
+            return 3;
+        }
+    }
+
+    void *handle = dlopen("libcuda.so.1", RTLD_NOW | RTLD_LOCAL);
     if (handle == NULL) {
-        fprintf(stderr, "spp-diag-cuda-driver: dlopen failed: %s\n", dlerror());
-        return 3;
+        fprintf(stderr, "spp-diag-cuda-driver: CUDA driver unavailable\n");
+        if (model != MAP_FAILED) {
+            munmap(model, model_size);
+        }
+        if (model_fd >= 0) {
+            close(model_fd);
+        }
+        return 4;
     }
 
-#define RESOLVE(name)                                                                                                \
-    name##_t name;                                                                                                    \
-    {                                                                                                                  \
-        void *sym = dlsym(handle, #name);                                                                             \
-        memcpy(&name, &sym, sizeof(name));                                                                            \
-    }                                                                                                                  \
-    if (name == NULL) {                                                                                             \
-        fprintf(stderr, "spp-diag-cuda-driver: dlsym %s failed: %s\n", #name, dlerror());                           \
-        dlclose(handle);                                                                                             \
-        return 4;                                                                                                    \
-    }
+#define RESOLVE(name)                                                                                                  \
+    name##_t name = NULL;                                                                                              \
+    do {                                                                                                                \
+        void *symbol = dlsym(handle, #name);                                                                            \
+        memcpy(&name, &symbol, sizeof(name));                                                                            \
+        if (name == NULL) {                                                                                              \
+            fprintf(stderr, "spp-diag-cuda-driver: CUDA symbol unavailable\n");                                      \
+            goto cleanup;                                                                                                \
+        }                                                                                                                \
+    } while (0)
 
-    RESOLVE(cuInit)
-    RESOLVE(cuDeviceGet)
-    RESOLVE(cuCtxCreate)
-    RESOLVE(cuModuleLoadData)
-    RESOLVE(cuModuleGetFunction)
-    RESOLVE(cuMemAlloc)
-    RESOLVE(cuMemcpyHtoD)
-    RESOLVE(cuMemcpyDtoH)
-    RESOLVE(cuMemFree)
-    RESOLVE(cuLaunchKernel)
-    RESOLVE(cuCtxDestroy)
+    int rc = 5;
+    int cleanup_failed = 0;
+    CUcontext context = NULL;
+    CUmodule module = NULL;
+    CUdeviceptr model_device = 0;
+    CUdeviceptr seed_device = 0;
+    CUdeviceptr output_device = 0;
+    unsigned char result[RESULT_BYTES] = {0};
+
+    RESOLVE(cuInit);
+    RESOLVE(cuDeviceGetCount);
+    RESOLVE(cuDeviceGet);
+    RESOLVE(cuCtxCreate_v2);
+    RESOLVE(cuCtxDestroy_v2);
+    RESOLVE(cuCtxSynchronize);
+    RESOLVE(cuModuleLoadData);
+    RESOLVE(cuModuleGetFunction);
+    RESOLVE(cuModuleUnload);
+    RESOLVE(cuMemAlloc_v2);
+    RESOLVE(cuMemcpyHtoD_v2);
+    RESOLVE(cuMemcpyDtoH_v2);
+    RESOLVE(cuMemFree_v2);
+    RESOLVE(cuLaunchKernel);
 
 #undef RESOLVE
 
-    int rc = 5;
-    CUcontext ctx = NULL;
-    CUdeviceptr in_ptr = 0;
-    CUdeviceptr out_ptr = 0;
-
-    if (cuInit(0) != CUDA_SUCCESS) {
-        fprintf(stderr, "spp-diag-cuda-driver: cuInit failed\n");
-        goto cleanup;
-    }
+    int device_count = 0;
     CUdevice device;
-    if (cuDeviceGet(&device, 0) != CUDA_SUCCESS) {
-        fprintf(stderr, "spp-diag-cuda-driver: cuDeviceGet failed\n");
+    if (cuInit(0) != CUDA_SUCCESS || cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count != 1 ||
+        cuDeviceGet(&device, 0) != CUDA_SUCCESS || cuCtxCreate_v2(&context, 0, device) != CUDA_SUCCESS) {
+        fprintf(stderr, "spp-diag-cuda-driver: CUDA initialization failed\n");
         goto cleanup;
     }
-    if (cuCtxCreate(&ctx, 0, device) != CUDA_SUCCESS) {
-        fprintf(stderr, "spp-diag-cuda-driver: cuCtxCreate failed\n");
+    if (!infer_mode) {
+        rc = 0;
         goto cleanup;
     }
-    CUmodule module;
-    if (cuModuleLoadData(&module, k_witness_module) != CUDA_SUCCESS) {
-        fprintf(stderr, "spp-diag-cuda-driver: cuModuleLoadData failed\n");
+
+    if (cuModuleLoadData(&module, k_witness_ptx) != CUDA_SUCCESS) {
+        fprintf(stderr, "spp-diag-cuda-driver: PTX load failed\n");
         goto cleanup;
     }
     CUfunction function;
-    if (cuModuleGetFunction(&function, module, k_witness_function) != CUDA_SUCCESS) {
-        fprintf(stderr, "spp-diag-cuda-driver: cuModuleGetFunction failed\n");
-        goto cleanup;
-    }
-    if (cuMemAlloc(&in_ptr, WITNESS_BYTES) != CUDA_SUCCESS || cuMemAlloc(&out_ptr, WITNESS_BYTES) != CUDA_SUCCESS) {
-        fprintf(stderr, "spp-diag-cuda-driver: cuMemAlloc failed\n");
-        goto cleanup;
-    }
-    if (cuMemcpyHtoD(in_ptr, nonce, WITNESS_BYTES) != CUDA_SUCCESS) {
-        fprintf(stderr, "spp-diag-cuda-driver: cuMemcpyHtoD failed\n");
-        goto cleanup;
-    }
-    void *kernel_params[2];
-    kernel_params[0] = &in_ptr;
-    kernel_params[1] = &out_ptr;
-    if (cuLaunchKernel(function, 1, 1, 1, WITNESS_BYTES, 1, 1, 0, NULL, kernel_params, NULL) != CUDA_SUCCESS) {
-        fprintf(stderr, "spp-diag-cuda-driver: cuLaunchKernel failed\n");
-        goto cleanup;
-    }
-    unsigned char result[WITNESS_BYTES];
-    if (cuMemcpyDtoH(result, out_ptr, WITNESS_BYTES) != CUDA_SUCCESS) {
-        fprintf(stderr, "spp-diag-cuda-driver: cuMemcpyDtoH failed\n");
+    if (cuModuleGetFunction(&function, module, k_witness_function) != CUDA_SUCCESS ||
+        cuMemAlloc_v2(&model_device, model_size) != CUDA_SUCCESS ||
+        cuMemAlloc_v2(&seed_device, RESULT_BYTES) != CUDA_SUCCESS ||
+        cuMemAlloc_v2(&output_device, RESULT_BYTES) != CUDA_SUCCESS ||
+        cuMemcpyHtoD_v2(model_device, model, model_size) != CUDA_SUCCESS ||
+        cuMemcpyHtoD_v2(seed_device, seed, RESULT_BYTES) != CUDA_SUCCESS) {
+        fprintf(stderr, "spp-diag-cuda-driver: CUDA input setup failed\n");
         goto cleanup;
     }
 
-    print_hex32(result);
+    uint64_t model_size_u64 = model_size;
+    void *kernel_params[] = {&model_device, &seed_device, &output_device, &model_size_u64};
+    if (cuLaunchKernel(function, 1, 1, 1, RESULT_BYTES, 1, 1, 0, NULL, kernel_params, NULL) != CUDA_SUCCESS ||
+        cuCtxSynchronize() != CUDA_SUCCESS ||
+        cuMemcpyDtoH_v2(result, output_device, RESULT_BYTES) != CUDA_SUCCESS) {
+        fprintf(stderr, "spp-diag-cuda-driver: CUDA execution failed\n");
+        goto cleanup;
+    }
     rc = 0;
 
 cleanup:
-    if (in_ptr != 0) {
-        cuMemFree(in_ptr);
+    if (output_device != 0 && cuMemFree_v2(output_device) != CUDA_SUCCESS) {
+        cleanup_failed = 1;
     }
-    if (out_ptr != 0) {
-        cuMemFree(out_ptr);
+    if (seed_device != 0 && cuMemFree_v2(seed_device) != CUDA_SUCCESS) {
+        cleanup_failed = 1;
     }
-    if (ctx != NULL) {
-        if (cuCtxDestroy(ctx) != CUDA_SUCCESS && rc == 0) {
-            fprintf(stderr, "spp-diag-cuda-driver: cuCtxDestroy failed\n");
-            rc = 6;
-        }
+    if (model_device != 0 && cuMemFree_v2(model_device) != CUDA_SUCCESS) {
+        cleanup_failed = 1;
     }
-    dlclose(handle);
+    if (module != NULL && cuModuleUnload(module) != CUDA_SUCCESS) {
+        cleanup_failed = 1;
+    }
+    if (context != NULL && cuCtxDestroy_v2(context) != CUDA_SUCCESS) {
+        cleanup_failed = 1;
+    }
+    if (dlclose(handle) != 0) {
+        cleanup_failed = 1;
+    }
+    if (model != MAP_FAILED && munmap(model, model_size) != 0) {
+        cleanup_failed = 1;
+    }
+    if (model_fd >= 0 && close(model_fd) != 0) {
+        cleanup_failed = 1;
+    }
+    if (cleanup_failed) {
+        fprintf(stderr, "spp-diag-cuda-driver: cleanup failed\n");
+        rc = 6;
+    }
+    if (rc == 0 && infer_mode && write_output_record(result) != 0) {
+        fprintf(stderr, "spp-diag-cuda-driver: output failed\n");
+        rc = 7;
+    }
     return rc;
 }
