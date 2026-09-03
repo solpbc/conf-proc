@@ -14,6 +14,7 @@ import posixpath
 import re
 import shutil
 import stat
+import struct
 from typing import Final
 
 from conf_proc_guard import HermeticGuard
@@ -61,6 +62,14 @@ SIGNED_IMAGE_MEMBER_NAMES: Final = (
 )
 _SIGNED_IMAGE_MEMBER_SET: Final = frozenset(SIGNED_IMAGE_MEMBER_NAMES)
 _O_NOFOLLOW: Final = getattr(os, "O_NOFOLLOW", 0)
+SPP_DIAG_TARGET_PROFILE_ID: Final = (
+    "azure:centralus:3:Standard_NCC40ads_H100_v5:ConfidentialVM:v1"
+)
+_OUTPUT_ORACLE_DOMAIN: Final = b"sol-spp-diag-output-oracle-v1\0"
+_GPU_WITNESS_POLICY_DOMAIN: Final = b"sol-spp-diag-gpu-witness-policy-v1\0"
+_INPUT_SEED_DOMAIN: Final = b"sol-spp-diag-input-seed-v1\0"
+_OUTPUT_ALGORITHM_ID: Final = "spp-diag-xor-stride32-v1"
+_MAX_SYNTHETIC_MODEL_BYTES: Final = 8 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -93,6 +102,135 @@ class StageRuntimeResult:
     inventory: tuple[InstallInventoryRow, ...]
     inventory_bytes: bytes
     inventory_sha256: str
+
+
+@dataclass(frozen=True)
+class DerivedOutputOracle:
+    address: str
+    preimage_bytes: bytes
+    deterministic_seed: bytes
+    expected_result: bytes
+    expected_record: bytes
+    model_sha256: str
+    model_size_bytes: int
+    ptx_sha256: str
+
+
+@dataclass(frozen=True)
+class DerivedGpuWitnessPolicy:
+    address: str
+    preimage_bytes: bytes
+
+
+def derive_output_oracle(
+    *,
+    challenge: str,
+    run_identity: str,
+    model_bytes: bytes,
+    cuda_child_sha256: str,
+    ptx_bytes: bytes,
+) -> DerivedOutputOracle:
+    """Derive the synthetic GPU result and its challenge/run-bound address."""
+
+    if (
+        not _is_sha256(challenge)
+        or not _is_sha256(run_identity)
+        or type(model_bytes) is not bytes
+        or not 1 <= len(model_bytes) <= _MAX_SYNTHETIC_MODEL_BYTES
+        or not _is_sha256(cuda_child_sha256)
+        or type(ptx_bytes) is not bytes
+        or not ptx_bytes
+    ):
+        _fail(CP_SPP_DIAG_RUNTIME_BUILD_SOURCE_CONTENT)
+    seed = hashlib.sha256(
+        _INPUT_SEED_DOMAIN + bytes.fromhex(challenge) + bytes.fromhex(run_identity)
+    ).digest()
+    result = bytearray(seed)
+    for offset, value in enumerate(model_bytes):
+        result[offset % 32] ^= value
+    expected_result = bytes(result)
+    expected_record = struct.pack(">8sHHI32s", b"SPPGPUO1", 1, 1, 32, expected_result)
+    model_sha256 = hashlib.sha256(model_bytes).hexdigest()
+    ptx_sha256 = hashlib.sha256(ptx_bytes).hexdigest()
+    preimage_bytes = canonical_dumps(
+        {
+            "algorithm_id": _OUTPUT_ALGORITHM_ID,
+            "challenge": challenge,
+            "cuda_child_sha256": cuda_child_sha256,
+            "deterministic_seed": seed.hex(),
+            "expected_result": expected_result.hex(),
+            "model_sha256": model_sha256,
+            "model_size_bytes": len(model_bytes),
+            "ptx_sha256": ptx_sha256,
+            "run_identity": run_identity,
+            "schema": "sol-spp-diag-output-oracle-v1",
+        }
+    )
+    return DerivedOutputOracle(
+        address=hashlib.sha256(_OUTPUT_ORACLE_DOMAIN + preimage_bytes).hexdigest(),
+        preimage_bytes=preimage_bytes,
+        deterministic_seed=seed,
+        expected_result=expected_result,
+        expected_record=expected_record,
+        model_sha256=model_sha256,
+        model_size_bytes=len(model_bytes),
+        ptx_sha256=ptx_sha256,
+    )
+
+
+def derive_gpu_witness_policy(
+    *,
+    output_oracle_address: str,
+    runtime_inventory_sha256: str,
+    gpu_helper_sha256: str,
+    cuda_child_sha256: str,
+    nvattest_sha256: str,
+    nvidia_smi_sha256: str,
+    libcuda_sha256: str,
+) -> DerivedGpuWitnessPolicy:
+    """Derive the fixed exact-H100 witness-policy address."""
+
+    digests = (
+        output_oracle_address,
+        runtime_inventory_sha256,
+        gpu_helper_sha256,
+        cuda_child_sha256,
+        nvattest_sha256,
+        nvidia_smi_sha256,
+        libcuda_sha256,
+    )
+    if any(not _is_sha256(value) for value in digests):
+        _fail(CP_SPP_DIAG_RUNTIME_BUILD_SOURCE_CONTENT)
+    preimage_bytes = canonical_dumps(
+        {
+            "attestation_architecture": "HOPPER",
+            "compute_capability": "9.0",
+            "confidential_compute_environment": "PRODUCTION",
+            "confidential_compute_mode": "ON",
+            "cuda_child_sha256": cuda_child_sha256,
+            "debug_mode": "OFF",
+            "default_outbound": False,
+            "gpu_architecture": "GH100",
+            "gpu_count": 1,
+            "gpu_evidence_protocol": "SPPGPU1/v1",
+            "gpu_helper_sha256": gpu_helper_sha256,
+            "gpu_model": "NVIDIA H100 NVL",
+            "libcuda_sha256": libcuda_sha256,
+            "nvidia_smi_sha256": nvidia_smi_sha256,
+            "nvattest_sha256": nvattest_sha256,
+            "output_oracle_address": output_oracle_address,
+            "public_ip": False,
+            "runtime_inventory_sha256": runtime_inventory_sha256,
+            "schema": "sol-spp-diag-gpu-witness-policy-v1",
+            "secure_boot": True,
+            "target_profile_id": SPP_DIAG_TARGET_PROFILE_ID,
+            "vtpm": True,
+        }
+    )
+    return DerivedGpuWitnessPolicy(
+        address=hashlib.sha256(_GPU_WITNESS_POLICY_DOMAIN + preimage_bytes).hexdigest(),
+        preimage_bytes=preimage_bytes,
+    )
 
 
 def _write_single_file_transactional(data: bytes, destination: str) -> None:

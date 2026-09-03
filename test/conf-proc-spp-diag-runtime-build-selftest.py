@@ -7,10 +7,12 @@ from __future__ import annotations
 
 from dataclasses import replace
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
 import stat
+import struct
 import sys
 import tempfile
 
@@ -138,6 +140,127 @@ def test_finalize_command_line() -> None:
         arguments = dict(COMMAND_ARGS)
         arguments.update(mutation)
         _expect(CP_SPP_DIAG_RUNTIME_BUILD_COMMAND_LINE, lambda arguments=arguments: build.finalize_command_line(**arguments))
+
+
+def test_derived_output_and_gpu_policy_addresses() -> None:
+    challenge = "01" * 32
+    run_identity = "a2" * 32
+    model = b"sol-spp-semantic-fixture-model-v1"
+    ptx = b"canonical PTX bytes\n"
+    cuda_digest = "33" * 32
+    output = build.derive_output_oracle(
+        challenge=challenge,
+        run_identity=run_identity,
+        model_bytes=model,
+        cuda_child_sha256=cuda_digest,
+        ptx_bytes=ptx,
+    )
+    seed = hashlib.sha256(
+        b"sol-spp-diag-input-seed-v1\0" + bytes.fromhex(challenge) + bytes.fromhex(run_identity)
+    ).digest()
+    expected = bytearray(seed)
+    for offset, value in enumerate(model):
+        expected[offset % 32] ^= value
+    expected_record = struct.pack(">8sHHI32s", b"SPPGPUO1", 1, 1, 32, bytes(expected))
+    expected_preimage = json.dumps(
+        {
+            "algorithm_id": "spp-diag-xor-stride32-v1",
+            "challenge": challenge,
+            "cuda_child_sha256": cuda_digest,
+            "deterministic_seed": seed.hex(),
+            "expected_result": bytes(expected).hex(),
+            "model_sha256": hashlib.sha256(model).hexdigest(),
+            "model_size_bytes": len(model),
+            "ptx_sha256": hashlib.sha256(ptx).hexdigest(),
+            "run_identity": run_identity,
+            "schema": "sol-spp-diag-output-oracle-v1",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("ascii")
+    assert output.preimage_bytes == expected_preimage
+    assert output.address == hashlib.sha256(b"sol-spp-diag-output-oracle-v1\0" + expected_preimage).hexdigest()
+    assert output.expected_record == expected_record
+    assert output.model_sha256 == "1ae959386fcd1dff3db63e50a9ebba5376d5d83f08ef98a2e584e7b0f878d6c8"
+
+    output_mutations = (
+        {"challenge": "02" * 32},
+        {"run_identity": "a3" * 32},
+        {"model_bytes": model + b"!"},
+        {"cuda_child_sha256": "34" * 32},
+        {"ptx_bytes": ptx + b"!"},
+    )
+    base = {
+        "challenge": challenge,
+        "run_identity": run_identity,
+        "model_bytes": model,
+        "cuda_child_sha256": cuda_digest,
+        "ptx_bytes": ptx,
+    }
+    for mutation in output_mutations:
+        arguments = dict(base)
+        arguments.update(mutation)
+        assert build.derive_output_oracle(**arguments).address != output.address
+
+    policy_args = {
+        "output_oracle_address": output.address,
+        "runtime_inventory_sha256": "44" * 32,
+        "gpu_helper_sha256": "55" * 32,
+        "cuda_child_sha256": cuda_digest,
+        "nvattest_sha256": "66" * 32,
+        "nvidia_smi_sha256": "77" * 32,
+        "libcuda_sha256": "88" * 32,
+    }
+    policy = build.derive_gpu_witness_policy(**policy_args)
+    expected_policy = {
+        "attestation_architecture": "HOPPER",
+        "compute_capability": "9.0",
+        "confidential_compute_environment": "PRODUCTION",
+        "confidential_compute_mode": "ON",
+        "cuda_child_sha256": "33" * 32,
+        "debug_mode": "OFF",
+        "default_outbound": False,
+        "gpu_architecture": "GH100",
+        "gpu_count": 1,
+        "gpu_evidence_protocol": "SPPGPU1/v1",
+        "gpu_helper_sha256": "55" * 32,
+        "gpu_model": "NVIDIA H100 NVL",
+        "libcuda_sha256": "88" * 32,
+        "nvidia_smi_sha256": "77" * 32,
+        "nvattest_sha256": "66" * 32,
+        "output_oracle_address": output.address,
+        "public_ip": False,
+        "runtime_inventory_sha256": "44" * 32,
+        "schema": "sol-spp-diag-gpu-witness-policy-v1",
+        "secure_boot": True,
+        "target_profile_id": "azure:centralus:3:Standard_NCC40ads_H100_v5:ConfidentialVM:v1",
+        "vtpm": True,
+    }
+    expected_policy_bytes = json.dumps(
+        expected_policy, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("ascii")
+    assert policy.preimage_bytes == expected_policy_bytes
+    expected_policy_address = hashlib.sha256(
+        b"sol-spp-diag-gpu-witness-policy-v1\0" + expected_policy_bytes
+    ).hexdigest()
+    assert policy.address == expected_policy_address
+    for key in policy_args:
+        mutation = dict(policy_args)
+        mutation[key] = "99" * 32
+        assert build.derive_gpu_witness_policy(**mutation).address != policy.address
+    for key, value in expected_policy.items():
+        mutated_policy = dict(expected_policy)
+        if type(value) is bool:
+            mutated_policy[key] = not value
+        elif type(value) is int:
+            mutated_policy[key] = value + 1
+        else:
+            mutated_policy[key] = value + "-mutated"
+        mutated_bytes = json.dumps(
+            mutated_policy, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        ).encode("ascii")
+        assert hashlib.sha256(b"sol-spp-diag-gpu-witness-policy-v1\0" + mutated_bytes).hexdigest() != policy.address
 
 
 def test_stage_runtime_determinism(root: Path) -> None:
@@ -424,6 +547,8 @@ def test_bind_image_happy_path_and_seams() -> None:
 
 
 def main() -> None:
+    test_derived_output_and_gpu_policy_addresses()
+    print("ok   test_derived_output_and_gpu_policy_addresses")
     test_finalize_command_line()
     print("ok   test_finalize_command_line")
     test_single_file_transaction_finalize_command_line()
@@ -435,7 +560,7 @@ def main() -> None:
         for test in TESTS[1:]:
             test(root)
             print(f"ok   {test.__name__}")
-    print("SPP diagnostic runtime build: ok (%d tests, %d boundaries)" % (len(TESTS) + 2, len(BOUNDARIES)))
+    print("SPP diagnostic runtime build: ok (%d tests, %d boundaries)" % (len(TESTS) + 3, len(BOUNDARIES)))
 
 
 if __name__ == "__main__":
