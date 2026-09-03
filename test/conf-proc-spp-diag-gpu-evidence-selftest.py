@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (c) 2026 sol pbc
-"""Selftest for conf_proc_spp_diag_gpu_evidence: TLV encoding, domain addresses, and
-the fixed CLI-nonce process boundary to the CUDA driver child."""
+"""Independent wire and invocation tests for the diagnostic GPU helper."""
 
 from __future__ import annotations
 
 import ast
+import base64
+import json
 import os
 import stat
 import struct
@@ -16,171 +17,287 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import conf_proc_spp_diag_gpu_evidence as gpu_evidence
+import conf_proc_spp_diag_gpu_evidence as gpu
 
 
-def test_tlv_literal_vector() -> None:
-    nonce = bytes(range(32))
-    witness = bytes(range(100, 132))
-    tlv = gpu_evidence.build_tlv(nonce, 0, witness)
-    offset = 0
-    fields = []
-    while offset < len(tlv):
-        type_id = tlv[offset]
-        length = struct.unpack(">H", tlv[offset + 1 : offset + 3])[0]
-        value = tlv[offset + 3 : offset + 3 + length]
-        fields.append((type_id, value))
-        offset += 3 + length
-    assert offset == len(tlv)
-    assert [f[0] for f in fields] == [1, 2, 3, 4, 5, 6, 7]
-    assert fields[0][1] == gpu_evidence.TLV_SCHEMA
-    assert fields[1][1] == nonce
-    assert fields[2][1] == gpu_evidence.WITNESS_MODULE_SHA256
-    assert fields[3][1] == gpu_evidence.WITNESS_FUNCTION_SHA256
-    assert fields[4][1] == gpu_evidence.WITNESS_GEOMETRY
-    assert fields[5][1] == struct.pack(">I", 0)
-    assert fields[6][1] == witness
+NONCE = bytes(range(32))
+REPORT = b"raw-spdm-attestation-report"
+CHAIN = b"decoded-nvidia-certificate-chain"
+METADATA = b"NVIDIA H100 NVL, 595.71.05, 96.00.9F.00.04, GPU-11111111-2222-3333-4444-555555555555, 9.0\n"
 
 
-def test_tlv_rejects_wrong_lengths() -> None:
-    try:
-        gpu_evidence.build_tlv(b"short", 0, b"\x00" * 32)
-        raise AssertionError("expected rejection")
-    except gpu_evidence.GpuEvidenceError:
-        pass
-    try:
-        gpu_evidence.build_tlv(b"\x00" * 32, 0, b"short")
-        raise AssertionError("expected rejection")
-    except gpu_evidence.GpuEvidenceError:
-        pass
+def evidence_document(*, nonce: str = NONCE.hex(), arch: str = "HOPPER") -> dict:
+    return {
+        "evidences": [
+            {
+                "arch": arch,
+                "nonce": nonce,
+                "evidence": base64.b64encode(REPORT).decode("ascii"),
+                "certificate": base64.b64encode(CHAIN).decode("ascii"),
+            }
+        ],
+        "result_code": 0,
+        "result_message": "Ok",
+    }
 
 
-def test_output_oracle_address_mutations() -> None:
-    base = dict(model_path_hex="61" * 4, model_sha256="bb" * 32, nonce=b"\x01" * 32, witness_output=b"\x02" * 32)
-    baseline = gpu_evidence.output_oracle_address(**base)
-    for key, mutation in [
-        ("model_path_hex", "62" * 4),
-        ("model_sha256", "cc" * 32),
-        ("nonce", b"\x99" * 32),
-        ("witness_output", b"\x88" * 32),
-    ]:
-        mutated = dict(base)
-        mutated[key] = mutation
-        assert gpu_evidence.output_oracle_address(**mutated) != baseline, key
+class FakeClock:
+    def __init__(self, value: float = 1000.0):
+        self.value = value
+
+    def __call__(self) -> float:
+        return self.value
 
 
-def test_gpu_witness_policy_address_mutations() -> None:
-    base = dict(challenge=b"\x01" * 32, run_identity=b"\x02" * 32, control_plan_address=b"\x03" * 32)
-    baseline = gpu_evidence.gpu_witness_policy_address(**base)
-    for key in base:
-        mutated = dict(base)
-        mutated[key] = b"\xff" * 32
-        assert gpu_evidence.gpu_witness_policy_address(**mutated) != baseline, key
+class Recorder:
+    def __init__(
+        self,
+        *,
+        document: dict | None = None,
+        metadata: bytes = METADATA,
+        fail_call: int | None = None,
+        clock: FakeClock | None = None,
+        durations: tuple[float, ...] = (),
+    ):
+        self.document = evidence_document() if document is None else document
+        self.metadata = metadata
+        self.fail_call = fail_call
+        self.clock = clock
+        self.durations = durations
+        self.calls: list[tuple[tuple[str, ...], dict[str, str], float, int]] = []
+
+    def __call__(self, argv: tuple[str, ...], env: dict[str, str], timeout: float, cap: int) -> gpu.ToolResult:
+        self.calls.append((argv, env, timeout, cap))
+        if self.clock is not None and len(self.calls) <= len(self.durations):
+            self.clock.value += self.durations[len(self.calls) - 1]
+        if self.fail_call == len(self.calls):
+            return gpu.ToolResult(1, b"", b"forced failure")
+        if argv[0] == gpu.NVATTEST_PATH:
+            return gpu.ToolResult(0, json.dumps(self.document, separators=(",", ":")).encode("utf-8"), b"")
+        if argv[0] == gpu.NVIDIA_SMI_PATH:
+            return gpu.ToolResult(0, self.metadata, b"")
+        raise AssertionError(argv)
 
 
-def test_derive_gpu_nonce_mutations() -> None:
-    base = dict(
-        challenge=b"\x01" * 32,
-        run_identity=b"\x02" * 32,
-        image_binding_address="aa" * 32,
-        control_plan_address="bb" * 32,
-        output_oracle_address_hex="cc" * 32,
-    )
-    baseline = gpu_evidence.derive_gpu_nonce(**base)
-    assert len(baseline) == 32
-    for key, mutation in [
-        ("challenge", b"\xff" * 32),
-        ("run_identity", b"\xfe" * 32),
-        ("image_binding_address", "dd" * 32),
-        ("control_plan_address", "ee" * 32),
-        ("output_oracle_address_hex", "ff" * 32),
-    ]:
-        mutated = dict(base)
-        mutated[key] = mutation
-        assert gpu_evidence.derive_gpu_nonce(**mutated) != baseline, key
+def parse_envelope(data: bytes) -> list[tuple[int, bytes]]:
+    assert data[:8] == b"SPPGPU1\0"
+    count = int.from_bytes(data[8:10], "big")
+    offset = 10
+    fields: list[tuple[int, bytes]] = []
+    for _ in range(count):
+        field_id, length = struct.unpack(">HI", data[offset : offset + 6])
+        offset += 6
+        value = data[offset : offset + length]
+        assert len(value) == length
+        offset += length
+        fields.append((field_id, value))
+    assert offset == len(data)
+    return fields
 
 
-def test_cuda_driver_nonce_crosses_process_boundary() -> None:
-    with tempfile.TemporaryDirectory() as work_dir:
-        fake_driver = os.path.join(work_dir, "fake-cuda-driver")
-        record_path = os.path.join(work_dir, "record.txt")
-        with open(fake_driver, "w", encoding="utf-8") as handle:
-            handle.write("#!/usr/bin/env python3\n")
-            handle.write("import sys\n")
-            handle.write(f"open({record_path!r}, 'w').write(sys.argv[1])\n")
-            handle.write("print('42' * 32)\n")
-        os.chmod(fake_driver, os.stat(fake_driver).st_mode | stat.S_IEXEC)
+def test_exact_invocations_and_wire() -> None:
+    recorder = Recorder()
+    clock = FakeClock()
+    envelope = gpu.collect_gpu_evidence(NONCE, run_tool=recorder, monotonic=clock)
+    assert recorder.calls == [
+        (
+            (
+                "/usr/bin/nvattest",
+                "--format=json",
+                "collect-evidence",
+                "--device=gpu",
+                "--gpu-evidence-source=nvml",
+                f"--nonce={NONCE.hex()}",
+            ),
+            {"LANG": "C", "LC_ALL": "C", "TZ": "UTC"},
+            120.0,
+            8 * 1024 * 1024,
+        ),
+        (
+            (
+                "/usr/bin/nvidia-smi",
+                "--query-gpu=name,driver_version,vbios_version,uuid,compute_cap",
+                "--format=csv,noheader,nounits",
+            ),
+            {"LANG": "C", "LC_ALL": "C", "TZ": "UTC"},
+            120.0,
+            4096,
+        ),
+    ]
+    fields = parse_envelope(envelope)
+    assert [field_id for field_id, _ in fields] == list(range(1, 8))
+    assert [value for _, value in fields] == [
+        NONCE,
+        REPORT,
+        CHAIN,
+        b"595.71.05",
+        b"96.00.9F.00.04",
+        b"GPU-11111111-2222-3333-4444-555555555555",
+        b"HOPPER",
+    ]
 
-        nonce_hex = "13" * 32
-        rc, output = gpu_evidence.run_cuda_driver(nonce_hex, driver_path=fake_driver)
-        assert rc == 0
-        assert output == bytes.fromhex("42" * 32)
-        with open(record_path, "r", encoding="utf-8") as handle:
-            recorded_nonce = handle.read()
-        assert recorded_nonce == nonce_hex, "the exact derived nonce must cross the process boundary unchanged"
 
-
-def test_main_end_to_end_with_fake_driver(monkeypatch=None) -> None:
-    with tempfile.TemporaryDirectory() as work_dir:
-        fake_driver = os.path.join(work_dir, "fake-cuda-driver")
-        with open(fake_driver, "w", encoding="utf-8") as handle:
-            handle.write("#!/usr/bin/env python3\n")
-            handle.write("import sys\n")
-            handle.write("print('55' * 32)\n")
-        os.chmod(fake_driver, os.stat(fake_driver).st_mode | stat.S_IEXEC)
-
-        original = gpu_evidence.CUDA_DRIVER_PATH
-        gpu_evidence.CUDA_DRIVER_PATH = fake_driver
+def test_schema_nonce_and_target_mutations_reject() -> None:
+    mutations: list[tuple[str, dict, bytes]] = []
+    wrong_nonce = evidence_document(nonce="ff" * 32)
+    mutations.append(("wrong_nonce", wrong_nonce, METADATA))
+    wrong_arch = evidence_document(arch="BLACKWELL")
+    mutations.append(("wrong_arch", wrong_arch, METADATA))
+    two_gpus = evidence_document()
+    two_gpus["evidences"].append(dict(two_gpus["evidences"][0]))
+    mutations.append(("two_gpus", two_gpus, METADATA))
+    bad_base64 = evidence_document()
+    bad_base64["evidences"][0]["evidence"] = "***"
+    mutations.append(("bad_base64", bad_base64, METADATA))
+    extra_key = evidence_document()
+    extra_key["unexpected"] = 1
+    mutations.append(("extra_key", extra_key, METADATA))
+    mutations.append(("wrong_compute_cap", evidence_document(), METADATA.replace(b"9.0", b"8.0")))
+    for wrong_name in (b"NVIDIA H200", b"NVIDIA GH200 120GB", b"NVIDIA H20"):
+        mutations.append(
+            (wrong_name.decode("ascii"), evidence_document(), METADATA.replace(b"NVIDIA H100 NVL", wrong_name))
+        )
+    mutations.append(("two_metadata_rows", evidence_document(), METADATA + METADATA))
+    for name, document, metadata in mutations:
         try:
-            # main() reads the module-level default via the function default binding,
-            # captured at def time -- rebind run_cuda_driver's default explicitly for
-            # this in-process test instead of relying on attribute mutation.
-            rc, output = gpu_evidence.run_cuda_driver("77" * 32, driver_path=fake_driver)
-        finally:
-            gpu_evidence.CUDA_DRIVER_PATH = original
-        assert rc == 0
-        assert output == bytes.fromhex("55" * 32)
+            gpu.collect_gpu_evidence(NONCE, run_tool=Recorder(document=document, metadata=metadata))
+            raise AssertionError(f"{name} unexpectedly passed")
+        except gpu.GpuEvidenceError:
+            pass
 
 
-def test_module_does_not_import_appraiser_modules() -> None:
+def test_tool_failures_reject() -> None:
+    for failed_call in (1, 2):
+        try:
+            gpu.collect_gpu_evidence(NONCE, run_tool=Recorder(fail_call=failed_call))
+            raise AssertionError(f"tool call {failed_call} unexpectedly passed")
+        except gpu.GpuEvidenceError:
+            pass
+
+
+def test_bounded_capture_and_shared_deadline() -> None:
+    environment = {"LANG": "C", "LC_ALL": "C", "TZ": "UTC"}
+    for channel in ("stdout", "stderr"):
+        script = "import os;os.write(%d,b'x'*33)" % (1 if channel == "stdout" else 2)
+        try:
+            gpu._run_tool((sys.executable, "-c", script), environment, 2.0, 32)
+            raise AssertionError(f"over-cap {channel} unexpectedly passed")
+        except gpu.GpuEvidenceError:
+            pass
+
+    group_probe = gpu._run_tool(
+        (sys.executable, "-c", "import os;print(os.getpgrp())"), environment, 2.0, 32
+    )
+    assert group_probe.returncode == 0
+    assert group_probe.stdout.strip() == str(os.getpgrp()).encode("ascii")
+
+    exact_clock = FakeClock()
+    exact = Recorder(clock=exact_clock, durations=(70.0, 50.0))
+    gpu.collect_gpu_evidence(NONCE, run_tool=exact, monotonic=exact_clock)
+    assert [call[2] for call in exact.calls] == [120.0, 50.0]
+
+    late_clock = FakeClock()
+    late = Recorder(clock=late_clock, durations=(70.0, 50.000001))
+    try:
+        gpu.collect_gpu_evidence(NONCE, run_tool=late, monotonic=late_clock)
+        raise AssertionError("one-tick deadline overrun unexpectedly passed")
+    except gpu.GpuEvidenceError:
+        pass
+
+
+def test_deadline_includes_completed_publication() -> None:
+    argv = [
+        "/usr/lib/spp/spp-diag-gpu-evidence.py",
+        "--nonce-hex",
+        NONCE.hex(),
+        "--output",
+        gpu.OUTPUT_PATH,
+    ]
+    real_close = gpu.os.close
+    with tempfile.TemporaryDirectory() as work_dir:
+        for suffix, close_duration, expected in (("exact", 1.0, 0), ("late", 1.000001, 3)):
+            destination = os.path.join(work_dir, f"{suffix}.tlv")
+            clock = FakeClock()
+            recorder = Recorder(clock=clock, durations=(70.0, 49.0))
+
+            def timed_close(descriptor: int, *, duration: float = close_duration) -> None:
+                real_close(descriptor)
+                clock.value += duration
+
+            gpu.os.close = timed_close
+            try:
+                assert (
+                    gpu.main(
+                        argv,
+                        run_tool=recorder,
+                        output_path_override=destination,
+                        monotonic=clock,
+                    )
+                    == expected
+                )
+            finally:
+                gpu.os.close = real_close
+            assert os.path.exists(destination) is (expected == 0)
+
+
+def test_exact_cli_and_no_replace_output() -> None:
+    with tempfile.TemporaryDirectory() as work_dir:
+        destination = os.path.join(work_dir, "gpu-evidence.tlv")
+        argv = [
+            "/usr/lib/spp/spp-diag-gpu-evidence.py",
+            "--nonce-hex",
+            NONCE.hex(),
+            "--output",
+            gpu.OUTPUT_PATH,
+        ]
+        assert gpu.main(argv, run_tool=Recorder(), output_path_override=destination) == 0
+        with open(destination, "rb") as handle:
+            fields = parse_envelope(handle.read())
+        assert fields[0] == (1, NONCE)
+        assert stat.S_IMODE(os.stat(destination).st_mode) == 0o600
+        original = open(destination, "rb").read()
+        assert gpu.main(argv, run_tool=Recorder(), output_path_override=destination) == 3
+        assert open(destination, "rb").read() == original
+
+    malformed = [
+        argv[:1],
+        [argv[0], "--nonce-hex", "AA" * 32, "--output", gpu.OUTPUT_PATH],
+        [argv[0], "--nonce-hex", NONCE.hex(), "--output", "/tmp/elsewhere"],
+        [argv[0], "--output", gpu.OUTPUT_PATH, "--nonce-hex", NONCE.hex()],
+        argv + ["extra"],
+    ]
+    for candidate in malformed:
+        assert gpu.main(candidate, run_tool=Recorder()) == 2
+
+
+def test_no_appraiser_import_or_deprecated_verifier() -> None:
     source_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "conf_proc_spp_diag_gpu_evidence.py")
     with open(source_path, "r", encoding="utf-8") as handle:
-        tree = ast.parse(handle.read())
-    forbidden = {
-        "conf_proc_spp_diag_trace_semantics",
-        "conf_proc_spp_diag_attest",
-        "conf_proc_spp_diagbundle",
+        source = handle.read()
+    tree = ast.parse(source)
+    imported = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    } | {
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module is not None
     }
-    imported = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            imported.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            imported.add(node.module)
-    assert not (imported & forbidden), imported & forbidden
-
-
-def test_cli_rejects_malformed_and_missing_nonce() -> None:
-    source_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "conf_proc_spp_diag_gpu_evidence.py")
-    result = subprocess.run([sys.executable, source_path], capture_output=True, text=True)
-    assert result.returncode == 2
-    result = subprocess.run([sys.executable, source_path, "not-hex"], capture_output=True, text=True)
-    assert result.returncode == 2
-    result = subprocess.run([sys.executable, source_path, "aa"], capture_output=True, text=True)
-    assert result.returncode == 2
+    assert not any(name.startswith("conf_proc_spp_diag") for name in imported)
+    assert "verifier.cc_admin" not in source and "local_gpu_verifier" not in source
 
 
 def main() -> int:
     tests = [
-        test_tlv_literal_vector,
-        test_tlv_rejects_wrong_lengths,
-        test_output_oracle_address_mutations,
-        test_gpu_witness_policy_address_mutations,
-        test_derive_gpu_nonce_mutations,
-        test_cuda_driver_nonce_crosses_process_boundary,
-        test_main_end_to_end_with_fake_driver,
-        test_module_does_not_import_appraiser_modules,
-        test_cli_rejects_malformed_and_missing_nonce,
+        test_exact_invocations_and_wire,
+        test_schema_nonce_and_target_mutations_reject,
+        test_tool_failures_reject,
+        test_bounded_capture_and_shared_deadline,
+        test_deadline_includes_completed_publication,
+        test_exact_cli_and_no_replace_output,
+        test_no_appraiser_import_or_deprecated_verifier,
     ]
     for test in tests:
         test()
