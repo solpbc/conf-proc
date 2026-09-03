@@ -33,8 +33,26 @@ struct spp_diag_trace_core_snapshot {
 	u8 last_frame[SPP_DIAG_TRACE_MAX_FRAME_BYTES];
 	u32 last_frame_len;
 	u64 stream_len;
+	u64 bootstrap_denial_count;
+	u32 bootstrap_stage;
+	int bootstrap_released;
 };
 #endif
+
+enum spp_diag_trace_bootstrap_stage {
+	SPP_DIAG_TRACE_BOOTSTRAP_NONE = 0,
+	SPP_DIAG_TRACE_BOOTSTRAP_CORE_READY,
+	SPP_DIAG_TRACE_BOOTSTRAP_IMA_AVAILABLE,
+	SPP_DIAG_TRACE_BOOTSTRAP_DENIED,
+	SPP_DIAG_TRACE_BOOTSTRAP_READY_APPENDED,
+	SPP_DIAG_TRACE_BOOTSTRAP_READY_MEASURED,
+	SPP_DIAG_TRACE_BOOTSTRAP_RELEASE_APPENDED,
+	SPP_DIAG_TRACE_BOOTSTRAP_RELEASE_MEASURED,
+	SPP_DIAG_TRACE_BOOTSTRAP_RELEASED,
+};
+
+#define SPP_DIAG_TRACE_BOOTSTRAP_CANARY_PATH \
+	"/usr/local/libexec/solstone/pre-release-denied"
 
 int spp_diag_trace_core_init(const u8 challenge[32],
 			     const u8 run_identity[32],
@@ -46,6 +64,18 @@ int spp_diag_trace_core_append(u16 event_type, u16 flags,
 			       u64 operation_ordinal, u16 phase,
 			       const void *payload, size_t payload_length);
 int spp_diag_trace_core_mark_failure(int reason);
+
+#if IS_ENABLED(CONFIG_SECURITY_SPP_DIAG_TRACE_CORE_BOOTSTRAP)
+int spp_diag_trace_core_bootstrap_ima_available(void);
+int spp_diag_trace_core_bootstrap_gate(const char *path, size_t path_length,
+				       u32 pid, u32 tgid);
+int spp_diag_trace_core_bootstrap_prepare_ready(u8 record[256]);
+int spp_diag_trace_core_bootstrap_ready_measured(void);
+int spp_diag_trace_core_bootstrap_prepare_release(u32 pid, u32 tgid,
+					  u8 record[256]);
+int spp_diag_trace_core_bootstrap_release_measured(void);
+int spp_diag_trace_core_bootstrap_publish(void);
+#endif
 
 #if IS_ENABLED(CONFIG_KUNIT)
 enum spp_diag_trace_core_init_fault {

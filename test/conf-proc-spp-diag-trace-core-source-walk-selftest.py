@@ -66,9 +66,9 @@ KUNIT_CASE_NAMES = (
 KUNIT_BOOTSTRAP_FILE = "spp-diag-trace-core-src/security/spp_diag_trace_core/bootstrap_kunit.c"
 KUNIT_BOOTSTRAP_SUITE_REGISTRATION = "kunit_test_suite(spp_diag_trace_core_bootstrap_suite)"
 KUNIT_BOOTSTRAP_CASE_NAMES = (
-	"parser_rejects_invalid_identity",
-	"gate_denies_before_release",
-	"ima_record_matches_state",
+    "parser_contract",
+    "production_gate_transitions",
+    "checkpoint_transitions",
 )
 
 MAKE_VAR_RE = re.compile(r"^([A-Za-z0-9_]+)\s*:=\s*(.*)$")
@@ -276,6 +276,36 @@ def bootstrap_wiring_check(root: Path = ROOT) -> list[str]:
         for forbidden in ("kprobe", "tracepoint", "BPF", "late_initcall", "module_init"):
             if forbidden in text:
                 violations.append(f"{path.name}: forbidden {forbidden}")
+    bootstrap = (root / "spp-diag-trace-core-src/security/spp_diag_trace_core/bootstrap.c").read_text(encoding="utf-8")
+    gate = (root / "spp-diag-trace-core-src/security/spp_diag_trace_core/gate.c").read_text(encoding="utf-8")
+    release = (root / "spp-diag-trace-core-src/security/spp_diag_trace_core/release.c").read_text(encoding="utf-8")
+    core = (root / "spp-diag-trace-core-src/security/spp_diag_trace_core/core.c").read_text(encoding="utf-8")
+    kunit = (root / KUNIT_BOOTSTRAP_FILE).read_text(encoding="utf-8")
+    if "call_usermodehelper" in bootstrap or "ima_measure_critical_data" in bootstrap:
+        violations.append("bootstrap init performs late bootstrap work")
+    if release.count("call_usermodehelper(") != 1:
+        violations.append("release path must contain exactly one canary call")
+    if release.count("ima_measure_critical_data(") != 2:
+        violations.append("release path must contain exactly two IMA calls")
+    for obsolete in (
+        "struct spp_diag_trace_bootstrap_state",
+        "atomic_long_t denial_count",
+        "static bool released",
+        "spp_diag_trace_bootstrap_note_frame",
+        "spp_diag_trace_bootstrap_publish_release",
+    ):
+        if obsolete in bootstrap or obsolete in gate or obsolete in release:
+            violations.append(f"obsolete split bootstrap authority: {obsolete}")
+    for required in (
+        "bootstrap_denial_count",
+        "bootstrap_stage",
+        "bootstrap_released",
+        "spp_diag_trace_core_lock",
+    ):
+        if required not in core:
+            violations.append(f"locked core authority missing {required}")
+    if "SPP_DIAG_TRACE_CORE_HOST_TEST" in kunit:
+        violations.append("bootstrap KUnit body has a host-only branch")
     return violations
 
 

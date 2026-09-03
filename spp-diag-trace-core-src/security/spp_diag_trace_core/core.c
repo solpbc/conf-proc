@@ -36,6 +36,9 @@ static struct {
 	u32 last_frame_len;
 	u32 max_frames_op;
 	u64 max_stream_bytes_op;
+	u64 bootstrap_denial_count;
+	u32 bootstrap_stage;
+	int bootstrap_released;
 #if IS_ENABLED(CONFIG_KUNIT)
 	int fault_inject;
 	int init_fault;
@@ -183,6 +186,9 @@ static void fill_snapshot_meta(struct spp_diag_trace_core_snapshot *out)
 	if (core.last_frame_len)
 		memcpy(out->last_frame, core.last_frame, core.last_frame_len);
 	out->stream_len = core.stream_len;
+	out->bootstrap_denial_count = core.bootstrap_denial_count;
+	out->bootstrap_stage = core.bootstrap_stage;
+	out->bootstrap_released = core.bootstrap_released;
 }
 #endif
 
@@ -935,6 +941,9 @@ static void clear_unpublished_meta(void)
 	core.stream = NULL;
 	core.stream_cap = 0;
 	core.stream_len = 0;
+	core.bootstrap_denial_count = 0;
+	core.bootstrap_stage = SPP_DIAG_TRACE_BOOTSTRAP_NONE;
+	core.bootstrap_released = 0;
 }
 
 int spp_diag_trace_core_init(const u8 challenge[32],
@@ -1074,6 +1083,9 @@ int spp_diag_trace_core_init(const u8 challenge[32],
 	core.frame_count = 1;
 	core.stream_byte_count = prefix_bytes;
 	core.sequence = 1;
+	core.bootstrap_denial_count = 0;
+	core.bootstrap_stage = SPP_DIAG_TRACE_BOOTSTRAP_CORE_READY;
+	core.bootstrap_released = 0;
 
 #if IS_ENABLED(CONFIG_KUNIT)
 	if (init_fault == SPP_DIAG_TRACE_CORE_INIT_FAULT_PRE_PUBLICATION)
@@ -1113,6 +1125,67 @@ int spp_diag_trace_core_is_green(void)
 	return green;
 }
 
+static int append_locked(u16 event_type, u16 flags, u64 task_ordinal,
+			 u64 parent_task_ordinal, u64 operation_ordinal,
+			 u16 phase, const void *payload, size_t payload_length,
+			 int field_err)
+{
+	u8 frame[SPP_DIAG_TRACE_MAX_FRAME_BYTES];
+	u8 next_chain[SPP_DIAG_TRACE_CHAIN_LEN];
+	u32 frame_len;
+	u64 prefix_plus_frame;
+	u64 next_bytes;
+	int err;
+
+	err = sticky_or_fault();
+	if (err)
+		return err;
+	if (!core.initialized) {
+		err = fail_sticky(WIRE_STATE);
+		return err;
+	}
+	if (field_err) {
+		err = fail_sticky(field_err);
+		return err;
+	}
+	if (payload_length >
+	    (size_t)(~0u - SPP_DIAG_TRACE_FRAME_HEADER_SIZE)) {
+		err = fail_sticky(WIRE_ARITHMETIC);
+		return err;
+	}
+	frame_len = SPP_DIAG_TRACE_FRAME_HEADER_SIZE + (u32)payload_length;
+	if (core.frame_count >= core.max_frames_op) {
+		err = fail_sticky(WIRE_CAP);
+		return err;
+	}
+	if (add_u64(SPP_DIAG_TRACE_STREAM_PREFIX_SIZE, frame_len,
+		    &prefix_plus_frame) != WIRE_OK ||
+	    add_u64(core.stream_byte_count, prefix_plus_frame, &next_bytes) !=
+		    WIRE_OK) {
+		err = fail_sticky(WIRE_ARITHMETIC);
+		return err;
+	}
+	if (next_bytes > core.max_stream_bytes_op) {
+		err = fail_sticky(WIRE_CAP);
+		return err;
+	}
+
+	encode_frame(frame, event_type, flags, (u32)payload_length,
+		     core.sequence, task_ordinal, parent_task_ordinal,
+		     operation_ordinal, phase, payload);
+	hash_frame_preimage(core.chain, frame, frame_len, next_chain);
+	store_u32be(core.stream + core.stream_len, frame_len);
+	memcpy(core.stream + core.stream_len + 4, frame, frame_len);
+	core.stream_len += 4u + frame_len;
+	memcpy(core.chain, next_chain, SPP_DIAG_TRACE_CHAIN_LEN);
+	memcpy(core.last_frame, frame, frame_len);
+	core.last_frame_len = frame_len;
+	core.frame_count += 1;
+	core.stream_byte_count = next_bytes;
+	core.sequence += 1;
+	return WIRE_OK;
+}
+
 int spp_diag_trace_core_append(u16 event_type, u16 flags, u64 task_ordinal,
 			       u64 parent_task_ordinal, u64 operation_ordinal,
 			       u16 phase, const void *payload,
@@ -1120,12 +1193,7 @@ int spp_diag_trace_core_append(u16 event_type, u16 flags, u64 task_ordinal,
 {
 	unsigned long irqflags;
 	u8 payload_copy[SPP_DIAG_TRACE_MAX_PAYLOAD_BYTES];
-	u8 frame[SPP_DIAG_TRACE_MAX_FRAME_BYTES];
-	u8 next_chain[SPP_DIAG_TRACE_CHAIN_LEN];
 	const void *payload_src = NULL;
-	u32 frame_len;
-	u64 prefix_plus_frame;
-	u64 next_bytes;
 	int field_err;
 	int err;
 
@@ -1146,63 +1214,239 @@ int spp_diag_trace_core_append(u16 event_type, u16 flags, u64 task_ordinal,
 
 	run_barrier();
 	spin_lock_irqsave(&spp_diag_trace_core_lock, irqflags);
+	err = append_locked(event_type, flags, task_ordinal, parent_task_ordinal,
+			    operation_ordinal, phase, payload_src, payload_length,
+			    field_err);
+	spin_unlock_irqrestore(&spp_diag_trace_core_lock, irqflags);
+	return err;
+}
+
+#if IS_ENABLED(CONFIG_SECURITY_SPP_DIAG_TRACE_CORE_BOOTSTRAP)
+static void encode_bootstrap_record_locked(u16 kind, u8 out[256])
+{
+	memset(out, 0, SPP_DIAG_TRACE_IMA_SIZE);
+	memcpy(out, "SPPIMA1\0", 8);
+	store_u16be(out + 8, SPP_DIAG_TRACE_WIRE_VERSION);
+	store_u16be(out + 10, kind);
+	store_u32be(out + 12, SPP_DIAG_TRACE_IMA_SIZE);
+	store_u16be(out + 16, SPP_DIAG_TRACE_POLICY_VERSION_PROVENANCE);
+	store_u16be(out + 18, SPP_DIAG_TRACE_HASH_SHA256);
+	store_u16be(out + 20, kind == SPP_DIAG_TRACE_IMA_KIND_READY ?
+			     SPP_DIAG_TRACE_IMA_STATE_LIST_READY :
+			     SPP_DIAG_TRACE_IMA_STATE_LIST_RELEASED);
+	memcpy(out + 24, core.header + 32, SPP_DIAG_TRACE_SOURCE_COMMIT_LEN);
+	memcpy(out + 44, core.header + 52, 32);
+	memcpy(out + 76, core.header + 84, 32);
+	memcpy(out + 108, core.header + 116, 32);
+	memcpy(out + 140, core.header + 148, 32);
+	store_u64be(out + 172, core.frame_count);
+	store_u64be(out + 180, core.stream_byte_count);
+	memcpy(out + 188, core.chain, SPP_DIAG_TRACE_CHAIN_LEN);
+	store_u64be(out + 228, SPP_DIAG_TRACE_HOOK_MASK_PROVENANCE);
+	store_u64be(out + 236, core.bootstrap_denial_count);
+}
+
+int spp_diag_trace_core_bootstrap_ima_available(void)
+{
+	unsigned long flags;
+	int err;
+
+	run_barrier();
+	spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
 	err = sticky_or_fault();
-	if (err) {
-		spin_unlock_irqrestore(&spp_diag_trace_core_lock, irqflags);
-		return err;
-	}
-	if (!core.initialized) {
+	if (!err && (!core.initialized ||
+		     core.bootstrap_stage != SPP_DIAG_TRACE_BOOTSTRAP_CORE_READY))
 		err = fail_sticky(WIRE_STATE);
-		spin_unlock_irqrestore(&spp_diag_trace_core_lock, irqflags);
-		return err;
+	if (!err)
+		core.bootstrap_stage = SPP_DIAG_TRACE_BOOTSTRAP_IMA_AVAILABLE;
+	spin_unlock_irqrestore(&spp_diag_trace_core_lock, flags);
+	return err;
+}
+
+int spp_diag_trace_core_bootstrap_gate(const char *path, size_t path_length,
+				       u32 pid, u32 tgid)
+{
+	static const char canary[] = SPP_DIAG_TRACE_BOOTSTRAP_CANARY_PATH;
+	unsigned long flags;
+	u8 payload[20 + sizeof(canary) - 1];
+	u8 path_copy[sizeof(canary) - 1];
+	int field_err = WIRE_OK;
+	int err;
+
+	if (!path)
+		field_err = WIRE_NULL;
+	else if (!path_length)
+		field_err = WIRE_LENGTH;
+	else if (path_length != sizeof(path_copy))
+		field_err = WIRE_STATE;
+	else
+		memcpy(path_copy, path, path_length);
+
+	run_barrier();
+	spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
+	err = sticky_or_fault();
+	if (err)
+		goto deny;
+	if (core.bootstrap_released &&
+	    core.bootstrap_stage == SPP_DIAG_TRACE_BOOTSTRAP_RELEASED) {
+		spin_unlock_irqrestore(&spp_diag_trace_core_lock, flags);
+		return 0;
 	}
-	if (field_err) {
-		err = fail_sticky(field_err);
-		spin_unlock_irqrestore(&spp_diag_trace_core_lock, irqflags);
-		return err;
-	}
-	if (payload_length >
-	    (size_t)(~0u - SPP_DIAG_TRACE_FRAME_HEADER_SIZE)) {
-		err = fail_sticky(WIRE_ARITHMETIC);
-		spin_unlock_irqrestore(&spp_diag_trace_core_lock, irqflags);
-		return err;
-	}
-	frame_len = SPP_DIAG_TRACE_FRAME_HEADER_SIZE + (u32)payload_length;
-	if (core.frame_count >= core.max_frames_op) {
-		err = fail_sticky(WIRE_CAP);
-		spin_unlock_irqrestore(&spp_diag_trace_core_lock, irqflags);
-		return err;
-	}
-	if (add_u64(SPP_DIAG_TRACE_STREAM_PREFIX_SIZE, frame_len,
-		    &prefix_plus_frame) != WIRE_OK ||
-	    add_u64(core.stream_byte_count, prefix_plus_frame, &next_bytes) !=
-		    WIRE_OK) {
-		err = fail_sticky(WIRE_ARITHMETIC);
-		spin_unlock_irqrestore(&spp_diag_trace_core_lock, irqflags);
-		return err;
-	}
-	if (next_bytes > core.max_stream_bytes_op) {
-		err = fail_sticky(WIRE_CAP);
-		spin_unlock_irqrestore(&spp_diag_trace_core_lock, irqflags);
-		return err;
+	if (!core.initialized || core.bootstrap_released ||
+	    core.bootstrap_stage != SPP_DIAG_TRACE_BOOTSTRAP_IMA_AVAILABLE ||
+	    core.bootstrap_denial_count != 0 || field_err || pid == 0 || tgid == 0 ||
+	    path_length != sizeof(canary) - 1 ||
+	    memcmp(path_copy, canary, sizeof(canary) - 1)) {
+		fail_sticky(field_err ? field_err : WIRE_STATE);
+		goto deny;
 	}
 
-	encode_frame(frame, event_type, flags, (u32)payload_length,
-		     core.sequence, task_ordinal, parent_task_ordinal,
-		     operation_ordinal, phase, payload_src);
-	hash_frame_preimage(core.chain, frame, frame_len, next_chain);
-	store_u32be(core.stream + core.stream_len, frame_len);
-	memcpy(core.stream + core.stream_len + 4, frame, frame_len);
-	core.stream_len += 4u + frame_len;
-	memcpy(core.chain, next_chain, SPP_DIAG_TRACE_CHAIN_LEN);
-	memcpy(core.last_frame, frame, frame_len);
-	core.last_frame_len = frame_len;
-	core.frame_count += 1;
-	core.stream_byte_count = next_bytes;
-	core.sequence += 1;
-	spin_unlock_irqrestore(&spp_diag_trace_core_lock, irqflags);
-	return WIRE_OK;
+	store_u16be(payload, 13);
+	store_u16be(payload + 2, (u16)path_length);
+	store_u32be(payload + 4, pid);
+	store_u32be(payload + 8, tgid);
+	memset(payload + 12, 0, 8);
+	memcpy(payload + 20, path_copy, path_length);
+	field_err = check_append_fields(
+		SPP_DIAG_TRACE_EVENT_PRE_RELEASE_EXEC_DENIED, 0, 0, 0, 1,
+		SPP_DIAG_TRACE_PHASE_PRE_RELEASE, payload, 20 + path_length);
+	err = append_locked(SPP_DIAG_TRACE_EVENT_PRE_RELEASE_EXEC_DENIED, 0, 0, 0,
+			    1, SPP_DIAG_TRACE_PHASE_PRE_RELEASE, payload,
+			    20 + path_length, field_err);
+	if (!err) {
+		core.bootstrap_denial_count = 1;
+		core.bootstrap_stage = SPP_DIAG_TRACE_BOOTSTRAP_DENIED;
+	}
+
+deny:
+	spin_unlock_irqrestore(&spp_diag_trace_core_lock, flags);
+	return -EACCES;
 }
+
+int spp_diag_trace_core_bootstrap_prepare_ready(u8 record[256])
+{
+	unsigned long flags;
+	u8 payload[8];
+	int field_err;
+	int err;
+
+	run_barrier();
+	spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
+	err = sticky_or_fault();
+	if (!err && (!record || !core.initialized || core.bootstrap_released ||
+		     core.bootstrap_stage != SPP_DIAG_TRACE_BOOTSTRAP_DENIED ||
+		     core.bootstrap_denial_count != 1))
+		err = fail_sticky(record ? WIRE_STATE : WIRE_NULL);
+	if (!err) {
+		store_u64be(payload, core.bootstrap_denial_count);
+		field_err = check_append_fields(
+			SPP_DIAG_TRACE_EVENT_IMA_READY, 0, 0, 0, 0,
+			SPP_DIAG_TRACE_PHASE_PRE_RELEASE, payload, sizeof(payload));
+		err = append_locked(SPP_DIAG_TRACE_EVENT_IMA_READY, 0, 0, 0, 0,
+				    SPP_DIAG_TRACE_PHASE_PRE_RELEASE, payload,
+				    sizeof(payload), field_err);
+	}
+	if (!err) {
+		core.bootstrap_stage = SPP_DIAG_TRACE_BOOTSTRAP_READY_APPENDED;
+		encode_bootstrap_record_locked(SPP_DIAG_TRACE_IMA_KIND_READY,
+					       record);
+	}
+	spin_unlock_irqrestore(&spp_diag_trace_core_lock, flags);
+	return err;
+}
+
+int spp_diag_trace_core_bootstrap_ready_measured(void)
+{
+	unsigned long flags;
+	int err;
+
+	run_barrier();
+	spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
+	err = sticky_or_fault();
+	if (!err && (core.bootstrap_stage !=
+			     SPP_DIAG_TRACE_BOOTSTRAP_READY_APPENDED ||
+		     core.bootstrap_denial_count != 1 || core.bootstrap_released))
+		err = fail_sticky(WIRE_STATE);
+	if (!err)
+		core.bootstrap_stage = SPP_DIAG_TRACE_BOOTSTRAP_READY_MEASURED;
+	spin_unlock_irqrestore(&spp_diag_trace_core_lock, flags);
+	return err;
+}
+
+int spp_diag_trace_core_bootstrap_prepare_release(u32 pid, u32 tgid,
+					  u8 record[256])
+{
+	unsigned long flags;
+	u8 payload[16];
+	int field_err;
+	int err;
+
+	run_barrier();
+	spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
+	err = sticky_or_fault();
+	if (!err && (!record || pid != 1 || tgid != 1 ||
+		     core.bootstrap_stage !=
+			     SPP_DIAG_TRACE_BOOTSTRAP_READY_MEASURED ||
+		     core.bootstrap_denial_count != 1 || core.bootstrap_released))
+		err = fail_sticky(record ? WIRE_STATE : WIRE_NULL);
+	if (!err) {
+		store_u32be(payload, pid);
+		store_u32be(payload + 4, tgid);
+		store_u64be(payload + 8, core.bootstrap_denial_count);
+		field_err = check_append_fields(
+			SPP_DIAG_TRACE_EVENT_USERSPACE_RELEASE, 0, 1, 0, 0,
+			SPP_DIAG_TRACE_PHASE_PRE_RELEASE, payload, sizeof(payload));
+		err = append_locked(SPP_DIAG_TRACE_EVENT_USERSPACE_RELEASE, 0, 1, 0,
+				    0, SPP_DIAG_TRACE_PHASE_PRE_RELEASE, payload,
+				    sizeof(payload), field_err);
+	}
+	if (!err) {
+		core.bootstrap_stage = SPP_DIAG_TRACE_BOOTSTRAP_RELEASE_APPENDED;
+		encode_bootstrap_record_locked(SPP_DIAG_TRACE_IMA_KIND_RELEASED,
+					       record);
+	}
+	spin_unlock_irqrestore(&spp_diag_trace_core_lock, flags);
+	return err;
+}
+
+int spp_diag_trace_core_bootstrap_release_measured(void)
+{
+	unsigned long flags;
+	int err;
+
+	run_barrier();
+	spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
+	err = sticky_or_fault();
+	if (!err && (core.bootstrap_stage !=
+			     SPP_DIAG_TRACE_BOOTSTRAP_RELEASE_APPENDED ||
+		     core.bootstrap_denial_count != 1 || core.bootstrap_released))
+		err = fail_sticky(WIRE_STATE);
+	if (!err)
+		core.bootstrap_stage = SPP_DIAG_TRACE_BOOTSTRAP_RELEASE_MEASURED;
+	spin_unlock_irqrestore(&spp_diag_trace_core_lock, flags);
+	return err;
+}
+
+int spp_diag_trace_core_bootstrap_publish(void)
+{
+	unsigned long flags;
+	int err;
+
+	run_barrier();
+	spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
+	err = sticky_or_fault();
+	if (!err && (core.bootstrap_stage !=
+			     SPP_DIAG_TRACE_BOOTSTRAP_RELEASE_MEASURED ||
+		     core.bootstrap_denial_count != 1 || core.bootstrap_released))
+		err = fail_sticky(WIRE_STATE);
+	if (!err) {
+		core.bootstrap_released = 1;
+		core.bootstrap_stage = SPP_DIAG_TRACE_BOOTSTRAP_RELEASED;
+	}
+	spin_unlock_irqrestore(&spp_diag_trace_core_lock, flags);
+	return err;
+}
+#endif
 
 int spp_diag_trace_core_mark_failure(int reason)
 {
@@ -1280,6 +1524,9 @@ void spp_diag_trace_core_reset(void)
 	core.last_frame_len = 0;
 	core.stream_cap = 0;
 	core.stream_len = 0;
+	core.bootstrap_denial_count = 0;
+	core.bootstrap_stage = SPP_DIAG_TRACE_BOOTSTRAP_NONE;
+	core.bootstrap_released = 0;
 	core.max_frames_op = SPP_DIAG_TRACE_CORE_OP_MAX_FRAMES;
 	core.max_stream_bytes_op = SPP_DIAG_TRACE_CORE_OP_MAX_STREAM_BYTES;
 	core.fault_inject = 0;

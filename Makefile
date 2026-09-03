@@ -72,6 +72,8 @@ SPP_DIAG_TRACE_CORE_CALLGRAPH := test/conf-proc-spp-diag-trace-core-callgraph-se
 SPP_DIAG_TRACE_CORE_CALLGRAPH_NEG := test/conf-proc-spp-diag-trace-core-callgraph-negative-fixtures.c
 SPP_DIAG_TRACE_CORE_BOOTSTRAP_TEST := test/conf-proc-spp-diag-trace-core-bootstrap-selftest.c
 SPP_DIAG_TRACE_CORE_BOOTSTRAP_KUNIT_TEST := test/conf-proc-spp-diag-trace-core-bootstrap-kunit-selftest.c
+SPP_DIAG_TRACE_CORE_BOOTSTRAP_FIXTURE := test/conf-proc-spp-diag-trace-core-bootstrap-fixture.c
+SPP_DIAG_TRACE_CORE_BOOTSTRAP_ORACLE := test/conf-proc-spp-diag-trace-core-bootstrap-oracle-selftest.py
 
 .PHONY: install check test ci clean ratls-contract test-spp-diag-trace test-spp-diag-trace-oracle test-spp-diag-trace-chain test-spp-diag-trace-checkpoints test-spp-diag-trace-semantics test-spp-diag-trace-sanitized test-spp-diag-ima-replay test-spp-diag-attest-fixture test-spp-diag-attest test-spp-diag-trace-core test-spp-diag-trace-core-oracle test-spp-diag-trace-core-race test-spp-diag-trace-core-sanitized test-spp-diag-trace-core-materialize test-spp-diag-trace-core-handoff test-spp-diag-trace-core-source-walk test-spp-diag-trace-core-context test-spp-diag-trace-core-callgraph test-spp-diag-trace-core-bootstrap test-spp-diag-trace-core-bootstrap-sanitized test-spp-diag-trace-core-bootstrap-source-walk test-spp-diag-trace-core-bootstrap-kunit test-spp-diag-trace-core-bootstrap-callgraph
 
@@ -294,7 +296,9 @@ test-spp-diag-trace-core-bootstrap:
 	mkdir -p build
 	$(CC) $(CORE_CFLAGS) -pthread -DCONFIG_KUNIT=1 -DCONFIG_SECURITY_SPP_DIAG_TRACE_CORE_BOOTSTRAP=1 $(SPP_DIAG_TRACE_CORE_HOST_INC) $(SPP_DIAG_TRACE_CORE_SRC) $(SPP_DIAG_TRACE_CORE_BOOTSTRAP_SRC) $(SPP_DIAG_TRACE_CORE_BOOTSTRAP_HOST_LIB) $(SPP_DIAG_TRACE_CORE_BOOTSTRAP_TEST) -o build/spp-diag-trace-core-bootstrap-selftest
 	./build/spp-diag-trace-core-bootstrap-selftest
-	rm -f build/spp-diag-trace-core-bootstrap-selftest
+	$(CC) $(CORE_CFLAGS) -pthread -DCONFIG_KUNIT=1 -DCONFIG_SECURITY_SPP_DIAG_TRACE_CORE_BOOTSTRAP=1 $(SPP_DIAG_TRACE_CORE_HOST_INC) $(SPP_DIAG_TRACE_CORE_SRC) $(SPP_DIAG_TRACE_CORE_BOOTSTRAP_HOST_LIB) $(SPP_DIAG_TRACE_CORE_BOOTSTRAP_FIXTURE) -o build/spp-diag-trace-core-bootstrap-fixture
+	$(PYTHON) $(SPP_DIAG_TRACE_CORE_BOOTSTRAP_ORACLE) build/spp-diag-trace-core-bootstrap-fixture
+	rm -f build/spp-diag-trace-core-bootstrap-selftest build/spp-diag-trace-core-bootstrap-fixture
 
 test-spp-diag-trace-core-bootstrap-sanitized:
 	mkdir -p build
