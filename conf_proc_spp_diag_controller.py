@@ -99,6 +99,7 @@ _EXEC_DENIALS: Final = (
     "/run/solstone/remote-code/foreign-exec",
 )
 _PARSER: Final = "/usr/sbin/apparmor_parser"
+_NVIDIA_MODPROBE: Final = "/usr/bin/nvidia-modprobe"
 _PROFILE_FILE: Final = "/etc/apparmor.d/usr.local.libexec.solstone.spp-diag-controller"
 _PROFILE_NAME: Final = "/usr/lib/spp/spp-diag-controller"
 _GPU_HELPER: Final = "/usr/lib/spp/spp-diag-gpu-evidence.py"
@@ -869,7 +870,11 @@ def _drain_child_pipes(open_fds: set[int], captures: dict[int, bytearray], cap: 
 
 
 def _run_fixed_child(name: str, argv: tuple[str, ...], deadline: float, cap: int) -> ChildResult:
-    if name == "apparmor":
+    if name == "nvidia-device":
+        valid = argv == (_NVIDIA_MODPROBE, "-c", "0")
+    elif name == "nvidia-uvm":
+        valid = argv == (_NVIDIA_MODPROBE, "-u")
+    elif name == "apparmor":
         valid = argv == (_PARSER, "-r", "-K", "--abort-on-error", _PROFILE_FILE)
     elif name == "cuda-cold":
         valid = argv == (_CUDA, "cold")
@@ -1165,6 +1170,17 @@ def _preflight(ops: ControllerOps, boot: BootInputs) -> tuple[ControllerIdentity
         raise
     except Exception:
         _fail(SPPFLR1_INPUT, 1)
+    # rdinit bypasses the distribution initramfs hooks.  Bootstrap only the
+    # fixed CUDA device and UVM module paths before AppArmor confinement; both
+    # children use the same bounded PID-1 supervisor as every later helper.
+    _child(
+        ops, "nvidia-device", (_NVIDIA_MODPROBE, "-c", "0"),
+        ops.monotonic() + 30.0, _CHILD_CAPTURE_BYTES, 1,
+    )
+    _child(
+        ops, "nvidia-uvm", (_NVIDIA_MODPROBE, "-u"),
+        ops.monotonic() + 30.0, _CHILD_CAPTURE_BYTES, 1,
+    )
     _child(
         ops, "apparmor", (_PARSER, "-r", "-K", "--abort-on-error", _PROFILE_FILE),
         ops.monotonic() + 10.0, _CHILD_CAPTURE_BYTES, 1,

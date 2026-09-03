@@ -424,7 +424,7 @@ def test_main_uses_the_same_injected_production_core_and_one_failure_record() ->
     assert controller_main(argv, recorder.ops()) == 1
     assert recorder.bootstrap == ["uart", "fds", "fixtures", "scratch", "changeprofile"]
     assert [name for name, _argv in recorder.children] == [
-        "apparmor", "cuda-cold", "cuda-infer", "gpu-helper",
+        "nvidia-device", "nvidia-uvm", "apparmor", "cuda-cold", "cuda-infer", "gpu-helper",
         "tpm-readpublic-pem", "tpm-readpublic-tpmt", "tpm-nvread", "tpm-quote",
     ]
     assert len(recorder.serial) == 2 and recorder.serial[1] == b"\0"
@@ -606,6 +606,9 @@ def test_isolated_staged_controller_import_reaches_real_main() -> None:
         argv = _main_fixture(recorder)
         assert namespace["main"](argv, recorder.ops()) == 1
         assert recorder.bootstrap == ["uart", "fds", "fixtures", "scratch", "changeprofile"]
+        assert [name for name, _argv in recorder.children[:3]] == [
+            "nvidia-device", "nvidia-uvm", "apparmor",
+        ]
 
 
 TESTS = (
