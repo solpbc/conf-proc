@@ -11,9 +11,22 @@ import posixpath
 from dataclasses import dataclass
 from typing import Final
 
-from conf_proc_json import canonical_dumps, canonical_loads
+from conf_proc_json import canonical_loads
 from conf_proc_reasons import ApplianceError
 from conf_proc_spp_diagbundle_pe import extract_sppdiag_descriptor
+from conf_proc_spp_diagbundle_protocol import (
+    DOMAIN_CONTROL_PLAN,
+    DOMAIN_IMAGE_BINDING,
+    DOMAIN_INNER_RECEIPT,
+    DOMAIN_INPUT_CLOSURE,
+    DOMAIN_OUTER_ENVELOPE,
+    DOMAIN_QUOTE_QD,
+    INPUT_CLOSURE_ROLES,
+    domain_address as _domain_address,
+    image_binding_address as _image_binding_address,
+    inner_receipt_digest as _inner_receipt_digest,
+    quote_qualifying_data as _quote_qualifying_data,
+)
 from conf_proc_spp_diagbundle_reasons import (
     CP_DIAGBUNDLE_EXPECTATIONS,
     CP_DIAGBUNDLE_FORBIDDEN,
@@ -56,13 +69,6 @@ ALL_NODE_KINDS: Final = frozenset(
 )
 assert NODE_ARTIFACT_STATE not in ALL_NODE_KINDS
 
-DOMAIN_INPUT_CLOSURE: Final = b"sol-spp-diagbundle-input-closure-v1\0"
-DOMAIN_IMAGE_BINDING: Final = b"sol-spp-diagbundle-image-binding-v1\0"
-DOMAIN_INNER_RECEIPT: Final = b"sol-spp-diagbundle-inner-receipt-v1\0"
-DOMAIN_CONTROL_PLAN: Final = b"sol-spp-diagbundle-control-plan-v1\0"
-DOMAIN_QUOTE_QD: Final = b"sol-spp-diagbundle-quote-qd-v1\0"
-DOMAIN_OUTER_ENVELOPE: Final = b"sol-spp-diagbundle-outer-envelope-v1\0"
-
 INPUT_CLOSURE_SCHEMA_ID: Final = "sol-spp-diagbundle-input-closure/v1"
 SIGNED_IMAGE_SCHEMA_ID: Final = "sol-spp-diagbundle-signed-image/v1"
 INNER_RECEIPT_SCHEMA_ID: Final = "sol-spp-diagbundle-inner-receipt/v1"
@@ -74,20 +80,6 @@ TERMINAL_FRAME_PREFIX: Final = b"SPPDIAG\0\x01\x01\x00\x40"
 CONTROL_PLAN_PATH: Final = "control-plan.json"
 ROLE_CONTROL_PLAN: Final = "canonical_control_plan"
 
-INPUT_CLOSURE_ROLES: Final = (
-    "source_tree_manifest",
-    "build_recipe",
-    "toolchain_lock",
-    "resolved_configuration",
-    "kernel_configuration",
-    "trace_policy",
-    ROLE_CONTROL_PLAN,
-    "runtime_manifest",
-    "model_manifest",
-    "producer_source",
-    "controller_source",
-    "signer_public_policy",
-)
 INPUT_CLOSURE_ROLE_SET: Final = frozenset(INPUT_CLOSURE_ROLES)
 CONTENT_KINDS: Final = frozenset({"canonical_json", "source", "bytes"})
 SIGNED_IMAGE_MEMBER_NAMES: Final = (
@@ -406,16 +398,13 @@ def inspect_diagnostic_members(bundle: BundleStream, expectations: CallerExpecta
         _require_declared(declared_size, declared_hash, member)
         image_members[name] = {"size_bytes": member.size_bytes, "sha256": member.sha256}
     sppdiag = extract_sppdiag_descriptor(_member(bundle, "signed-image/diagnostic.efi"))
-    image_binding_address = _domain_address(
-        DOMAIN_IMAGE_BINDING,
-        {
-            "schema": image_manifest.schema,
-            "node_kind": image_manifest.node_kind,
-            "artifact_state": image_manifest.artifact_state,
-            "layout": image_manifest.layout,
-            "input_closure_address": image_manifest.input_closure_address,
-            "members": {name: image_members[name] for name in sorted(SIGNED_IMAGE_MEMBER_NAMES)},
-        },
+    image_binding_address = _image_binding_address(
+        schema=image_manifest.schema,
+        node_kind=image_manifest.node_kind,
+        artifact_state=image_manifest.artifact_state,
+        layout=image_manifest.layout,
+        input_closure_address=image_manifest.input_closure_address,
+        members={name: image_members[name] for name in sorted(SIGNED_IMAGE_MEMBER_NAMES)},
     )
 
     receipt_inventory = []
@@ -435,19 +424,16 @@ def inspect_diagnostic_members(bundle: BundleStream, expectations: CallerExpecta
         receipt_manifest.challenge,
         receipt_manifest.run_identity,
     )
-    inner_receipt_digest = _domain_address(
-        DOMAIN_INNER_RECEIPT,
-        {
-            "schema": receipt_manifest.schema,
-            "node_kind": receipt_manifest.node_kind,
-            "artifact_state": receipt_manifest.artifact_state,
-            "challenge": receipt_manifest.challenge,
-            "run_identity": receipt_manifest.run_identity,
-            "signed_image_binding_address": receipt_manifest.signed_image_binding_address,
-            "target_profile_id": receipt_manifest.target_profile_id,
-            "control_plan_address": receipt_manifest.control_plan_address,
-            "inventory": receipt_inventory,
-        },
+    inner_receipt_digest = _inner_receipt_digest(
+        schema=receipt_manifest.schema,
+        node_kind=receipt_manifest.node_kind,
+        artifact_state=receipt_manifest.artifact_state,
+        challenge=receipt_manifest.challenge,
+        run_identity=receipt_manifest.run_identity,
+        signed_image_binding_address=receipt_manifest.signed_image_binding_address,
+        target_profile_id=receipt_manifest.target_profile_id,
+        control_plan_address=receipt_manifest.control_plan_address,
+        inventory=receipt_inventory,
     )
 
     outer_members: dict[str, object] = {"inner-receipt": {"digest": inner_receipt_digest}}
@@ -473,16 +459,13 @@ def inspect_diagnostic_members(bundle: BundleStream, expectations: CallerExpecta
             "members": outer_members,
         },
     )
-    quote_extra_data = _domain_address(
-        DOMAIN_QUOTE_QD,
-        {
-            "challenge": expectations.challenge,
-            "control_plan_address": control_plan_address,
-            "inner_receipt_digest": inner_receipt_digest,
-            "run_identity": expectations.run_identity,
-            "signed_image_binding_address": image_binding_address,
-            "target_profile_id": expectations.target_profile_id,
-        },
+    quote_extra_data = _quote_qualifying_data(
+        challenge=expectations.challenge,
+        control_plan_address=control_plan_address,
+        inner_receipt_digest=inner_receipt_digest,
+        run_identity=expectations.run_identity,
+        signed_image_binding_address=image_binding_address,
+        target_profile_id=expectations.target_profile_id,
     )
 
     _require_hex_equal(input_closure_address, expectations.input_closure_address, CP_DIAGBUNDLE_SEAM_INPUT_CLOSURE)
@@ -535,10 +518,6 @@ def _parse_expectations(data: bytes) -> CallerExpectations:
         target_profile_id=raw["target_profile_id"],
         control_plan_address=raw["control_plan_address"],
     )
-
-
-def _domain_address(domain: bytes, obj: dict) -> str:
-    return hashlib.sha256(domain + canonical_dumps(obj)).hexdigest()
 
 
 def _object(data: bytes, keys: frozenset[str]) -> dict:

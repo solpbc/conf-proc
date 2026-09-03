@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2026 sol pbc
+#
+# AppArmor profile for the SPP diagnostic controller (python3.10 running
+# /usr/local/libexec/solstone/spp-diag-controller.py). Self-contained by
+# design -- zero #include directives -- so the appliance's closure auditor
+# never needs to resolve an external abstraction. This profile is
+# compile/parser-checked only (`apparmor_parser -Q -K`); loading it into a
+# live kernel and observing real enforcement is out of scope for this lode.
+#
+# Its only denies are the six phase canaries the controller deliberately
+# drives to a known-denied outcome:
+#   phase 7  remote_package  IPv4 TCP connect  -> deny network inet stream
+#   phase 8  remote_model    IPv6 TCP connect  -> deny network inet6 stream
+#   phase 9  remote_plugin   UDP sendmsg       -> deny network inet dgram
+#   phase 10 writable_exec       -> deny /tmp/spp-diag-writable-exec-canary x
+#   phase 11 attached_disk_exec  -> deny /mnt/spp-diag-attached-disk-canary x
+#   phase 12 remote_code         -> deny /var/spp-diag-remote-code-canary x
+
+/usr/bin/python3.10 {
+  /usr/bin/python3.10 mr,
+  /usr/local/libexec/solstone/** r,
+  /usr/lib/python3.10/** r,
+
+  deny network inet stream,
+  deny network inet6 stream,
+  deny network inet dgram,
+
+  deny /tmp/spp-diag-writable-exec-canary x,
+  deny /mnt/spp-diag-attached-disk-canary x,
+  deny /var/spp-diag-remote-code-canary x,
+}

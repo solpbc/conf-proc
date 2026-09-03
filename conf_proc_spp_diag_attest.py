@@ -17,6 +17,11 @@ from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa, utils
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from cryptography.x509.oid import ExtensionOID, ObjectIdentifier, SignatureAlgorithmOID
 
+from conf_proc_spp_diag_pcr import (
+    QUOTE_PCR_BITMAP as _QUOTE_PCR_BITMAP,
+    SPP_DIAG_BASELINE_PCR_SELECTION,
+    SPP_DIAG_PCR_SELECTION,
+)
 from conf_proc_spp_diag_attest_reasons import (
     CP_SPP_DIAG_ATTEST_AK,
     CP_SPP_DIAG_ATTEST_CAP,
@@ -43,9 +48,6 @@ HCLA_BYTES = 2_600
 MAX_QUOTE_MSG_BYTES = 4_096
 MAX_QUOTE_SIG_BYTES = 1_024
 MAX_QUOTE_PCRS_BYTES = 8_192
-
-SPP_DIAG_PCR_SELECTION = (0, 2, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 22, 23)
-SPP_DIAG_BASELINE_PCR_SELECTION = (0, 2, 4, 7, 8, 9, 11, 12, 13, 14, 15, 16, 22, 23)
 
 _STATUS = "diagnostic_attestation_verified"
 _COMMITMENT_DOMAIN = b"solpbc:conf-proc:spp-diag-attestation:v1\0"
@@ -127,16 +129,6 @@ _PSS_SHA384 = padding.PSS(
     salt_length=48,
 )
 _UTC = timezone.utc
-
-
-def _pcr_bitmap(indices, size=3):
-    bitmap = bytearray(size)
-    for index in indices:
-        bitmap[index // 8] |= 1 << (index % 8)
-    return bytes(bitmap)
-
-
-_QUOTE_PCR_BITMAP = _pcr_bitmap(SPP_DIAG_PCR_SELECTION)
 
 
 @dataclass(frozen=True)

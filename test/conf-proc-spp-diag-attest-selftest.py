@@ -780,6 +780,7 @@ def test_privacy_and_independence() -> None:
         "base64",
         "typing",
         "__future__",
+        "conf_proc_spp_diag_pcr",
         "conf_proc_spp_diag_attest_reasons",
     }
     for name in attest_imports:
