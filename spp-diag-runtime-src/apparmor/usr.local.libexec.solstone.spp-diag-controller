@@ -6,7 +6,7 @@
 # exact profile with: apparmor_parser -r -K --abort-on-error <this file>.
 #
 # The executable attachment is the shipped extensionless PID-1 controller.  There
-# are no includes, unconfined transitions, broad /** grants, or administrative caps.
+# are no includes, unconfined transitions, filesystem-wide grants, or administrative caps.
 
 profile /usr/lib/spp/spp-diag-controller {
   /usr/bin/python3.10 ix,
@@ -19,31 +19,42 @@ profile /usr/lib/spp/spp-diag-controller {
   /usr/lib/python3.10/conf_proc_spp_diag_quote.py r,
   /usr/lib/python3.10/conf_proc_spp_diag_pcr.py r,
   /usr/lib/python3.10/conf_proc_spp_diagbundle_protocol.py r,
+  /usr/lib/python3.10/** rm,
+  /etc/ld.so.cache r,
+  /lib64/ld-linux-x86-64.so.2 mr,
+  /lib/x86_64-linux-gnu/** mr,
+  /usr/lib/x86_64-linux-gnu/** mr,
 
-  /usr/sbin/apparmor_parser ix,
   /opt/solstone/bin/synthetic-runtime ix,
-  /opt/solstone/bin/spp-diag-gpu-helper ix,
+  /usr/lib/spp/spp-diag-gpu-evidence.py r,
+  /usr/bin/nvattest ix,
+  /usr/bin/nvidia-smi ix,
+  /usr/bin/tpm2_readpublic ix,
+  /usr/bin/tpm2_nvread ix,
   /usr/bin/tpm2_quote ix,
-  /etc/apparmor.d/usr.local.libexec.solstone.spp-diag-controller r,
-  /dev/null r,
+  /dev/null rw,
   /dev/ttyS0 w,
   /dev/tpmrm0 rw,
-  /proc/self/attr/current w,
-  /proc/self/status r,
-  /proc/self/fd/ r,
-  /proc/self/task/1/children r,
-  /dev/disk/by-partuuid/* r,
-  /usr/share/spp-diag/control-plan.json r,
+  /dev/nvidia0 rw,
+  /dev/nvidiactl rw,
+  /dev/nvidia-uvm rw,
+  /dev/nvidia-uvm-tools rw,
+  /dev/nvidia-caps/* rw,
+  /proc/1/task/1/children r,
+  /proc/driver/nvidia/** r,
+  /sys/kernel/security/sol_spp_diag_trace/control w,
+  /sys/kernel/security/sol_spp_diag_trace/stream r,
   /opt/solstone/models/synthetic-fixture-v1.bin r,
   /var/cache/solstone/jit/synthetic-fixture-v1.so rm,
-  /run/spp-diag/ak-public.pem r,
-  /run/spp-diag/ak-tpmt-public.bin r,
-  /run/spp-diag/hcla.bin r,
+  /run/spp-diag/gpu-evidence.tlv rw,
+  /run/spp-diag/ak-public.pem rw,
+  /run/spp-diag/ak-tpmt-public.bin rw,
+  /run/spp-diag/hcla.bin rw,
   /run/spp-diag/quote.msg rw,
   /run/spp-diag/quote.sig rw,
   /run/spp-diag/quote.pcrs rw,
   /sys/kernel/security/tpm0/binary_bios_measurements r,
-  /sys/kernel/security/ima/ascii_runtime_measurements r,
+  /sys/kernel/security/ima/binary_runtime_measurements r,
 
   # Socket creation is restricted to the three probe shapes.  Their only literal
   # outbound operations are denied by peer so the controller records EACCES/EPERM.
@@ -58,7 +69,6 @@ profile /usr/lib/spp/spp-diag-controller {
   deny /mnt/solstone-attached/foreign-exec x,
   deny /run/solstone/remote-code/foreign-exec x,
 
-  signal (send) set=(term kill) peer=/usr/lib/spp/spp-diag-controller,
-  signal (receive) set=(term kill exists) peer=/usr/lib/spp/spp-diag-controller,
+  signal (send, receive) set=(term, kill, exists) peer=@{profile_name},
   capability sys_boot,
 }

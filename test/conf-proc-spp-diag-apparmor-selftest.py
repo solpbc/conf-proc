@@ -34,33 +34,41 @@ def test_attachment_children_and_closed_files() -> None:
     lines = _lines()
     assert lines[0] == "profile /usr/lib/spp/spp-diag-controller {"
     expected_ix = {
-        "/usr/bin/python3.10 ix,", "/usr/sbin/apparmor_parser ix,",
-        "/opt/solstone/bin/synthetic-runtime ix,", "/opt/solstone/bin/spp-diag-gpu-helper ix,",
-        "/usr/bin/tpm2_quote ix,",
+        "/usr/bin/python3.10 ix,", "/opt/solstone/bin/synthetic-runtime ix,",
+        "/usr/bin/nvattest ix,", "/usr/bin/nvidia-smi ix,",
+        "/usr/bin/tpm2_readpublic ix,", "/usr/bin/tpm2_nvread ix,", "/usr/bin/tpm2_quote ix,",
     }
-    assert expected_ix <= set(lines)
-    assert not any("/**" in line or " px," in line or " ux," in line for line in lines)
-    assert not any("sys_admin" in line or "mac_admin" in line for line in lines)
-    assert "capability sys_boot," in lines
-    assert "/proc/self/task/1/children r," in lines
+    assert {line for line in lines if line.endswith(" ix,")} == expected_ix
+    assert {line for line in lines if "/**" in line} == {
+        "/usr/lib/python3.10/** rm,", "/lib/x86_64-linux-gnu/** mr,",
+        "/usr/lib/x86_64-linux-gnu/** mr,", "/proc/driver/nvidia/** r,",
+    }
+    assert not any(" px," in line or " ux," in line for line in lines)
+    assert {line for line in lines if line.startswith("capability ")} == {"capability sys_boot,"}
+    assert "/proc/1/task/1/children r," in lines
+    assert "/usr/lib/spp/spp-diag-gpu-evidence.py r," in lines
+    assert "/sys/kernel/security/ima/binary_runtime_measurements r," in lines
+    assert "/sys/kernel/security/sol_spp_diag_trace/control w," in lines
+    assert "/sys/kernel/security/sol_spp_diag_trace/stream r," in lines
 
 
 def test_network_exec_and_signal_matrix() -> None:
     lines = _lines()
-    assert {
+    expected_network = {
         "network create inet stream,", "network create inet6 stream,", "network create inet dgram,",
         "deny network connect inet stream peer=(ip=198.51.100.7 port=443),",
         "deny network connect inet6 stream peer=(ip=2001:db8::8 port=443),",
         "deny network send inet dgram peer=(ip=203.0.113.9 port=443),",
-    } <= set(lines)
-    assert not any(line in {"deny network inet stream,", "deny network inet6 stream,", "deny network inet dgram,"} for line in lines)
+    }
+    assert {line for line in lines if "network" in line} == expected_network
     assert {line for line in lines if line.startswith("deny /")} == {
         "deny /var/tmp/solstone-writable-exec x,",
         "deny /mnt/solstone-attached/foreign-exec x,",
         "deny /run/solstone/remote-code/foreign-exec x,",
     }
-    assert "signal (send) set=(term kill) peer=/usr/lib/spp/spp-diag-controller," in lines
-    assert "signal (receive) set=(term kill exists) peer=/usr/lib/spp/spp-diag-controller," in lines
+    assert {line for line in lines if line.startswith("signal ")} == {
+        "signal (send, receive) set=(term, kill, exists) peer=@{profile_name},"
+    }
 
 
 def test_no_includes_or_live_enforcement_claim() -> None:
