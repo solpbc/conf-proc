@@ -26,6 +26,7 @@ from conf_proc_spp_diag_closure_audit_reasons import (  # noqa: E402
     CP_SPP_DIAG_CLOSURE_AUDIT_DYNAMIC_IMPORT,
     CP_SPP_DIAG_CLOSURE_AUDIT_EXTERNAL,
     CP_SPP_DIAG_CLOSURE_AUDIT_RELATIVE_IMPORT,
+    CP_SPP_DIAG_CLOSURE_AUDIT_UNREADABLE,
     SppDiagClosureAuditError,
 )
 
@@ -150,6 +151,59 @@ def test_python_transitive_closure(root: Path) -> None:
     _edge(observation, "child.py", "os", "python_import", True)
 
 
+def test_declared_extensionless_controller_root(root: Path) -> None:
+    controller = root / "usr/lib/spp/spp-diag-controller"
+    modules = root / "usr/lib/python3.10"
+    controller.parent.mkdir(parents=True, exist_ok=True)
+    modules.mkdir(parents=True)
+    controller.write_text("import conf_proc_json\n", encoding="utf-8")
+    (modules / "conf_proc_json.py").write_text("import conf_proc_reasons\n", encoding="utf-8")
+    (modules / "conf_proc_reasons.py").write_text("VALUE = 1\n", encoding="utf-8")
+    observation = audit.audit_closure(
+        str(root), (audit.SPP_DIAG_CONTROLLER_ENTRYPOINT,), allowed_external=frozenset()
+    )
+    _edge(observation, audit.SPP_DIAG_CONTROLLER_ENTRYPOINT, "usr/lib/python3.10/conf_proc_json.py", "python_import", False)
+    _edge(observation, "usr/lib/python3.10/conf_proc_json.py", "usr/lib/python3.10/conf_proc_reasons.py", "python_import", False)
+
+    # An arbitrary extensionless file is still opaque; only the declared path has
+    # Python capability.
+    (root / "tool").write_text("import conf_proc_json\n", encoding="utf-8")
+    opaque = audit.audit_closure(str(root), ("tool",), allowed_external=frozenset())
+    assert not opaque.edges
+
+
+def test_declared_controller_rejects_missing_or_moved_root(root: Path) -> None:
+    case = root / "reject"
+    controller = case / "usr/lib/spp/spp-diag-controller"
+    controller.parent.mkdir(parents=True, exist_ok=True)
+    controller.write_text("import conf_proc_json\n", encoding="utf-8")
+    _expect(
+        CP_SPP_DIAG_CLOSURE_AUDIT_UNREADABLE,
+        lambda: audit.audit_closure(str(case), (audit.SPP_DIAG_CONTROLLER_ENTRYPOINT,), allowed_external=frozenset()),
+    )
+    (case / "usr/lib/python3.10").mkdir(parents=True)
+    (case / "usr/lib/spp/conf_proc_json.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _expect(
+        CP_SPP_DIAG_CLOSURE_AUDIT_UNREADABLE,
+        lambda: audit.audit_closure(str(case), (audit.SPP_DIAG_CONTROLLER_ENTRYPOINT,), allowed_external=frozenset()),
+    )
+
+
+def test_declared_controller_rejects_ambiguous_import(root: Path) -> None:
+    case = root / "ambiguous"
+    controller = case / "usr/lib/spp/spp-diag-controller"
+    module = case / "usr/lib/python3.10/conf_proc_json.py"
+    controller.parent.mkdir(parents=True)
+    module.parent.mkdir(parents=True)
+    controller.write_text("import conf_proc_json\n", encoding="utf-8")
+    module.write_text("VALUE = 1\n", encoding="utf-8")
+    (case / "conf_proc_json.py").write_text("VALUE = 2\n", encoding="utf-8")
+    _expect(
+        CP_SPP_DIAG_CLOSURE_AUDIT_UNREADABLE,
+        lambda: audit.audit_closure(str(case), (audit.SPP_DIAG_CONTROLLER_ENTRYPOINT,), allowed_external=frozenset()),
+    )
+
+
 def test_apparmor_includes(root: Path) -> None:
     (root / "policy").mkdir()
     (root / "local").mkdir()
@@ -236,6 +290,9 @@ TESTS = (
     test_python_imports_are_ast_derived,
     test_python_rejections,
     test_python_transitive_closure,
+    test_declared_extensionless_controller_root,
+    test_declared_controller_rejects_missing_or_moved_root,
+    test_declared_controller_rejects_ambiguous_import,
     test_apparmor_includes,
 )
 
@@ -250,7 +307,7 @@ def main() -> None:
     print("ok   test_allowlists")
     test_static_independence()
     print("ok   test_static_independence")
-    print("SPP diagnostic closure audit: ok (9 tests)")
+    print("SPP diagnostic closure audit: ok (12 tests)")
 
 
 if __name__ == "__main__":

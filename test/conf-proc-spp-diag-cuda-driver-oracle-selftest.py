@@ -126,7 +126,8 @@ def test_model_path_and_size_boundaries(driver: str, fake: str, model_path: str)
         handle.write(MODEL_BYTES)
     os.unlink(model_path)
     os.symlink(target, model_path)
-    assert run_driver(driver, fake, ["infer", seed.hex()]).returncode != 0
+    followed = run_driver(driver, fake, ["infer", seed.hex()])
+    assert followed.returncode == 0 and followed.stdout == expected_record(MODEL_BYTES, seed)
     os.unlink(model_path)
 
     with open(model_path, "wb"):
@@ -180,7 +181,7 @@ def test_source_and_sanitized_build(build_dir: str, model_path: str) -> None:
         "xor.b32",
         "cuDeviceGetCount",
         "cuCtxSynchronize",
-        "O_NOFOLLOW",
+        "O_RDONLY | O_CLOEXEC",
         "MAP_PRIVATE",
         'dlopen("libcuda.so.1"',
     ):

@@ -70,6 +70,24 @@ _GPU_WITNESS_POLICY_DOMAIN: Final = b"sol-spp-diag-gpu-witness-policy-v1\0"
 _INPUT_SEED_DOMAIN: Final = b"sol-spp-diag-input-seed-v1\0"
 _OUTPUT_ALGORITHM_ID: Final = "spp-diag-xor-stride32-v1"
 _MAX_SYNTHETIC_MODEL_BYTES: Final = 8 * 1024 * 1024
+_LATE_BINDING_MAGIC: Final = b"SPPBND1\0"
+_LATE_BINDING_VERSION: Final = 1
+_LATE_BINDING_SIZE: Final = 4096
+_LATE_BINDING_DOMAIN: Final = b"sol-spp-diag-runtime-late-binding/v1\0"
+
+# This is the complete Python closure of the extensionless controller.  GPU
+# evidence is an invoked fixed child, never a ninth Python runtime dependency.
+SPP_DIAG_RUNTIME_STAGED_PYTHON: Final = (
+    "usr/lib/spp/spp-diag-controller",
+    "usr/lib/python3.10/conf_proc_reasons.py",
+    "usr/lib/python3.10/conf_proc_json.py",
+    "usr/lib/python3.10/conf_proc_spp_diag_failure_terminal_reasons.py",
+    "usr/lib/python3.10/conf_proc_spp_diag_export.py",
+    "usr/lib/python3.10/conf_proc_spp_diag_export_reasons.py",
+    "usr/lib/python3.10/conf_proc_spp_diag_quote.py",
+    "usr/lib/python3.10/conf_proc_spp_diag_pcr.py",
+    "usr/lib/python3.10/conf_proc_spp_diagbundle_protocol.py",
+)
 
 
 @dataclass(frozen=True)
@@ -309,7 +327,6 @@ def finalize_command_line(
     challenge: str,
     run_identity: str,
     control_plan_address: str,
-    target_profile_id: str,
     binding_partuuid: str,
     output_path: str | None = None,
 ) -> FinalizedCommandLine:
@@ -321,8 +338,6 @@ def finalize_command_line(
     digests = (root_hash, challenge, run_identity, control_plan_address)
     if any(not _is_sha256(value) for value in digests):
         _fail(CP_SPP_DIAG_RUNTIME_BUILD_COMMAND_LINE)
-    if not _is_profile_id(target_profile_id):
-        _fail(CP_SPP_DIAG_RUNTIME_BUILD_COMMAND_LINE)
     text = (
         "ro rdinit=/spp-diag-handoff init=/usr/lib/spp/spp-diag-controller "
         "root=/dev/mapper/spp-diag-root rootfstype=squashfs ip=off "
@@ -333,7 +348,7 @@ def finalize_command_line(
         f"sol_spp_diag.challenge={challenge} "
         f"sol_spp_diag.run={run_identity} "
         f"sol_spp_diag.control_plan={control_plan_address} -- "
-        f"sol_spp_diag.target_profile={target_profile_id} "
+        f"sol_spp_diag.target_profile={SPP_DIAG_TARGET_PROFILE_ID} "
         f"sol_spp_diag.binding_partuuid={binding_partuuid}\n"
     )
     encoded = text.encode("ascii")
@@ -363,6 +378,15 @@ def stage_runtime(
     try:
         _call_fault_hook(fault_hook, "validate-inputs")
         ordered_files = _validate_stage_inputs(guard, files, destination)
+        if "usr/lib/spp/spp-diag-controller" in entrypoints:
+            staged_python = tuple(
+                spec.dest_relpath
+                for spec in ordered_files
+                if spec.dest_relpath == "usr/lib/spp/spp-diag-controller"
+                or spec.dest_relpath.startswith("usr/lib/python3.10/") and spec.dest_relpath.endswith(".py")
+            )
+            if staged_python != tuple(sorted(SPP_DIAG_RUNTIME_STAGED_PYTHON)):
+                _fail(CP_SPP_DIAG_RUNTIME_BUILD_DEST_PATH)
         source_paths = tuple(dict.fromkeys(spec.source_abspath for spec in ordered_files))
 
         _call_fault_hook(fault_hook, "pin-reads")
@@ -465,15 +489,20 @@ def bind_image(
     *,
     diagnostic_efi_bytes: bytes,
     input_closure_address: str,
+    challenge: str,
+    run_identity: str,
+    control_plan_address: str,
+    target_profile_id: str,
     members: dict,
     output_path: str | None = None,
 ) -> BindImageResult:
     """Bind a captured five-member signed image to its input closure via the shared
     protocol constructor, calling extract_sppdiag_descriptor directly. Rejects any
     attempt to widen the fixed five-member inventory (e.g. smuggling a late-binding
-    record in as a sixth member) and any .sppdiag/closure-address mismatch. When
-    output_path is given, publishes the manifest bytes via the single-file transaction
-    (no-replace atomic visibility) and confirms it by reopen/re-hash before returning."""
+    record in as a sixth member) and any .sppdiag/closure-address mismatch. The
+    separately published binding is a fixed 4096-byte binary record; it is never the
+    signed-image manifest.  ``challenge``, ``run_identity``, ``control_plan_address``
+    and the fixed target profile are the four signed identity inputs."""
 
     if type(members) is not dict or frozenset(members) != _SIGNED_IMAGE_MEMBER_SET:
         _fail(CP_SPP_DIAG_RUNTIME_BUILD_IMAGE_MEMBERS)
@@ -492,6 +521,14 @@ def bind_image(
     if descriptor.schema != "sol-spp-diagbundle-descriptor/v1":
         _fail(CP_SPP_DIAG_RUNTIME_BUILD_IMAGE_SEAM)
     if descriptor.input_closure_address != input_closure_address:
+        _fail(CP_SPP_DIAG_RUNTIME_BUILD_IMAGE_SEAM)
+    if (
+        not _is_sha256(input_closure_address)
+        or not _is_sha256(challenge)
+        or not _is_sha256(run_identity)
+        or not _is_sha256(control_plan_address)
+        or target_profile_id != SPP_DIAG_TARGET_PROFILE_ID
+    ):
         _fail(CP_SPP_DIAG_RUNTIME_BUILD_IMAGE_SEAM)
 
     ordered_members = {name: members[name] for name in sorted(SIGNED_IMAGE_MEMBER_NAMES)}
@@ -513,15 +550,25 @@ def bind_image(
             "members": ordered_members,
         }
     )
-    late_binding_record = canonical_dumps(
+    binding_json = canonical_dumps(
         {
-            "schema": "sol-spp-diag-runtime-late-binding/v1",
+            "challenge": challenge,
+            "control_plan_address": control_plan_address,
             "image_binding_address": address,
             "input_closure_address": input_closure_address,
+            "run_identity": run_identity,
+            "schema": "sol-spp-diag-runtime-late-binding/v1",
+            "target_profile_id": target_profile_id,
         }
     )
+    prefix = struct.pack(">8sHHI", _LATE_BINDING_MAGIC, _LATE_BINDING_VERSION, 0, len(binding_json)) + binding_json
+    if len(prefix) + 32 > _LATE_BINDING_SIZE:
+        _fail(CP_SPP_DIAG_RUNTIME_BUILD_IMAGE_SEAM)
+    late_binding_record = prefix + hashlib.sha256(_LATE_BINDING_DOMAIN + prefix).digest()
+    late_binding_record += b"\x00" * (_LATE_BINDING_SIZE - len(late_binding_record))
+    assert len(late_binding_record) == _LATE_BINDING_SIZE
     if output_path is not None:
-        _write_single_file_transactional(manifest_bytes, output_path)
+        _write_single_file_transactional(late_binding_record, output_path)
     return BindImageResult(image_binding_address=address, manifest_bytes=manifest_bytes, late_binding_record=late_binding_record)
 
 

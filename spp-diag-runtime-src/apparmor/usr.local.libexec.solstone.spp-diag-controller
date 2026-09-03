@@ -1,32 +1,61 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (c) 2026 sol pbc
 #
-# AppArmor profile for the SPP diagnostic controller (python3.10 running
-# /usr/local/libexec/solstone/spp-diag-controller.py). Self-contained by
-# design -- zero #include directives -- so the appliance's closure auditor
-# never needs to resolve an external abstraction. This profile is
-# compile/parser-checked only (`apparmor_parser -Q -K`); loading it into a
-# live kernel and observing real enforcement is out of scope for this lode.
+# Parser-checked only: this source is compiled by the focused selftest and is not a
+# claim that a live kernel enforces it.  The controller loads this
+# exact profile with: apparmor_parser -r -K --abort-on-error <this file>.
 #
-# Its only denies are the six phase canaries the controller deliberately
-# drives to a known-denied outcome:
-#   phase 7  remote_package  IPv4 TCP connect  -> deny network inet stream
-#   phase 8  remote_model    IPv6 TCP connect  -> deny network inet6 stream
-#   phase 9  remote_plugin   UDP sendmsg       -> deny network inet dgram
-#   phase 10 writable_exec       -> deny /tmp/spp-diag-writable-exec-canary x
-#   phase 11 attached_disk_exec  -> deny /mnt/spp-diag-attached-disk-canary x
-#   phase 12 remote_code         -> deny /var/spp-diag-remote-code-canary x
+# The executable attachment is the shipped extensionless PID-1 controller.  There
+# are no includes, unconfined transitions, broad /** grants, or administrative caps.
 
-/usr/bin/python3.10 {
-  /usr/bin/python3.10 mr,
-  /usr/local/libexec/solstone/** r,
-  /usr/lib/python3.10/** r,
+profile /usr/lib/spp/spp-diag-controller {
+  /usr/bin/python3.10 ix,
+  /usr/lib/spp/spp-diag-controller r,
+  /usr/lib/python3.10/conf_proc_reasons.py r,
+  /usr/lib/python3.10/conf_proc_json.py r,
+  /usr/lib/python3.10/conf_proc_spp_diag_failure_terminal_reasons.py r,
+  /usr/lib/python3.10/conf_proc_spp_diag_export.py r,
+  /usr/lib/python3.10/conf_proc_spp_diag_export_reasons.py r,
+  /usr/lib/python3.10/conf_proc_spp_diag_quote.py r,
+  /usr/lib/python3.10/conf_proc_spp_diag_pcr.py r,
+  /usr/lib/python3.10/conf_proc_spp_diagbundle_protocol.py r,
 
-  deny network inet stream,
-  deny network inet6 stream,
-  deny network inet dgram,
+  /usr/sbin/apparmor_parser ix,
+  /opt/solstone/bin/synthetic-runtime ix,
+  /opt/solstone/bin/spp-diag-gpu-helper ix,
+  /usr/bin/tpm2_quote ix,
+  /etc/apparmor.d/usr.local.libexec.solstone.spp-diag-controller r,
+  /dev/null r,
+  /dev/ttyS0 w,
+  /dev/tpmrm0 rw,
+  /proc/self/attr/current w,
+  /proc/self/status r,
+  /proc/self/fd/ r,
+  /dev/disk/by-partuuid/* r,
+  /usr/share/spp-diag/control-plan.json r,
+  /opt/solstone/models/synthetic-fixture-v1.bin r,
+  /var/cache/solstone/jit/synthetic-fixture-v1.so rm,
+  /run/spp-diag/ak-public.pem r,
+  /run/spp-diag/ak-tpmt-public.bin r,
+  /run/spp-diag/hcla.bin r,
+  /run/spp-diag/quote.msg rw,
+  /run/spp-diag/quote.sig rw,
+  /run/spp-diag/quote.pcrs rw,
+  /sys/kernel/security/tpm0/binary_bios_measurements r,
+  /sys/kernel/security/ima/ascii_runtime_measurements r,
 
-  deny /tmp/spp-diag-writable-exec-canary x,
-  deny /mnt/spp-diag-attached-disk-canary x,
-  deny /var/spp-diag-remote-code-canary x,
+  # AppArmor network mediation authorizes socket creation by family/type.  The
+  # controller's direct connect/sendmsg probes require their expected EACCES/EPERM
+  # operation outcome and use only the three literal peers in its local constants.
+  network inet stream,
+  network inet6 stream,
+  network inet dgram,
+
+  deny /var/tmp/solstone-writable-exec x,
+  deny /mnt/solstone-attached/foreign-exec x,
+  deny /run/solstone/remote-code/foreign-exec x,
+
+  signal (send) set=(term kill) peer=/usr/lib/spp/spp-diag-controller,
+  signal (receive) set=(term kill exists) peer=/usr/lib/spp/spp-diag-controller,
+  capability sys_boot,
 }

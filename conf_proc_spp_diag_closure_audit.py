@@ -28,6 +28,13 @@ from conf_proc_spp_diag_closure_audit_reasons import (
 _APPARMOR_INCLUDE = re.compile(r'^\s*#include\s+(<([^>]+)>|"([^"]+)")\s*$')
 _ELF_EDGE_KINDS = frozenset({"elf_interp", "elf_needed", "elf_rpath", "elf_runpath"})
 
+# The diagnostic runtime deliberately has one non-.py Python entrypoint.  This is a
+# capability, not a filename heuristic: all other extensionless staged files remain
+# opaque.  Its imports are rooted at precisely this directory so moving a support
+# module next to the executable cannot silently widen the trusted runtime graph.
+SPP_DIAG_CONTROLLER_ENTRYPOINT = "usr/lib/spp/spp-diag-controller"
+SPP_DIAG_PYTHON_IMPORT_ROOT = "usr/lib/python3.10"
+
 
 @dataclass(frozen=True)
 class ClosureNode:
@@ -103,6 +110,9 @@ class _ClosureAuditor:
         self.worklist: deque[str] = deque()
 
     def audit(self, entrypoints: tuple[str, ...]) -> ClosureObservation:
+        if SPP_DIAG_CONTROLLER_ENTRYPOINT in entrypoints:
+            if not os.path.isdir(self._absolute(SPP_DIAG_PYTHON_IMPORT_ROOT)):
+                _fail(CP_SPP_DIAG_CLOSURE_AUDIT_UNREADABLE)
         self.worklist.extend(entrypoints)
         while self.worklist:
             path = self.worklist.popleft()
@@ -118,7 +128,7 @@ class _ClosureAuditor:
         if is_elf(data):
             kind = "elf"
             self._observe_elf(path, data)
-        elif path.endswith(".py"):
+        elif path.endswith(".py") or path == SPP_DIAG_CONTROLLER_ENTRYPOINT:
             try:
                 source = data.decode("utf-8")
             except UnicodeDecodeError:
@@ -164,11 +174,30 @@ class _ClosureAuditor:
             elif isinstance(node, ast.Call) and _is_dynamic_import(node.func, importlib_modules, import_module_names):
                 _fail(CP_SPP_DIAG_CLOSURE_AUDIT_DYNAMIC_IMPORT)
         for module_name in imported_modules:
-            module_path = module_name.replace(".", "/") + ".py"
+            module_path = self._python_module_path(path, module_name)
             if self._exists(module_path):
                 self._add_internal_edge(path, module_path, "python_import")
             else:
+                if path == SPP_DIAG_CONTROLLER_ENTRYPOINT or path.startswith(SPP_DIAG_PYTHON_IMPORT_ROOT + "/"):
+                    # The controller's staged support graph is closed.  Base-Python
+                    # imports remain external, but an absent conf-proc module is a
+                    # missing declared edge, never an allowlist choice.
+                    if module_name.startswith("conf_proc_"):
+                        _fail(CP_SPP_DIAG_CLOSURE_AUDIT_UNREADABLE)
                 self._add_external_edge(path, module_name, "python_import")
+
+    def _python_module_path(self, importer: str, module_name: str) -> str:
+        if importer == SPP_DIAG_CONTROLLER_ENTRYPOINT or importer.startswith(SPP_DIAG_PYTHON_IMPORT_ROOT + "/"):
+            leaf = module_name.replace(".", "/") + ".py"
+            rooted = SPP_DIAG_PYTHON_IMPORT_ROOT + "/" + leaf
+            # There is exactly one declared import root.  A copy next to the
+            # extensionless entrypoint or at staged-root level is ambiguous rather
+            # than a harmless unreachable file, so reject it before adding an edge.
+            alternate_paths = (leaf, "usr/lib/spp/" + leaf)
+            if any(self._exists(candidate) for candidate in alternate_paths):
+                _fail(CP_SPP_DIAG_CLOSURE_AUDIT_UNREADABLE)
+            return rooted
+        return module_name.replace(".", "/") + ".py"
 
     def _observe_apparmor(self, path: str, data: bytes) -> None:
         for line in data.decode("utf-8", "replace").splitlines():

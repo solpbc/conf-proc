@@ -41,7 +41,6 @@ COMMAND_ARGS = {
     "challenge": "bb" * 32,
     "run_identity": "cc" * 32,
     "control_plan_address": "dd" * 32,
-    "target_profile_id": "spp-r1-production",
     "binding_partuuid": "33333333-3333-4333-8333-333333333333",
 }
 EXPECTED_COMMAND_LINE = (
@@ -51,7 +50,7 @@ EXPECTED_COMMAND_LINE = (
     "spp_diag.root_hash=PARTUUID=22222222-2222-4222-8222-222222222222 "
     f"spp_diag.roothash={'aa' * 32} sol_spp_diag.challenge={'bb' * 32} "
     f"sol_spp_diag.run={'cc' * 32} sol_spp_diag.control_plan={'dd' * 32} -- "
-    "sol_spp_diag.target_profile=spp-r1-production "
+    "sol_spp_diag.target_profile=azure:centralus:3:Standard_NCC40ads_H100_v5:ConfidentialVM:v1 "
     "sol_spp_diag.binding_partuuid=33333333-3333-4333-8333-333333333333\n"
 )
 
@@ -133,7 +132,6 @@ def test_finalize_command_line() -> None:
         {"challenge": "bb" * 31},
         {"run_identity": "g0" * 32},
         {"control_plan_address": "dd" * 32 + "00"},
-        {"target_profile_id": "bad profile"},
         {"binding_partuuid": "not-a-partuuid"},
     )
     for mutation in mutations:
@@ -491,20 +489,37 @@ def test_bind_image_happy_path_and_seams() -> None:
         name: {"size_bytes": 100 + index, "sha256": format(index, "064x")}
         for index, name in enumerate(build.SIGNED_IMAGE_MEMBER_NAMES)
     }
-    result = build.bind_image(diagnostic_efi_bytes=data, input_closure_address=input_closure_address, members=members)
+    identities = {
+        "challenge": "11" * 32,
+        "run_identity": "22" * 32,
+        "control_plan_address": "33" * 32,
+        "target_profile_id": build.SPP_DIAG_TARGET_PROFILE_ID,
+    }
+    result = build.bind_image(diagnostic_efi_bytes=data, input_closure_address=input_closure_address, members=members, **identities)
     assert len(result.image_binding_address) == 64
     assert b"sol-spp-diagbundle-signed-image/v1" in result.manifest_bytes
+    magic, version, reserved, json_size = struct.unpack(">8sHHI", result.late_binding_record[:16])
+    assert (magic, version, reserved) == (b"SPPBND1\0", 1, 0)
+    binding_json = result.late_binding_record[16 : 16 + json_size]
+    assert result.late_binding_record[16 + json_size : 48 + json_size] == hashlib.sha256(
+        b"sol-spp-diag-runtime-late-binding/v1\0" + result.late_binding_record[: 16 + json_size]
+    ).digest()
+    assert not any(result.late_binding_record[48 + json_size :])
+    assert set(json.loads(binding_json)) == {
+        "challenge", "control_plan_address", "image_binding_address", "input_closure_address",
+        "run_identity", "schema", "target_profile_id",
+    }
 
-    result2 = build.bind_image(diagnostic_efi_bytes=data, input_closure_address=input_closure_address, members=members)
+    result2 = build.bind_image(diagnostic_efi_bytes=data, input_closure_address=input_closure_address, members=members, **identities)
     assert result.image_binding_address == result2.image_binding_address
 
     mutated_members = dict(members)
     mutated_members["rootfs.img"] = {"size_bytes": 999999, "sha256": "ff" * 32}
-    result3 = build.bind_image(diagnostic_efi_bytes=data, input_closure_address=input_closure_address, members=mutated_members)
+    result3 = build.bind_image(diagnostic_efi_bytes=data, input_closure_address=input_closure_address, members=mutated_members, **identities)
     assert result3.image_binding_address != result.image_binding_address
 
     try:
-        build.bind_image(diagnostic_efi_bytes=data, input_closure_address="ee" * 32, members=members)
+        build.bind_image(diagnostic_efi_bytes=data, input_closure_address="ee" * 32, members=members, **identities)
         raise AssertionError("expected seam mismatch rejection")
     except build.SppDiagRuntimeBuildError as exc:
         assert exc.reason_code == build.CP_SPP_DIAG_RUNTIME_BUILD_IMAGE_SEAM
@@ -512,7 +527,7 @@ def test_bind_image_happy_path_and_seams() -> None:
     widened_members = dict(members)
     widened_members["late-binding.json"] = {"size_bytes": 10, "sha256": "11" * 32}
     try:
-        build.bind_image(diagnostic_efi_bytes=data, input_closure_address=input_closure_address, members=widened_members)
+        build.bind_image(diagnostic_efi_bytes=data, input_closure_address=input_closure_address, members=widened_members, **identities)
         raise AssertionError("expected six-member rejection")
     except build.SppDiagRuntimeBuildError as exc:
         assert exc.reason_code == build.CP_SPP_DIAG_RUNTIME_BUILD_IMAGE_MEMBERS
@@ -520,7 +535,7 @@ def test_bind_image_happy_path_and_seams() -> None:
     narrowed_members = dict(members)
     del narrowed_members["signer-cert.der"]
     try:
-        build.bind_image(diagnostic_efi_bytes=data, input_closure_address=input_closure_address, members=narrowed_members)
+        build.bind_image(diagnostic_efi_bytes=data, input_closure_address=input_closure_address, members=narrowed_members, **identities)
         raise AssertionError("expected five-member rejection")
     except build.SppDiagRuntimeBuildError as exc:
         assert exc.reason_code == build.CP_SPP_DIAG_RUNTIME_BUILD_IMAGE_MEMBERS
@@ -528,22 +543,72 @@ def test_bind_image_happy_path_and_seams() -> None:
     with tempfile.TemporaryDirectory() as work_dir:
         output_path = os.path.join(work_dir, "signed-image-manifest.json")
         written = build.bind_image(
-            diagnostic_efi_bytes=data, input_closure_address=input_closure_address, members=members, output_path=output_path
+            diagnostic_efi_bytes=data, input_closure_address=input_closure_address, members=members, output_path=output_path, **identities
         )
         with open(output_path, "rb") as handle:
             on_disk = handle.read()
-        assert on_disk == written.manifest_bytes
+        assert on_disk == written.late_binding_record
+        assert len(on_disk) == 4096 and on_disk[:8] == b"SPPBND1\0"
         mode = stat.S_IMODE(os.stat(output_path).st_mode)
         assert not (mode & 0o222)
         try:
             build.bind_image(
-                diagnostic_efi_bytes=data, input_closure_address=input_closure_address, members=members, output_path=output_path
+                diagnostic_efi_bytes=data, input_closure_address=input_closure_address, members=members, output_path=output_path, **identities
             )
             raise AssertionError("expected no-replace rejection")
         except build.SppDiagRuntimeBuildError as exc:
             assert exc.reason_code == build.CP_SPP_DIAG_RUNTIME_BUILD_DESTINATION_EXISTS
         with open(output_path, "rb") as handle:
             assert handle.read() == on_disk
+
+
+def test_declared_controller_staging_graph() -> None:
+    assert build.SPP_DIAG_RUNTIME_STAGED_PYTHON == (
+        "usr/lib/spp/spp-diag-controller",
+        "usr/lib/python3.10/conf_proc_reasons.py",
+        "usr/lib/python3.10/conf_proc_json.py",
+        "usr/lib/python3.10/conf_proc_spp_diag_failure_terminal_reasons.py",
+        "usr/lib/python3.10/conf_proc_spp_diag_export.py",
+        "usr/lib/python3.10/conf_proc_spp_diag_export_reasons.py",
+        "usr/lib/python3.10/conf_proc_spp_diag_quote.py",
+        "usr/lib/python3.10/conf_proc_spp_diag_pcr.py",
+        "usr/lib/python3.10/conf_proc_spp_diagbundle_protocol.py",
+    )
+
+
+def test_controller_staging_enforces_exact_python_graph(root: Path) -> None:
+    sources = root / "controller-graph-sources"
+    sources.mkdir()
+    specs = []
+    allowed = []
+    for destination in build.SPP_DIAG_RUNTIME_STAGED_PYTHON:
+        source = sources / destination.replace("/", "_")
+        payload = b"import conf_proc_json\n" if destination.endswith("spp-diag-controller") else b"VALUE = 1\n"
+        source.write_bytes(payload)
+        allowed.append(str(source))
+        specs.append(build.StagedFileSpec(
+            dest_relpath=destination,
+            source_abspath=str(source),
+            mode=0o755 if destination.endswith("spp-diag-controller") else 0o644,
+            declared_size=len(payload),
+            declared_sha256=_sha256(payload),
+        ))
+    guard = HermeticGuard(
+        allowed_reads=frozenset(allowed), tools={}, env={"PATH": "/usr/bin", "LC_ALL": "C", "TZ": "UTC"}, build_epoch=0,
+    )
+    result = build.stage_runtime(
+        guard, tuple(specs), destination=str(root / "controller-runtime"),
+        entrypoints=("usr/lib/spp/spp-diag-controller",),
+    )
+    assert result.staged_root.endswith("controller-runtime")
+    missing = tuple(spec for spec in specs if not spec.dest_relpath.endswith("conf_proc_spp_diag_pcr.py"))
+    _expect(
+        CP_SPP_DIAG_RUNTIME_BUILD_DEST_PATH,
+        lambda: build.stage_runtime(
+            guard, missing, destination=str(root / "controller-runtime-missing"),
+            entrypoints=("usr/lib/spp/spp-diag-controller",),
+        ),
+    )
 
 
 def main() -> None:
@@ -555,12 +620,17 @@ def main() -> None:
     print("ok   test_single_file_transaction_finalize_command_line")
     test_bind_image_happy_path_and_seams()
     print("ok   test_bind_image_happy_path_and_seams")
+    test_declared_controller_staging_graph()
+    print("ok   test_declared_controller_staging_graph")
+    with tempfile.TemporaryDirectory(dir="/var/tmp") as temporary:
+        test_controller_staging_enforces_exact_python_graph(Path(temporary))
+    print("ok   test_controller_staging_enforces_exact_python_graph")
     with tempfile.TemporaryDirectory(dir="/var/tmp") as temporary:
         root = Path(temporary)
         for test in TESTS[1:]:
             test(root)
             print(f"ok   {test.__name__}")
-    print("SPP diagnostic runtime build: ok (%d tests, %d boundaries)" % (len(TESTS) + 3, len(BOUNDARIES)))
+    print("SPP diagnostic runtime build: ok (%d tests, %d boundaries)" % (len(TESTS) + 5, len(BOUNDARIES)))
 
 
 if __name__ == "__main__":

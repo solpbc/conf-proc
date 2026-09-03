@@ -138,7 +138,7 @@ int main(int argc, char **argv) {
     void *model = MAP_FAILED;
     size_t model_size = 0;
     if (infer_mode) {
-        model_fd = open(SPP_DIAG_MODEL_PATH, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        model_fd = open(SPP_DIAG_MODEL_PATH, O_RDONLY | O_CLOEXEC);
         if (model_fd < 0) {
             fprintf(stderr, "spp-diag-cuda-driver: model open failed\n");
             return 3;
