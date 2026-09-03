@@ -94,6 +94,17 @@ int spp_diag_trace_core_runtime_task_exit(
 int spp_diag_trace_core_runtime_exec_attempt(
 	const void *task_token, const char *local_path, size_t path_len,
 	u32 pid, u32 tgid);
+int spp_diag_trace_core_runtime_exec_reserve(
+	const void *task_token, const char *local_path, size_t path_len,
+	u32 pid, u32 tgid, u32 *out_reservation_token);
+int spp_diag_trace_core_runtime_exec_pass(
+	const void *task_token, const char *local_path, size_t path_len,
+	u32 pid, u32 tgid);
+int spp_diag_trace_core_runtime_exec_active_operation(
+	const void *task_token, u64 *out_op_ordinal);
+int spp_diag_trace_core_runtime_exec_return(
+	const void *task_token, u32 reservation_token, s64 result);
+int spp_diag_trace_core_runtime_exec_unsupported(const void *task_token);
 int spp_diag_trace_core_runtime_exec_commit(
 	const void *task_token, u32 pid, u32 tgid);
 int spp_diag_trace_core_runtime_file_open_attempt(
@@ -110,6 +121,18 @@ int spp_diag_trace_core_runtime_network_policy_decision(
 	const void *task_token,
 	const struct spp_diag_trace_fact_network_policy *fact,
 	u64 *out_op_ordinal);
+int spp_diag_trace_core_runtime_file_open_active_operation(
+	const void *task_token, u64 *out_op_ordinal);
+int spp_diag_trace_core_runtime_mmap_active_operation(
+	const void *task_token, u64 *out_op_ordinal);
+int spp_diag_trace_core_runtime_mprotect_active_operation(
+	const void *task_token, u64 *out_op_ordinal);
+int spp_diag_trace_core_runtime_connect_active_operation(
+	const void *task_token, u64 *out_op_ordinal);
+int spp_diag_trace_core_runtime_sendmsg_active_operation(
+	const void *task_token, u64 *out_op_ordinal);
+int spp_diag_trace_core_runtime_mapping_unsupported(const void *task_token);
+int spp_diag_trace_core_runtime_network_unsupported(const void *task_token);
 int spp_diag_trace_core_runtime_operation_return(
 	const void *task_token, u64 operation_ordinal, s64 result);
 bool spp_diag_trace_core_runtime_is_sealed(void);

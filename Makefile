@@ -75,6 +75,7 @@ SPP_DIAG_TRACE_CORE_BOOTSTRAP_KUNIT_TEST := test/conf-proc-spp-diag-trace-core-b
 SPP_DIAG_TRACE_CORE_BOOTSTRAP_FIXTURE := test/conf-proc-spp-diag-trace-core-bootstrap-fixture.c
 SPP_DIAG_TRACE_CORE_BOOTSTRAP_ORACLE := test/conf-proc-spp-diag-trace-core-bootstrap-oracle-selftest.py
 SPP_DIAG_TRACE_CORE_RUNTIME_SRC := $(SPP_DIAG_TRACE_CORE_DIR)/runtime_state.c $(SPP_DIAG_TRACE_CORE_DIR)/runtime_fs.c
+SPP_DIAG_TRACE_CORE_ADAPTER_SRC := $(SPP_DIAG_TRACE_CORE_DIR)/adapter.c
 SPP_DIAG_TRACE_CORE_RUNTIME_TEST := test/conf-proc-spp-diag-trace-core-runtime-selftest.c
 SPP_DIAG_TRACE_CORE_RUNTIME_LIFECYCLE_TEST := test/conf-proc-spp-diag-trace-core-runtime-lifecycle-selftest.c
 SPP_DIAG_TRACE_CORE_RUNTIME_FS_TEST := test/conf-proc-spp-diag-trace-core-runtime-fs-selftest.c
@@ -85,8 +86,22 @@ SPP_DIAG_TRACE_CORE_RUNTIME_AC2_FIXTURE := test/conf-proc-spp-diag-trace-core-ru
 SPP_DIAG_TRACE_CORE_RUNTIME_AC2_ORACLE := test/conf-proc-spp-diag-trace-core-runtime-ac2-oracle-selftest.py
 SPP_DIAG_TRACE_CORE_RUNTIME_AC2_APPRAISER := test/conf-proc-spp-diag-trace-core-runtime-ac2-appraiser-check.py
 SPP_DIAG_TRACE_CORE_RUNTIME_KUNIT_TEST := test/conf-proc-spp-diag-trace-core-runtime-kunit-selftest.c
+SPP_DIAG_TRACE_CORE_RUNTIME_ADAPTER_OFF_FIXTURE := test/conf-proc-spp-diag-trace-core-runtime-adapter-off-fixture.c
+SPP_DIAG_TRACE_CORE_RUNTIME_EXEC_LIFECYCLE_FIXTURE := test/conf-proc-spp-diag-trace-core-runtime-exec-lifecycle-fixture.c
+SPP_DIAG_TRACE_CORE_RUNTIME_EXEC_LIFECYCLE_ORACLE := test/conf-proc-spp-diag-trace-core-runtime-exec-lifecycle-oracle-selftest.py
+SPP_DIAG_TRACE_CORE_RUNTIME_INTERVAL_BOUNDARY_FIXTURE := test/conf-proc-spp-diag-trace-core-runtime-interval-boundary-fixture.c
+SPP_DIAG_TRACE_CORE_RUNTIME_INTERVAL_BOUNDARY_ORACLE := test/conf-proc-spp-diag-trace-core-runtime-interval-boundary-oracle-selftest.py
+SPP_DIAG_TRACE_CORE_RUNTIME_FILE_MAPPING_FIXTURE := test/conf-proc-spp-diag-trace-core-runtime-file-mapping-fixture.c
+SPP_DIAG_TRACE_CORE_RUNTIME_FILE_MAPPING_ORACLE := test/conf-proc-spp-diag-trace-core-runtime-file-mapping-oracle-selftest.py
+SPP_DIAG_TRACE_CORE_RUNTIME_NETWORK_FIXTURE := test/conf-proc-spp-diag-trace-core-runtime-network-fixture.c
+SPP_DIAG_TRACE_CORE_RUNTIME_NETWORK_ORACLE := test/conf-proc-spp-diag-trace-core-runtime-network-oracle-selftest.py
+SPP_DIAG_TRACE_CORE_RUNTIME_INTEGRATION_FIXTURE := test/conf-proc-spp-diag-trace-core-runtime-integration-fixture.c
+SPP_DIAG_TRACE_CORE_RUNTIME_INTEGRATION_ORACLE := test/conf-proc-spp-diag-trace-core-runtime-integration-oracle-selftest.py
+SPP_DIAG_TRACE_CORE_RUNTIME_MANIFEST_CI := test/conf-proc-spp-diag-trace-core-runtime-manifest-ci-selftest.py
+SPP_DIAG_TRACE_CORE_ADAPTER_HOST_CFLAGS := $(CORE_CFLAGS) -pthread -DCONFIG_KUNIT=1 -DCONFIG_SECURITY_SPP_DIAG_TRACE_CORE_BOOTSTRAP=1 -DCONFIG_SECURITY_SPP_DIAG_TRACE_CORE_RUNTIME=1 -DSPP_DIAG_TRACE_CORE_HOST_TEST=1 $(SPP_DIAG_TRACE_CORE_HOST_INC)
+SPP_DIAG_TRACE_CORE_ADAPTER_HOST_LIB := $(SPP_DIAG_TRACE_CORE_SRC) $(SPP_DIAG_TRACE_CORE_BOOTSTRAP_SRC) $(SPP_DIAG_TRACE_CORE_RUNTIME_SRC) $(SPP_DIAG_TRACE_CORE_ADAPTER_SRC) $(SPP_DIAG_TRACE_CORE_BOOTSTRAP_HOST_LIB)
 
-.PHONY: install check test ci clean ratls-contract test-spp-diag-trace test-spp-diag-trace-oracle test-spp-diag-trace-chain test-spp-diag-trace-checkpoints test-spp-diag-trace-semantics test-spp-diag-trace-sanitized test-spp-diag-ima-replay test-spp-diag-attest-fixture test-spp-diag-attest test-spp-diag-trace-core test-spp-diag-trace-core-oracle test-spp-diag-trace-core-race test-spp-diag-trace-core-sanitized test-spp-diag-trace-core-materialize test-spp-diag-trace-core-handoff test-spp-diag-trace-core-source-walk test-spp-diag-trace-core-context test-spp-diag-trace-core-callgraph test-spp-diag-trace-core-bootstrap test-spp-diag-trace-core-bootstrap-sanitized test-spp-diag-trace-core-bootstrap-source-walk test-spp-diag-trace-core-bootstrap-kunit test-spp-diag-trace-core-bootstrap-callgraph test-spp-diag-trace-core-runtime test-spp-diag-trace-core-runtime-caps test-spp-diag-trace-core-runtime-sanitized test-spp-diag-trace-core-runtime-source-walk test-spp-diag-trace-core-runtime-kunit test-spp-diag-trace-core-runtime-callgraph
+.PHONY: install check test ci clean ratls-contract test-spp-diag-trace test-spp-diag-trace-oracle test-spp-diag-trace-chain test-spp-diag-trace-checkpoints test-spp-diag-trace-semantics test-spp-diag-trace-sanitized test-spp-diag-ima-replay test-spp-diag-attest-fixture test-spp-diag-attest test-spp-diag-trace-core test-spp-diag-trace-core-oracle test-spp-diag-trace-core-race test-spp-diag-trace-core-sanitized test-spp-diag-trace-core-materialize test-spp-diag-trace-core-handoff test-spp-diag-trace-core-source-walk test-spp-diag-trace-core-context test-spp-diag-trace-core-callgraph test-spp-diag-trace-core-bootstrap test-spp-diag-trace-core-bootstrap-sanitized test-spp-diag-trace-core-bootstrap-source-walk test-spp-diag-trace-core-bootstrap-kunit test-spp-diag-trace-core-bootstrap-callgraph test-spp-diag-trace-core-runtime test-spp-diag-trace-core-runtime-caps test-spp-diag-trace-core-runtime-sanitized test-spp-diag-trace-core-runtime-source-walk test-spp-diag-trace-core-runtime-kunit test-spp-diag-trace-core-runtime-callgraph test-spp-diag-trace-core-runtime-exact-sites test-spp-diag-trace-core-runtime-exec-lifecycle test-spp-diag-trace-core-runtime-interval-boundary test-spp-diag-trace-core-runtime-file-mapping test-spp-diag-trace-core-runtime-network test-spp-diag-trace-core-runtime-integration test-spp-diag-trace-core-runtime-manifest-ci
 
 install:
 	python3 -m venv .venv
@@ -402,15 +417,56 @@ test-spp-diag-trace-core-runtime-callgraph:
 	mkdir -p build
 	$(CC) $(CORE_CFLAGS) -O0 -DCONFIG_SECURITY_SPP_DIAG_TRACE_CORE_BOOTSTRAP=1 $(SPP_DIAG_TRACE_CORE_HOST_INC) -r $(SPP_DIAG_TRACE_CORE_BOOTSTRAP_SRC) -o build/spp-diag-trace-core-bootstrap-callgraph.o
 	$(CC) $(CORE_CFLAGS) -O0 -DCONFIG_SECURITY_SPP_DIAG_TRACE_CORE_BOOTSTRAP=1 -DCONFIG_SECURITY_SPP_DIAG_TRACE_CORE_RUNTIME=1 $(SPP_DIAG_TRACE_CORE_HOST_INC) -r $(SPP_DIAG_TRACE_CORE_SRC) $(SPP_DIAG_TRACE_CORE_RUNTIME_SRC) -o build/spp-diag-trace-core-runtime-callgraph.o
+	$(CC) $(CORE_CFLAGS) -O0 -DCONFIG_SECURITY_SPP_DIAG_TRACE_CORE_BOOTSTRAP=1 -DCONFIG_SECURITY_SPP_DIAG_TRACE_CORE_RUNTIME=1 -DSPP_DIAG_TRACE_CORE_HOST_TEST=1 $(SPP_DIAG_TRACE_CORE_HOST_INC) -c $(SPP_DIAG_TRACE_CORE_ADAPTER_SRC) -o build/spp-diag-trace-core-adapter-callgraph.o
 	$(CC) $(CORE_CFLAGS) -O0 $(SPP_DIAG_TRACE_CORE_HOST_INC) -c $(SPP_DIAG_TRACE_CORE_SRC) -o build/spp-diag-trace-core-callgraph.o
 	$(CC) $(CORE_CFLAGS) -O0 -c -DHIDE_VMALLOC $(SPP_DIAG_TRACE_CORE_CALLGRAPH_NEG) -o build/spp-diag-trace-core-callgraph-neg-vmalloc.o
 	$(CC) $(CORE_CFLAGS) -O0 -c -DHIDE_SLEEP $(SPP_DIAG_TRACE_CORE_CALLGRAPH_NEG) -o build/spp-diag-trace-core-callgraph-neg-sleep.o
 	$(CC) $(CORE_CFLAGS) -O0 -c -DHIDE_MUTEX $(SPP_DIAG_TRACE_CORE_CALLGRAPH_NEG) -o build/spp-diag-trace-core-callgraph-neg-mutex.o
 	$(CC) $(CORE_CFLAGS) -O0 -c -DHIDE_ALT_LOCK $(SPP_DIAG_TRACE_CORE_CALLGRAPH_NEG) -o build/spp-diag-trace-core-callgraph-neg-alt-lock.o
-	$(PYTHON) $(SPP_DIAG_TRACE_CORE_CALLGRAPH) build/spp-diag-trace-core-callgraph.o build/spp-diag-trace-core-callgraph-neg-vmalloc.o build/spp-diag-trace-core-callgraph-neg-sleep.o build/spp-diag-trace-core-callgraph-neg-mutex.o build/spp-diag-trace-core-callgraph-neg-alt-lock.o build/spp-diag-trace-core-bootstrap-callgraph.o build/spp-diag-trace-core-runtime-callgraph.o
-	rm -f build/spp-diag-trace-core-bootstrap-callgraph.o build/spp-diag-trace-core-runtime-callgraph.o build/spp-diag-trace-core-callgraph.o build/spp-diag-trace-core-callgraph-neg-vmalloc.o build/spp-diag-trace-core-callgraph-neg-sleep.o build/spp-diag-trace-core-callgraph-neg-mutex.o build/spp-diag-trace-core-callgraph-neg-alt-lock.o
+	$(PYTHON) $(SPP_DIAG_TRACE_CORE_CALLGRAPH) build/spp-diag-trace-core-callgraph.o build/spp-diag-trace-core-callgraph-neg-vmalloc.o build/spp-diag-trace-core-callgraph-neg-sleep.o build/spp-diag-trace-core-callgraph-neg-mutex.o build/spp-diag-trace-core-callgraph-neg-alt-lock.o build/spp-diag-trace-core-bootstrap-callgraph.o build/spp-diag-trace-core-runtime-callgraph.o build/spp-diag-trace-core-adapter-callgraph.o
+	rm -f build/spp-diag-trace-core-bootstrap-callgraph.o build/spp-diag-trace-core-runtime-callgraph.o build/spp-diag-trace-core-adapter-callgraph.o build/spp-diag-trace-core-callgraph.o build/spp-diag-trace-core-callgraph-neg-vmalloc.o build/spp-diag-trace-core-callgraph-neg-sleep.o build/spp-diag-trace-core-callgraph-neg-mutex.o build/spp-diag-trace-core-callgraph-neg-alt-lock.o
 
-ci: check test test-spp-diag-trace test-spp-diag-trace-oracle test-spp-diag-trace-chain test-spp-diag-trace-checkpoints test-spp-diag-trace-semantics test-spp-diag-ima-replay test-spp-diag-attest test-spp-diag-trace-sanitized test-spp-diag-trace-core test-spp-diag-trace-core-oracle test-spp-diag-trace-core-race test-spp-diag-trace-core-materialize test-spp-diag-trace-core-handoff test-spp-diag-trace-core-source-walk test-spp-diag-trace-core-sanitized test-spp-diag-trace-core-context test-spp-diag-trace-core-callgraph test-spp-diag-trace-core-bootstrap test-spp-diag-trace-core-bootstrap-sanitized test-spp-diag-trace-core-bootstrap-source-walk test-spp-diag-trace-core-bootstrap-kunit test-spp-diag-trace-core-bootstrap-callgraph test-spp-diag-trace-core-runtime test-spp-diag-trace-core-runtime-caps test-spp-diag-trace-core-runtime-sanitized test-spp-diag-trace-core-runtime-source-walk test-spp-diag-trace-core-runtime-kunit test-spp-diag-trace-core-runtime-callgraph
+test-spp-diag-trace-core-runtime-exact-sites:
+	mkdir -p build
+	$(PYTHON) $(SPP_DIAG_TRACE_CORE_SOURCE_WALK)
+	$(CC) $(CORE_CFLAGS) -DCONFIG_SECURITY_SPP_DIAG_TRACE_CORE_BOOTSTRAP=1 $(SPP_DIAG_TRACE_CORE_HOST_INC) -c $(SPP_DIAG_TRACE_CORE_RUNTIME_ADAPTER_OFF_FIXTURE) -o build/spp-diag-trace-core-runtime-adapter-off.o
+	! nm -u build/spp-diag-trace-core-runtime-adapter-off.o | grep -q 'spp_diag_trace_adapter_'
+	rm -f build/spp-diag-trace-core-runtime-adapter-off.o
+
+test-spp-diag-trace-core-runtime-exec-lifecycle:
+	mkdir -p build
+	$(CC) $(SPP_DIAG_TRACE_CORE_ADAPTER_HOST_CFLAGS) $(SPP_DIAG_TRACE_CORE_ADAPTER_HOST_LIB) $(SPP_DIAG_TRACE_CORE_RUNTIME_EXEC_LIFECYCLE_FIXTURE) -o build/spp-diag-trace-core-runtime-exec-lifecycle-fixture
+	$(PYTHON) $(SPP_DIAG_TRACE_CORE_RUNTIME_EXEC_LIFECYCLE_ORACLE) build/spp-diag-trace-core-runtime-exec-lifecycle-fixture
+	rm -f build/spp-diag-trace-core-runtime-exec-lifecycle-fixture
+
+test-spp-diag-trace-core-runtime-interval-boundary:
+	mkdir -p build
+	$(CC) $(SPP_DIAG_TRACE_CORE_ADAPTER_HOST_CFLAGS) $(SPP_DIAG_TRACE_CORE_ADAPTER_HOST_LIB) $(SPP_DIAG_TRACE_CORE_RUNTIME_INTERVAL_BOUNDARY_FIXTURE) -o build/spp-diag-trace-core-runtime-interval-boundary-fixture
+	$(PYTHON) $(SPP_DIAG_TRACE_CORE_RUNTIME_INTERVAL_BOUNDARY_ORACLE) build/spp-diag-trace-core-runtime-interval-boundary-fixture
+	rm -f build/spp-diag-trace-core-runtime-interval-boundary-fixture
+
+test-spp-diag-trace-core-runtime-file-mapping:
+	mkdir -p build
+	$(CC) $(SPP_DIAG_TRACE_CORE_ADAPTER_HOST_CFLAGS) $(SPP_DIAG_TRACE_CORE_ADAPTER_HOST_LIB) $(SPP_DIAG_TRACE_CORE_RUNTIME_FILE_MAPPING_FIXTURE) -o build/spp-diag-trace-core-runtime-file-mapping-fixture
+	$(PYTHON) $(SPP_DIAG_TRACE_CORE_RUNTIME_FILE_MAPPING_ORACLE) build/spp-diag-trace-core-runtime-file-mapping-fixture
+	rm -f build/spp-diag-trace-core-runtime-file-mapping-fixture
+
+test-spp-diag-trace-core-runtime-network:
+	mkdir -p build
+	$(CC) $(SPP_DIAG_TRACE_CORE_ADAPTER_HOST_CFLAGS) $(SPP_DIAG_TRACE_CORE_ADAPTER_HOST_LIB) $(SPP_DIAG_TRACE_CORE_RUNTIME_NETWORK_FIXTURE) -o build/spp-diag-trace-core-runtime-network-fixture
+	$(PYTHON) $(SPP_DIAG_TRACE_CORE_RUNTIME_NETWORK_ORACLE) build/spp-diag-trace-core-runtime-network-fixture
+	rm -f build/spp-diag-trace-core-runtime-network-fixture
+
+test-spp-diag-trace-core-runtime-integration:
+	mkdir -p build
+	$(CC) $(SPP_DIAG_TRACE_CORE_ADAPTER_HOST_CFLAGS) $(SPP_DIAG_TRACE_CORE_ADAPTER_HOST_LIB) $(SPP_DIAG_TRACE_CORE_RUNTIME_INTEGRATION_FIXTURE) -o build/spp-diag-trace-core-runtime-integration-fixture
+	$(PYTHON) $(SPP_DIAG_TRACE_CORE_RUNTIME_INTEGRATION_ORACLE) build/spp-diag-trace-core-runtime-integration-fixture
+	rm -f build/spp-diag-trace-core-runtime-integration-fixture
+
+test-spp-diag-trace-core-runtime-manifest-ci:
+	$(PYTHON) $(SPP_DIAG_TRACE_CORE_RUNTIME_MANIFEST_CI)
+
+ci: check test test-spp-diag-trace test-spp-diag-trace-oracle test-spp-diag-trace-chain test-spp-diag-trace-checkpoints test-spp-diag-trace-semantics test-spp-diag-ima-replay test-spp-diag-attest test-spp-diag-trace-sanitized test-spp-diag-trace-core test-spp-diag-trace-core-oracle test-spp-diag-trace-core-race test-spp-diag-trace-core-materialize test-spp-diag-trace-core-handoff test-spp-diag-trace-core-source-walk test-spp-diag-trace-core-sanitized test-spp-diag-trace-core-context test-spp-diag-trace-core-callgraph test-spp-diag-trace-core-bootstrap test-spp-diag-trace-core-bootstrap-sanitized test-spp-diag-trace-core-bootstrap-source-walk test-spp-diag-trace-core-bootstrap-kunit test-spp-diag-trace-core-bootstrap-callgraph test-spp-diag-trace-core-runtime test-spp-diag-trace-core-runtime-caps test-spp-diag-trace-core-runtime-sanitized test-spp-diag-trace-core-runtime-source-walk test-spp-diag-trace-core-runtime-kunit test-spp-diag-trace-core-runtime-callgraph test-spp-diag-trace-core-runtime-exact-sites test-spp-diag-trace-core-runtime-exec-lifecycle test-spp-diag-trace-core-runtime-interval-boundary test-spp-diag-trace-core-runtime-file-mapping test-spp-diag-trace-core-runtime-network test-spp-diag-trace-core-runtime-integration test-spp-diag-trace-core-runtime-manifest-ci
 	rm -rf build
 
 ratls-contract:

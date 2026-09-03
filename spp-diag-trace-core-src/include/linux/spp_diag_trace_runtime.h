@@ -99,6 +99,17 @@ int spp_diag_trace_runtime_task_created(const void *parent_token,
 int spp_diag_trace_runtime_task_exit(const void *task_token, int exit_code);
 int spp_diag_trace_runtime_exec_attempt(const void *task_token,
 					const struct spp_diag_trace_fact_exec_attempt *fact);
+int spp_diag_trace_runtime_exec_reserve(const void *task_token,
+					const struct spp_diag_trace_fact_exec_attempt *fact,
+					u32 *out_reservation_token);
+int spp_diag_trace_runtime_exec_pass(
+	const void *task_token,
+	const struct spp_diag_trace_fact_exec_attempt *fact);
+int spp_diag_trace_runtime_exec_active_operation(const void *task_token,
+						 u64 *out_op_ordinal);
+int spp_diag_trace_runtime_exec_return(const void *task_token,
+					 u32 reservation_token, s64 result);
+int spp_diag_trace_runtime_exec_unsupported(const void *task_token);
 int spp_diag_trace_runtime_exec_commit(const void *task_token,
 				       const struct spp_diag_trace_fact_exec_commit *fact);
 int spp_diag_trace_runtime_file_open_attempt(const void *task_token,
@@ -113,6 +124,18 @@ int spp_diag_trace_runtime_mapping_policy_decision(const void *task_token,
 int spp_diag_trace_runtime_network_policy_decision(const void *task_token,
 						   const struct spp_diag_trace_fact_network_policy *fact,
 						   u64 *out_op_ordinal);
+int spp_diag_trace_runtime_file_open_active_operation(const void *task_token,
+						      u64 *out_op_ordinal);
+int spp_diag_trace_runtime_mmap_active_operation(const void *task_token,
+						 u64 *out_op_ordinal);
+int spp_diag_trace_runtime_mprotect_active_operation(const void *task_token,
+						     u64 *out_op_ordinal);
+int spp_diag_trace_runtime_connect_active_operation(const void *task_token,
+						    u64 *out_op_ordinal);
+int spp_diag_trace_runtime_sendmsg_active_operation(const void *task_token,
+						    u64 *out_op_ordinal);
+int spp_diag_trace_runtime_mapping_unsupported(const void *task_token);
+int spp_diag_trace_runtime_network_unsupported(const void *task_token);
 int spp_diag_trace_runtime_operation_return(const void *task_token,
 					    u64 operation_ordinal, s64 result);
 #else
@@ -131,6 +154,22 @@ static inline int spp_diag_trace_runtime_task_exit(const void *task_token, int e
 static inline int spp_diag_trace_runtime_exec_attempt(const void *task_token,
 						      const struct spp_diag_trace_fact_exec_attempt *fact)
 { (void)task_token; (void)fact; return 0; }
+static inline int spp_diag_trace_runtime_exec_reserve(const void *task_token,
+						      const struct spp_diag_trace_fact_exec_attempt *fact,
+						      u32 *out_reservation_token)
+{ (void)task_token; (void)fact; (void)out_reservation_token; return 0; }
+static inline int spp_diag_trace_runtime_exec_pass(
+	const void *task_token,
+	const struct spp_diag_trace_fact_exec_attempt *fact)
+{ (void)task_token; (void)fact; return 0; }
+static inline int spp_diag_trace_runtime_exec_active_operation(const void *task_token,
+							       u64 *out_op_ordinal)
+{ (void)task_token; (void)out_op_ordinal; return 0; }
+static inline int spp_diag_trace_runtime_exec_return(const void *task_token,
+						     u32 reservation_token, s64 result)
+{ (void)task_token; (void)reservation_token; (void)result; return 0; }
+static inline int spp_diag_trace_runtime_exec_unsupported(const void *task_token)
+{ (void)task_token; return 0; }
 static inline int spp_diag_trace_runtime_exec_commit(const void *task_token,
 						     const struct spp_diag_trace_fact_exec_commit *fact)
 { (void)task_token; (void)fact; return 0; }
@@ -150,6 +189,25 @@ static inline int spp_diag_trace_runtime_network_policy_decision(const void *tas
 								 const struct spp_diag_trace_fact_network_policy *fact,
 								 u64 *out_op_ordinal)
 { (void)task_token; (void)fact; (void)out_op_ordinal; return 0; }
+static inline int spp_diag_trace_runtime_file_open_active_operation(const void *task_token,
+								    u64 *out_op_ordinal)
+{ (void)task_token; (void)out_op_ordinal; return 0; }
+static inline int spp_diag_trace_runtime_mmap_active_operation(const void *task_token,
+							       u64 *out_op_ordinal)
+{ (void)task_token; (void)out_op_ordinal; return 0; }
+static inline int spp_diag_trace_runtime_mprotect_active_operation(const void *task_token,
+								   u64 *out_op_ordinal)
+{ (void)task_token; (void)out_op_ordinal; return 0; }
+static inline int spp_diag_trace_runtime_connect_active_operation(const void *task_token,
+								  u64 *out_op_ordinal)
+{ (void)task_token; (void)out_op_ordinal; return 0; }
+static inline int spp_diag_trace_runtime_sendmsg_active_operation(const void *task_token,
+								  u64 *out_op_ordinal)
+{ (void)task_token; (void)out_op_ordinal; return 0; }
+static inline int spp_diag_trace_runtime_mapping_unsupported(const void *task_token)
+{ (void)task_token; return 0; }
+static inline int spp_diag_trace_runtime_network_unsupported(const void *task_token)
+{ (void)task_token; return 0; }
 static inline int spp_diag_trace_runtime_operation_return(const void *task_token,
 							  u64 operation_ordinal, s64 result)
 { (void)task_token; (void)operation_ordinal; (void)result; return 0; }

@@ -31,6 +31,8 @@ CREATE_DESTINATIONS: Final = (
     "security/spp_diag_trace_core/runtime_state.c", "security/spp_diag_trace_core/runtime_fs.c",
     "security/spp_diag_trace_core/runtime_kunit.c",
     "include/linux/spp_diag_trace_runtime.h",
+    "include/linux/spp_diag_trace_adapter.h",
+    "security/spp_diag_trace_core/adapter.c",
 )
 REPLACE_MAKEFILE_LINE: Final = "obj-$(CONFIG_SECURITY_SPP_DIAG_TRACE_CORE) += spp_diag_trace_core/"
 REPLACE_KCONFIG_LINE: Final = 'source "security/spp_diag_trace_core/Kconfig"'
@@ -38,6 +40,14 @@ REPLACE_DESTINATIONS: Final = (
     "security/Makefile", "security/Kconfig", "security/security.c", "security/security.c",
     "security/security.c", "security/integrity/ima/ima_init.c",
     "security/integrity/ima/ima_init.c", "init/main.c", "init/main.c",
+    "security/security.c", "security/security.c", "security/security.c",
+    "fs/exec.c", "fs/exec.c", "fs/exec.c", "fs/exec.c", "fs/exec.c",
+    "kernel/fork.c", "kernel/fork.c", "kernel/exit.c", "kernel/exit.c",
+    "fs/open.c", "fs/open.c", "fs/open.c",
+    "mm/util.c", "mm/util.c", "mm/mmap.c", "mm/mmap.c",
+    "ipc/shm.c", "ipc/shm.c", "mm/mprotect.c", "mm/mprotect.c",
+    "net/socket.c", "net/socket.c", "net/socket.c", "net/socket.c",
+    "net/socket.c", "net/socket.c",
 )
 CORE_API_SYMBOLS: Final = (
     "spp_diag_trace_core_init", "spp_diag_trace_core_is_green",
@@ -54,11 +64,23 @@ RUNTIME_API_SYMBOLS: Final = (
     "spp_diag_trace_core_runtime_task_exit",
     "spp_diag_trace_core_runtime_exec_attempt",
     "spp_diag_trace_core_runtime_exec_commit",
+    "spp_diag_trace_core_runtime_exec_reserve",
+    "spp_diag_trace_core_runtime_exec_pass",
+    "spp_diag_trace_core_runtime_exec_active_operation",
+    "spp_diag_trace_core_runtime_exec_return",
+    "spp_diag_trace_core_runtime_exec_unsupported",
     "spp_diag_trace_core_runtime_file_open_attempt",
     "spp_diag_trace_core_runtime_file_policy_decision",
     "spp_diag_trace_core_runtime_mapping_policy_decision",
     "spp_diag_trace_core_runtime_network_policy_decision",
     "spp_diag_trace_core_runtime_operation_return",
+    "spp_diag_trace_core_runtime_file_open_active_operation",
+    "spp_diag_trace_core_runtime_mmap_active_operation",
+    "spp_diag_trace_core_runtime_mprotect_active_operation",
+    "spp_diag_trace_core_runtime_connect_active_operation",
+    "spp_diag_trace_core_runtime_sendmsg_active_operation",
+    "spp_diag_trace_core_runtime_mapping_unsupported",
+    "spp_diag_trace_core_runtime_network_unsupported",
     "spp_diag_trace_core_runtime_handle_command",
     "spp_diag_trace_core_runtime_stream_read",
     "spp_diag_trace_core_runtime_is_sealed",
@@ -202,8 +224,8 @@ def parse_core_manifest(data: bytes) -> CoreManifest:
         if entry.get("placement") == "eof-append":
             _require(set(entry) == _EOF_REPLACE_KEYS, CP_SPP_DIAG_TRACE_CORE_SCHEMA, "eof-append REPLACE has unexpected fields")
             anchor, insertion = entry["anchor_line"], ""
-        elif entry.get("placement") == "anchor-insert":
-            _require(set(entry) == _ANCHOR_REPLACE_KEYS, CP_SPP_DIAG_TRACE_CORE_SCHEMA, "anchor-insert REPLACE has unexpected fields")
+        elif entry.get("placement") in ("anchor-insert", "anchor-replace"):
+            _require(set(entry) == _ANCHOR_REPLACE_KEYS, CP_SPP_DIAG_TRACE_CORE_SCHEMA, "anchor REPLACE has unexpected fields")
             anchor, insertion = entry["anchor"], entry["insertion"]
         else:
             _require(False, CP_SPP_DIAG_TRACE_CORE_SCHEMA, "unsupported REPLACE placement")
@@ -212,9 +234,10 @@ def parse_core_manifest(data: bytes) -> CoreManifest:
         _require(all(type(entry[key]) is int and 0 <= entry[key] <= 0o7777 for key in ("preimage_mode", "postimage_mode")), CP_SPP_DIAG_TRACE_CORE_TYPE, "REPLACE mode is invalid")
         replaces.append(ReplaceTarget(entry["destination"], anchor, entry["placement"], insertion, entry["preimage_mode"], entry["preimage_sha256"], entry["postimage_mode"], entry["postimage_sha256"]))
 
-    _require(tuple(item.destination for item in creates) == CREATE_DESTINATIONS, CP_SPP_DIAG_TRACE_CORE_SCHEMA, "CREATE targets must be the closed ordered K1/K2 source set")
-    _require(tuple(item.destination for item in replaces) == REPLACE_DESTINATIONS, CP_SPP_DIAG_TRACE_CORE_SCHEMA, "REPLACE targets must be the ordered K1/K2 integration set")
+    _require(tuple(item.destination for item in creates) == CREATE_DESTINATIONS, CP_SPP_DIAG_TRACE_CORE_SCHEMA, "CREATE targets must be the closed ordered K1-K4 source set")
+    _require(tuple(item.destination for item in replaces) == REPLACE_DESTINATIONS, CP_SPP_DIAG_TRACE_CORE_SCHEMA, "REPLACE targets must be the ordered K1-K4 integration set")
     _require(replaces[0].placement == replaces[1].placement == "eof-append", CP_SPP_DIAG_TRACE_CORE_SCHEMA, "top-level security entries must remain eof-append")
     _require(replaces[0].anchor_line == REPLACE_MAKEFILE_LINE and replaces[1].anchor_line == REPLACE_KCONFIG_LINE, CP_SPP_DIAG_TRACE_CORE_SCHEMA, "top-level security anchors mismatch")
-    _require(all(item.placement == "anchor-insert" for item in replaces[2:]), CP_SPP_DIAG_TRACE_CORE_SCHEMA, "kernel callers must use anchor-insert")
+    _require(all(item.placement == "anchor-insert" for item in replaces[2:9]), CP_SPP_DIAG_TRACE_CORE_SCHEMA, "K1-K3 kernel callers must use anchor-insert")
+    _require(all(item.placement in ("anchor-insert", "anchor-replace") for item in replaces[9:]), CP_SPP_DIAG_TRACE_CORE_SCHEMA, "K4 kernel callers must use an anchor placement")
     return CoreManifest(raw["expected_base_commit"], tuple(raw["core_api_symbols"]), authority, tuple(fragments), inputs, tuple(creates), tuple(replaces), raw)

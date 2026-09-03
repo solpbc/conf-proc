@@ -18,7 +18,7 @@ config SECURITY_SPP_DIAG_TRACE_CORE_BOOTSTRAP
 
 config SECURITY_SPP_DIAG_TRACE_CORE_RUNTIME
 	bool "SPP diagnostic trace core runtime producer"
-	depends on SECURITY_SPP_DIAG_TRACE_CORE_BOOTSTRAP && SECURITYFS
+	depends on SECURITY_SPP_DIAG_TRACE_CORE_BOOTSTRAP && SECURITYFS && SECURITY_NETWORK
 	default n
 	help
 	  Runtime provenance producer for the SPP diagnostic trace core.

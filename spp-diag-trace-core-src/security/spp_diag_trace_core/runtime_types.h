@@ -84,7 +84,7 @@ struct spp_diag_trace_operation_record {
 	u16 phase;
 	u16 state;
 	u16 flags;
-	u32 reserved;
+	u32 reservation_token;
 };
 
 #endif

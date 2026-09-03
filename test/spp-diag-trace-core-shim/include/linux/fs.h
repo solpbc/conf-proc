@@ -26,13 +26,50 @@
 struct inode {
 	umode_t i_mode;
 	void *i_private;
+	u64 i_ino;
+	loff_t i_size;
+	struct super_block *i_sb;
+};
+
+struct super_block {
+	unsigned long s_magic;
+	dev_t s_dev;
+};
+
+struct vfsmount;
+
+struct path {
+	struct vfsmount *mnt;
 };
 
 struct file {
 	loff_t f_pos;
 	void *private_data;
 	const struct file_operations *f_op;
+	struct inode *f_inode;
+	unsigned long f_flags;
+	unsigned int f_mode;
+	struct path f_path;
+	u32 memfd_seals;
 };
+
+#define FMODE_EXEC 0x0020u
+
+#define S_IFMT 0170000
+#define S_IFREG 0100000
+#define S_IFDIR 0040000
+#define S_ISREG(mode) (((mode) & S_IFMT) == S_IFREG)
+#define S_ISDIR(mode) (((mode) & S_IFMT) == S_IFDIR)
+
+static inline struct inode *file_inode(const struct file *file)
+{
+	return file ? file->f_inode : NULL;
+}
+
+static inline loff_t i_size_read(const struct inode *inode)
+{
+	return inode ? inode->i_size : 0;
+}
 
 struct file_operations {
 	ssize_t (*read)(struct file *, char __user *, size_t, loff_t *);

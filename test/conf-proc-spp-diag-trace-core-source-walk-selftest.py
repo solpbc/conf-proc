@@ -269,7 +269,11 @@ def bootstrap_wiring_check(root: Path = ROOT) -> list[str]:
         ("init/main.c", "#include <linux/spp_diag_trace_bootstrap.h>\n"),
         ("init/main.c", "spp_diag_trace_bootstrap_release();"),
     )
-    found = tuple((item["destination"], item["insertion"]) for item in anchors)
+    found = tuple(
+        (item["destination"], item["insertion"])
+        for item in anchors
+        if "spp_diag_trace_bootstrap" in item["insertion"]
+    )
     violations = []
     if len(found) != len(expected) or any(
         destination != expected_destination or needle not in insertion
@@ -339,8 +343,10 @@ def runtime_source_walk_check(root: Path = ROOT) -> list[str]:
         root / "spp-diag-trace-core-src/security/spp_diag_trace_core/runtime_fs.c",
         root / "spp-diag-trace-core-src/security/spp_diag_trace_core/runtime_redirect.h",
         root / "spp-diag-trace-core-src/security/spp_diag_trace_core/runtime_types.h",
+        root / "spp-diag-trace-core-src/security/spp_diag_trace_core/adapter.c",
         root / "spp-diag-trace-core-src/security/spp_diag_trace_core/runtime_kunit.c",
         root / "spp-diag-trace-core-src/include/linux/spp_diag_trace_runtime.h",
+        root / "spp-diag-trace-core-src/include/linux/spp_diag_trace_adapter.h",
     )
     forbidden_lsm = (
         "LSM_HOOK_INIT",
@@ -365,6 +371,64 @@ def runtime_source_walk_check(root: Path = ROOT) -> list[str]:
             if hook_pat in text:
                 violations.append(f"{p.name}: forbidden real LSM hook registration pattern: {hook_pat}")
     return violations
+
+
+# AC1: the K4 adapter calls are deliberately tied to the named source-function
+# replacement, not merely counted somewhere in the destination file.
+EXACT_SITES = (
+    ("security/security.c", "ret = call_int_hook(bprm_check_security", "spp_diag_trace_adapter_exec_pass(", 1),
+    ("security/security.c", "call_void_hook(bprm_committed_creds", "spp_diag_trace_adapter_exec_commit(", 1),
+    ("fs/exec.c", "static int prepare_bprm_creds(", "spp_diag_trace_adapter_exec_return(", 2),
+    ("fs/exec.c", "static int bprm_execve(", "spp_diag_trace_adapter_exec_return(", 2),
+    ("fs/exec.c", "static int do_execveat_common(", "spp_diag_trace_adapter_exec_reserve(", 1),
+    ("fs/exec.c", "static int do_execveat_common(", "spp_diag_trace_adapter_exec_return(", 8),
+    ("fs/exec.c", "int kernel_execve(", "spp_diag_trace_adapter_exec_reserve(", 1),
+    ("fs/exec.c", "int kernel_execve(", "spp_diag_trace_adapter_exec_return(", 7),
+    ("kernel/fork.c", "No more failure paths after this point.", "spp_diag_trace_adapter_task_alloc(", 1),
+    ("kernel/fork.c", "No more failure paths after this point.", "spp_diag_trace_adapter_task_created(", 1),
+    ("kernel/exit.c", "tsk->exit_code = code;", "spp_diag_trace_adapter_task_exit(", 1),
+    ("fs/open.c", "static long do_sys_openat2(", "spp_diag_trace_adapter_file_open_attempt(", 1),
+    ("fs/open.c", "static long do_sys_openat2(", "spp_diag_trace_adapter_file_open_return(", 1),
+    ("fs/open.c", "error = security_file_open(f);", "spp_diag_trace_adapter_file_open_policy(", 1),
+    ("mm/util.c", "unsigned long vm_mmap_pgoff(", "spp_diag_trace_adapter_mapping_policy(", 1),
+    ("mm/util.c", "unsigned long vm_mmap_pgoff(", "spp_diag_trace_adapter_mapping_return(", 2),
+    ("mm/mmap.c", "ret = security_mmap_file(file, prot, flags);", "spp_diag_trace_adapter_mapping_unsupported(", 1),
+    ("ipc/shm.c", "err = security_mmap_file(file, prot, flags);", "spp_diag_trace_adapter_mapping_unsupported(", 1),
+    ("mm/mprotect.c", "static int do_mprotect_pkey(", "spp_diag_trace_adapter_mprotect_policy(", 1),
+    ("mm/mprotect.c", "static int do_mprotect_pkey(", "spp_diag_trace_adapter_mprotect_return(", 1),
+    ("net/socket.c", "static int __sock_sendmsg(", "spp_diag_trace_adapter_sendmsg_policy(", 1),
+    ("net/socket.c", "static int __sock_sendmsg(", "spp_diag_trace_adapter_sendmsg_return(", 1),
+    ("net/socket.c", "int __sys_connect_file(", "spp_diag_trace_adapter_connect_policy(", 1),
+    ("net/socket.c", "int __sys_connect_file(", "spp_diag_trace_adapter_connect_return(", 1),
+    ("net/socket.c", "err = sock_sendmsg_nosec(sock, msg_sys);", "spp_diag_trace_adapter_sendmsg_unsupported(", 1),
+    ("net/socket.c", "int kernel_connect(", "spp_diag_trace_adapter_connect_unsupported(", 1),
+    ("net/socket.c", "int kernel_sendmsg_locked(", "spp_diag_trace_adapter_sendmsg_unsupported(", 1),
+)
+
+
+def exact_site_check(manifest: dict) -> list[str]:
+    violations: list[str] = []
+    targets = [item for item in manifest["targets"] if item.get("kind") == "REPLACE"]
+    for destination, anchor_part, call, expected_count in EXACT_SITES:
+        matching = [
+            item for item in targets
+            if item.get("destination") == destination and anchor_part in item.get("anchor", "")
+        ]
+        count = sum(item.get("insertion", "").count(call) for item in matching)
+        if len(matching) != 1 or count != expected_count:
+            violations.append(
+                f"{destination}:{anchor_part!r}: {call} count={count}, targets={len(matching)}"
+            )
+    return violations
+
+
+def adapter_k3off_check(makefile_text: str) -> list[str]:
+    required = (
+        "SPP_DIAG_TRACE_CORE_RUNTIME_ADAPTER_OFF_FIXTURE",
+        "spp-diag-trace-core-runtime-adapter-off.o",
+        "spp_diag_trace_adapter_",
+    )
+    return [f"missing K3-off adapter identity check: {item}" for item in required if item not in makefile_text]
 
 
 def main() -> int:
@@ -546,6 +610,40 @@ def main() -> int:
         print(f"FAIL runtime-source-walk-check {runtime_violations}")
         return 1
     print("ok   runtime-source-walk-check")
+
+    manifest = json.loads((ROOT / "spp-diag-trace-core-src/manifest.json").read_text(encoding="utf-8"))
+    exact_violations = exact_site_check(manifest)
+    if exact_violations:
+        print(f"FAIL exact-site-check {exact_violations}")
+        return 1
+    print(f"ok   exact-site-check sites={len(EXACT_SITES)}")
+    moved = json.loads(json.dumps(manifest))
+    source = next(item for item in moved["targets"] if item.get("destination") == "security/security.c" and
+                  "ret = call_int_hook(bprm_check_security" in item.get("anchor", ""))
+    neighbor = next(item for item in moved["targets"] if item.get("destination") == "security/security.c" and
+                    "call_void_hook(bprm_committed_creds" in item.get("anchor", ""))
+    source["insertion"] = source["insertion"].replace("spp_diag_trace_adapter_exec_pass(bprm);", "")
+    neighbor["insertion"] += "\tspp_diag_trace_adapter_exec_pass(bprm);\n"
+    if not exact_site_check(moved):
+        print("FAIL exact-site-check did not reject a moved neighbouring-function adapter call")
+        return 1
+    duplicate = json.loads(json.dumps(manifest))
+    duplicate_target = next(item for item in duplicate["targets"] if item.get("destination") == "net/socket.c" and
+                            "static int __sock_sendmsg(" in item.get("anchor", ""))
+    duplicate_target["insertion"] += "\tspp_diag_trace_adapter_sendmsg_policy(sock, msg, 0, 0);\n"
+    if not exact_site_check(duplicate):
+        print("FAIL exact-site-check did not reject a duplicated adapter call")
+        return 1
+    print("ok   exact-site-check-detects-move-and-duplicate")
+
+    adapter_off_violations = adapter_k3off_check(makefile_text)
+    if adapter_off_violations:
+        print(f"FAIL adapter-k3off-check {adapter_off_violations}")
+        return 1
+    if not adapter_k3off_check(makefile_text.replace("spp_diag_trace_adapter_", "spp_diag_trace_removed_", 1)):
+        print("FAIL adapter-k3off-check did not reject a removed adapter symbol check")
+        return 1
+    print("ok   adapter-k3off-check")
 
     return 0
 

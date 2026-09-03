@@ -91,6 +91,25 @@ def _write_fixture_manifest(repo: str, scratch: str) -> str:
     return path
 
 
+def _populate_replace_anchors(repo: str) -> None:
+    """Give the synthetic fixture every non-eof source anchor in the closed manifest."""
+    raw = parse_core_manifest(
+        (ROOT / "spp-diag-trace-core-src" / "manifest.json").read_bytes()
+    ).raw
+
+    for target in raw["targets"]:
+        if target["kind"] != "REPLACE" or target["placement"] == "eof-append":
+            continue
+        path = Path(repo) / target["destination"]
+        anchor = target["anchor"]
+        text = path.read_text(encoding="utf-8") if path.exists() else ""
+        if anchor in text:
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text + ("" if not text or text.endswith("\n") else "\n") + anchor,
+                        encoding="utf-8")
+
+
 def _tree_fingerprint(root: str) -> dict[str, str]:
     records: dict[str, str] = {}
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
@@ -140,8 +159,9 @@ def _make_fixture(scratch: str) -> tuple[str, str, str]:
         encoding="utf-8",
     )
     Path(os.path.join(repo, "README")).write_text("fixture\n", encoding="utf-8")
+    _populate_replace_anchors(repo)
     _git(repo, "init")
-    _git(repo, "add", "security", "init", "README")
+    _git(repo, "add", ".")
     _git(repo, "commit", "-m", "base")
     first = _git(repo, "rev-parse", "--verify", "HEAD").strip()
     Path(os.path.join(repo, "README")).write_text("fixture-second\n", encoding="utf-8")

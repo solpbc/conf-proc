@@ -391,15 +391,18 @@ def _replace_postimage(
         if body and not body.endswith(b"\n"):
             body += b"\n"
         return body + anchor + b"\n"
-    if placement == "anchor-insert":
+    if placement in ("anchor-insert", "anchor-replace"):
         if existing.count(anchor) != 1:
             _fail(
                 CP_SPP_DIAG_TRACE_CORE_PARTIAL_APPLY,
-                "anchor-insert anchor does not occur exactly once",
+                "anchor REPLACE anchor does not occur exactly once",
                 expected="one exact anchor occurrence",
                 observed=str(existing.count(anchor)),
             )
-        offset = existing.index(anchor) + len(anchor)
+        offset = existing.index(anchor)
+        if placement == "anchor-replace":
+            return existing[:offset] + insertion.encode("utf-8") + existing[offset + len(anchor):]
+        offset += len(anchor)
         return existing[:offset] + insertion.encode("utf-8") + existing[offset:]
     _fail(CP_SPP_DIAG_TRACE_CORE_SCHEMA, "unsupported REPLACE placement")
 

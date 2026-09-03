@@ -1579,6 +1579,45 @@ spp_diag_trace_core_runtime_open_op_locked(struct spp_diag_trace_task_record *ta
 	return WIRE_OK;
 }
 
+static int spp_diag_trace_core_runtime_interval_status_locked(void)
+{
+	if (core.runtime_sealed)
+		return SPP_DIAG_TRACE_ERR_INACTIVE;
+	if (core.runtime_sealing)
+		return fail_sticky(WIRE_STATE);
+	if (core.failed)
+		return fail_sticky(core.reason ? core.reason : WIRE_STATE);
+	if (core.runtime_phase < SPP_DIAG_TRACE_PHASE_INIT)
+		return SPP_DIAG_TRACE_ERR_INACTIVE;
+	if (core.runtime_phase > SPP_DIAG_TRACE_PHASE_EVIDENCE_FINALIZE)
+		return fail_sticky(WIRE_STATE);
+	return WIRE_OK;
+}
+
+static int spp_diag_trace_core_runtime_find_active_op_locked(
+	struct spp_diag_trace_task_record *task, u16 kind, bool allow_committed,
+	struct spp_diag_trace_operation_record **out_op)
+{
+	size_t j;
+
+	if (!task || !out_op)
+		return fail_sticky(WIRE_STATE);
+
+	for (j = 0; j < core.runtime_op_cap; j++) {
+		struct spp_diag_trace_operation_record *op = &core.runtime_ops[j];
+
+		if (op->task_ordinal != task->task_ordinal || op->kind != kind)
+			continue;
+		if (op->state == SPP_DIAG_TRACE_RUNTIME_OP_STATE_OPEN ||
+		    (allow_committed &&
+		     op->state == SPP_DIAG_TRACE_RUNTIME_OP_STATE_COMMITTED)) {
+			*out_op = op;
+			return WIRE_OK;
+		}
+	}
+	return fail_sticky(WIRE_STATE);
+}
+
 #if IS_ENABLED(CONFIG_KUNIT)
 int spp_diag_trace_core_runtime_open_operation(u64 task_ordinal, u16 kind, u64 *out_op_ordinal)
 {
@@ -1730,23 +1769,9 @@ int spp_diag_trace_core_runtime_task_alloc_attempt(
 	u8 payload[8];
 
 	spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
-	if (core.runtime_sealed) {
-		err = SPP_DIAG_TRACE_ERR_INACTIVE;
+	err = spp_diag_trace_core_runtime_interval_status_locked();
+	if (err)
 		goto out;
-	}
-	if (core.runtime_sealing) {
-		err = fail_sticky(WIRE_STATE);
-		goto out;
-	}
-	if (core.failed) {
-		err = fail_sticky(core.reason ? core.reason : WIRE_STATE);
-		goto out;
-	}
-	if (core.runtime_phase < SPP_DIAG_TRACE_PHASE_INIT ||
-	    core.runtime_phase > SPP_DIAG_TRACE_PHASE_EVIDENCE_FINALIZE) {
-		err = fail_sticky(WIRE_STATE);
-		goto out;
-	}
 
 	parent = spp_diag_trace_core_runtime_find_task_locked(parent_token);
 	if (!parent) {
@@ -1811,23 +1836,9 @@ int spp_diag_trace_core_runtime_task_created(
 	u8 payload[16];
 
 	spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
-	if (core.runtime_sealed) {
-		err = SPP_DIAG_TRACE_ERR_INACTIVE;
+	err = spp_diag_trace_core_runtime_interval_status_locked();
+	if (err)
 		goto out;
-	}
-	if (core.runtime_sealing) {
-		err = fail_sticky(WIRE_STATE);
-		goto out;
-	}
-	if (core.failed) {
-		err = fail_sticky(core.reason ? core.reason : WIRE_STATE);
-		goto out;
-	}
-	if (core.runtime_phase < SPP_DIAG_TRACE_PHASE_INIT ||
-	    core.runtime_phase > SPP_DIAG_TRACE_PHASE_EVIDENCE_FINALIZE) {
-		err = fail_sticky(WIRE_STATE);
-		goto out;
-	}
 
 	parent = spp_diag_trace_core_runtime_find_task_locked(parent_token);
 	if (!parent) {
@@ -1910,23 +1921,9 @@ int spp_diag_trace_core_runtime_task_exit(
 	u8 payload[8];
 
 	spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
-	if (core.runtime_sealed) {
-		err = SPP_DIAG_TRACE_ERR_INACTIVE;
+	err = spp_diag_trace_core_runtime_interval_status_locked();
+	if (err)
 		goto out;
-	}
-	if (core.runtime_sealing) {
-		err = fail_sticky(WIRE_STATE);
-		goto out;
-	}
-	if (core.failed) {
-		err = fail_sticky(core.reason ? core.reason : WIRE_STATE);
-		goto out;
-	}
-	if (core.runtime_phase < SPP_DIAG_TRACE_PHASE_INIT ||
-	    core.runtime_phase > SPP_DIAG_TRACE_PHASE_EVIDENCE_FINALIZE) {
-		err = fail_sticky(WIRE_STATE);
-		goto out;
-	}
 
 	task = spp_diag_trace_core_runtime_find_task_locked(task_token);
 	if (!task) {
@@ -1960,36 +1957,47 @@ out:
 	return err;
 }
 
+static int spp_diag_trace_core_runtime_append_exec_attempt_locked(
+	struct spp_diag_trace_task_record *task,
+	struct spp_diag_trace_operation_record *op, const char *local_path,
+	size_t path_len, u32 pid, u32 tgid)
+{
+	int field_err;
+	u8 payload[16 + SPP_DIAG_TRACE_MAX_PATH_BYTES];
+
+	op->pass_count++;
+	op->last_sequence = core.sequence + 1;
+
+	store_u32be(payload, op->pass_count);
+	store_u16be(payload + 4, (u16)path_len);
+	store_u16be(payload + 6, 0);
+	store_u32be(payload + 8, pid);
+	store_u32be(payload + 12, tgid);
+	memcpy(payload + 16, local_path, path_len);
+
+	field_err = check_append_fields(
+		SPP_DIAG_TRACE_EVENT_EXEC_ATTEMPT, 0,
+		task->task_ordinal, 0, op->operation_ordinal,
+		core.runtime_phase, payload, 16 + path_len);
+	return append_locked(SPP_DIAG_TRACE_EVENT_EXEC_ATTEMPT, 0,
+			     task->task_ordinal, 0, op->operation_ordinal,
+			     core.runtime_phase, payload, 16 + path_len, field_err);
+}
+
 int spp_diag_trace_core_runtime_exec_attempt(
 	const void *task_token, const char *local_path, size_t path_len,
 	u32 pid, u32 tgid)
 {
 	unsigned long flags;
 	int err = WIRE_OK;
-	int field_err;
 	struct spp_diag_trace_task_record *task;
 	struct spp_diag_trace_operation_record *op = NULL;
 	size_t j;
-	u8 payload[16 + SPP_DIAG_TRACE_MAX_PATH_BYTES];
 
 	spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
-	if (core.runtime_sealed) {
-		err = SPP_DIAG_TRACE_ERR_INACTIVE;
+	err = spp_diag_trace_core_runtime_interval_status_locked();
+	if (err)
 		goto out;
-	}
-	if (core.runtime_sealing) {
-		err = fail_sticky(WIRE_STATE);
-		goto out;
-	}
-	if (core.failed) {
-		err = fail_sticky(core.reason ? core.reason : WIRE_STATE);
-		goto out;
-	}
-	if (core.runtime_phase < SPP_DIAG_TRACE_PHASE_INIT ||
-	    core.runtime_phase > SPP_DIAG_TRACE_PHASE_EVIDENCE_FINALIZE) {
-		err = fail_sticky(WIRE_STATE);
-		goto out;
-	}
 
 	task = spp_diag_trace_core_runtime_find_task_locked(task_token);
 	if (!task) {
@@ -2012,31 +2020,172 @@ int spp_diag_trace_core_runtime_exec_attempt(
 			task, SPP_DIAG_TRACE_RUNTIME_OP_EXEC, &op);
 		if (err)
 			goto out;
-		op->pass_count = 1;
 		op->first_sequence = core.sequence + 1;
-	} else {
-		if (op->state != SPP_DIAG_TRACE_RUNTIME_OP_STATE_OPEN) {
-			err = fail_sticky(WIRE_STATE);
-			goto out;
-		}
-		op->pass_count++;
+	} else if (op->state != SPP_DIAG_TRACE_RUNTIME_OP_STATE_OPEN) {
+		err = fail_sticky(WIRE_STATE);
+		goto out;
 	}
-	op->last_sequence = core.sequence + 1;
 
-	store_u32be(payload, op->pass_count);
-	store_u16be(payload + 4, (u16)path_len);
-	store_u16be(payload + 6, 0);
-	store_u32be(payload + 8, pid);
-	store_u32be(payload + 12, tgid);
-	memcpy(payload + 16, local_path, path_len);
+	err = spp_diag_trace_core_runtime_append_exec_attempt_locked(
+		task, op, local_path, path_len, pid, tgid);
 
-	field_err = check_append_fields(
-		SPP_DIAG_TRACE_EVENT_EXEC_ATTEMPT, 0,
-		task->task_ordinal, 0, op->operation_ordinal,
-		core.runtime_phase, payload, 16 + path_len);
-	err = append_locked(SPP_DIAG_TRACE_EVENT_EXEC_ATTEMPT, 0,
-			    task->task_ordinal, 0, op->operation_ordinal,
-			    core.runtime_phase, payload, 16 + path_len, field_err);
+out:
+	spin_unlock_irqrestore(&spp_diag_trace_core_lock, flags);
+	return err;
+}
+
+int spp_diag_trace_core_runtime_exec_reserve(
+	const void *task_token, const char *local_path, size_t path_len,
+	u32 pid, u32 tgid, u32 *out_reservation_token)
+{
+	unsigned long flags;
+	int err = WIRE_OK;
+	struct spp_diag_trace_task_record *task;
+	struct spp_diag_trace_operation_record *op;
+
+	spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
+	err = spp_diag_trace_core_runtime_interval_status_locked();
+	if (err)
+		goto out;
+	if (!out_reservation_token) {
+		err = fail_sticky(WIRE_NULL);
+		goto out;
+	}
+
+	task = spp_diag_trace_core_runtime_find_task_locked(task_token);
+	if (!task) {
+		err = fail_sticky(WIRE_STATE);
+		goto out;
+	}
+	err = spp_diag_trace_core_runtime_open_op_locked(
+		task, SPP_DIAG_TRACE_RUNTIME_OP_EXEC, &op);
+	if (err)
+		goto out;
+	if (op->operation_ordinal > (u64)~0u) {
+		err = fail_sticky(WIRE_CAP);
+		goto out;
+	}
+	op->reservation_token = (u32)op->operation_ordinal;
+	op->first_sequence = core.sequence + 1;
+	err = spp_diag_trace_core_runtime_append_exec_attempt_locked(
+		task, op, local_path, path_len, pid, tgid);
+	if (!err)
+		*out_reservation_token = op->reservation_token;
+
+out:
+	spin_unlock_irqrestore(&spp_diag_trace_core_lock, flags);
+	return err;
+}
+
+int spp_diag_trace_core_runtime_exec_pass(
+	const void *task_token, const char *local_path, size_t path_len,
+	u32 pid, u32 tgid)
+{
+	unsigned long flags;
+	int err = WIRE_OK;
+	struct spp_diag_trace_task_record *task;
+	struct spp_diag_trace_operation_record *op;
+
+	spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
+	err = spp_diag_trace_core_runtime_interval_status_locked();
+	if (err)
+		goto out;
+	task = spp_diag_trace_core_runtime_find_task_locked(task_token);
+	if (!task) {
+		err = fail_sticky(WIRE_STATE);
+		goto out;
+	}
+	err = spp_diag_trace_core_runtime_find_active_op_locked(
+		task, SPP_DIAG_TRACE_RUNTIME_OP_EXEC, false, &op);
+	if (err)
+		goto out;
+	err = spp_diag_trace_core_runtime_append_exec_attempt_locked(
+		task, op, local_path, path_len, pid, tgid);
+
+out:
+	spin_unlock_irqrestore(&spp_diag_trace_core_lock, flags);
+	return err;
+}
+
+int spp_diag_trace_core_runtime_exec_active_operation(
+	const void *task_token, u64 *out_op_ordinal)
+{
+	unsigned long flags;
+	int err = WIRE_OK;
+	struct spp_diag_trace_task_record *task;
+	struct spp_diag_trace_operation_record *op;
+
+	spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
+	err = spp_diag_trace_core_runtime_interval_status_locked();
+	if (err)
+		goto out;
+	if (!out_op_ordinal) {
+		err = fail_sticky(WIRE_NULL);
+		goto out;
+	}
+	task = spp_diag_trace_core_runtime_find_task_locked(task_token);
+	if (!task) {
+		err = fail_sticky(WIRE_STATE);
+		goto out;
+	}
+	err = spp_diag_trace_core_runtime_find_active_op_locked(
+		task, SPP_DIAG_TRACE_RUNTIME_OP_EXEC, true, &op);
+	if (!err)
+		*out_op_ordinal = op->operation_ordinal;
+
+out:
+	spin_unlock_irqrestore(&spp_diag_trace_core_lock, flags);
+	return err;
+}
+
+int spp_diag_trace_core_runtime_exec_return(
+	const void *task_token, u32 reservation_token, s64 result)
+{
+	unsigned long flags;
+	int err = WIRE_OK;
+	u64 op_ordinal = 0;
+	struct spp_diag_trace_task_record *task;
+	struct spp_diag_trace_operation_record *op;
+
+	spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
+	err = spp_diag_trace_core_runtime_interval_status_locked();
+	if (err)
+		goto out;
+	task = spp_diag_trace_core_runtime_find_task_locked(task_token);
+	if (!task) {
+		err = fail_sticky(WIRE_STATE);
+		goto out;
+	}
+	err = spp_diag_trace_core_runtime_find_active_op_locked(
+		task, SPP_DIAG_TRACE_RUNTIME_OP_EXEC, true, &op);
+	if (err)
+		goto out;
+	if (reservation_token == 0 || op->reservation_token != reservation_token) {
+		err = fail_sticky(WIRE_STATE);
+		goto out;
+	}
+	op_ordinal = op->operation_ordinal;
+
+out:
+	spin_unlock_irqrestore(&spp_diag_trace_core_lock, flags);
+	if (err)
+		return err;
+	return spp_diag_trace_core_runtime_operation_return(task_token, op_ordinal,
+							      result);
+}
+
+int spp_diag_trace_core_runtime_exec_unsupported(const void *task_token)
+{
+	unsigned long flags;
+	int err = WIRE_OK;
+
+	spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
+	err = spp_diag_trace_core_runtime_interval_status_locked();
+	if (err)
+		goto out;
+	(void)task_token;
+	fail_sticky(WIRE_STATE);
+	err = -EIO;
 
 out:
 	spin_unlock_irqrestore(&spp_diag_trace_core_lock, flags);
@@ -2055,23 +2204,9 @@ int spp_diag_trace_core_runtime_exec_commit(
 	u8 payload[16];
 
 	spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
-	if (core.runtime_sealed) {
-		err = SPP_DIAG_TRACE_ERR_INACTIVE;
+	err = spp_diag_trace_core_runtime_interval_status_locked();
+	if (err)
 		goto out;
-	}
-	if (core.runtime_sealing) {
-		err = fail_sticky(WIRE_STATE);
-		goto out;
-	}
-	if (core.failed) {
-		err = fail_sticky(core.reason ? core.reason : WIRE_STATE);
-		goto out;
-	}
-	if (core.runtime_phase < SPP_DIAG_TRACE_PHASE_INIT ||
-	    core.runtime_phase > SPP_DIAG_TRACE_PHASE_EVIDENCE_FINALIZE) {
-		err = fail_sticky(WIRE_STATE);
-		goto out;
-	}
 
 	task = spp_diag_trace_core_runtime_find_task_locked(task_token);
 	if (!task) {
@@ -2127,23 +2262,9 @@ int spp_diag_trace_core_runtime_file_open_attempt(
 	u8 payload[16 + SPP_DIAG_TRACE_MAX_PATH_BYTES];
 
 	spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
-	if (core.runtime_sealed) {
-		err = SPP_DIAG_TRACE_ERR_INACTIVE;
+	err = spp_diag_trace_core_runtime_interval_status_locked();
+	if (err)
 		goto out;
-	}
-	if (core.runtime_sealing) {
-		err = fail_sticky(WIRE_STATE);
-		goto out;
-	}
-	if (core.failed) {
-		err = fail_sticky(core.reason ? core.reason : WIRE_STATE);
-		goto out;
-	}
-	if (core.runtime_phase < SPP_DIAG_TRACE_PHASE_INIT ||
-	    core.runtime_phase > SPP_DIAG_TRACE_PHASE_EVIDENCE_FINALIZE) {
-		err = fail_sticky(WIRE_STATE);
-		goto out;
-	}
 
 	task = spp_diag_trace_core_runtime_find_task_locked(task_token);
 	if (!task) {
@@ -2200,23 +2321,9 @@ int spp_diag_trace_core_runtime_file_policy_decision(
 	u8 payload[48];
 
 	spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
-	if (core.runtime_sealed) {
-		err = SPP_DIAG_TRACE_ERR_INACTIVE;
+	err = spp_diag_trace_core_runtime_interval_status_locked();
+	if (err)
 		goto out;
-	}
-	if (core.runtime_sealing) {
-		err = fail_sticky(WIRE_STATE);
-		goto out;
-	}
-	if (core.failed) {
-		err = fail_sticky(core.reason ? core.reason : WIRE_STATE);
-		goto out;
-	}
-	if (core.runtime_phase < SPP_DIAG_TRACE_PHASE_INIT ||
-	    core.runtime_phase > SPP_DIAG_TRACE_PHASE_EVIDENCE_FINALIZE) {
-		err = fail_sticky(WIRE_STATE);
-		goto out;
-	}
 
 	task = spp_diag_trace_core_runtime_find_task_locked(task_token);
 	if (!task) {
@@ -2305,23 +2412,9 @@ int spp_diag_trace_core_runtime_mapping_policy_decision(
 	u8 payload[64];
 
 	spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
-	if (core.runtime_sealed) {
-		err = SPP_DIAG_TRACE_ERR_INACTIVE;
+	err = spp_diag_trace_core_runtime_interval_status_locked();
+	if (err)
 		goto out;
-	}
-	if (core.runtime_sealing) {
-		err = fail_sticky(WIRE_STATE);
-		goto out;
-	}
-	if (core.failed) {
-		err = fail_sticky(core.reason ? core.reason : WIRE_STATE);
-		goto out;
-	}
-	if (core.runtime_phase < SPP_DIAG_TRACE_PHASE_INIT ||
-	    core.runtime_phase > SPP_DIAG_TRACE_PHASE_EVIDENCE_FINALIZE) {
-		err = fail_sticky(WIRE_STATE);
-		goto out;
-	}
 
 	task = spp_diag_trace_core_runtime_find_task_locked(task_token);
 	if (!task) {
@@ -2423,23 +2516,9 @@ int spp_diag_trace_core_runtime_network_policy_decision(
 	u8 payload[64];
 
 	spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
-	if (core.runtime_sealed) {
-		err = SPP_DIAG_TRACE_ERR_INACTIVE;
+	err = spp_diag_trace_core_runtime_interval_status_locked();
+	if (err)
 		goto out;
-	}
-	if (core.runtime_sealing) {
-		err = fail_sticky(WIRE_STATE);
-		goto out;
-	}
-	if (core.failed) {
-		err = fail_sticky(core.reason ? core.reason : WIRE_STATE);
-		goto out;
-	}
-	if (core.runtime_phase < SPP_DIAG_TRACE_PHASE_INIT ||
-	    core.runtime_phase > SPP_DIAG_TRACE_PHASE_EVIDENCE_FINALIZE) {
-		err = fail_sticky(WIRE_STATE);
-		goto out;
-	}
 
 	task = spp_diag_trace_core_runtime_find_task_locked(task_token);
 	if (!task) {
@@ -2509,6 +2588,106 @@ out:
 	return err;
 }
 
+static int spp_diag_trace_core_runtime_active_operation(
+	const void *task_token, u16 kind, bool allow_committed,
+	u64 *out_op_ordinal)
+{
+	unsigned long flags;
+	int err = WIRE_OK;
+	struct spp_diag_trace_task_record *task;
+	struct spp_diag_trace_operation_record *op;
+
+	spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
+	err = spp_diag_trace_core_runtime_interval_status_locked();
+	if (err)
+		goto out;
+	if (!out_op_ordinal) {
+		err = fail_sticky(WIRE_NULL);
+		goto out;
+	}
+	task = spp_diag_trace_core_runtime_find_task_locked(task_token);
+	if (!task) {
+		err = fail_sticky(WIRE_STATE);
+		goto out;
+	}
+	err = spp_diag_trace_core_runtime_find_active_op_locked(task, kind,
+								allow_committed, &op);
+	if (!err)
+		*out_op_ordinal = op->operation_ordinal;
+
+out:
+	spin_unlock_irqrestore(&spp_diag_trace_core_lock, flags);
+	return err;
+}
+
+int spp_diag_trace_core_runtime_file_open_active_operation(
+	const void *task_token, u64 *out_op_ordinal)
+{
+	return spp_diag_trace_core_runtime_active_operation(
+		task_token, SPP_DIAG_TRACE_RUNTIME_OP_FILE_OPEN, false,
+		out_op_ordinal);
+}
+
+int spp_diag_trace_core_runtime_mmap_active_operation(
+	const void *task_token, u64 *out_op_ordinal)
+{
+	return spp_diag_trace_core_runtime_active_operation(
+		task_token, SPP_DIAG_TRACE_RUNTIME_OP_MMAP, false,
+		out_op_ordinal);
+}
+
+int spp_diag_trace_core_runtime_mprotect_active_operation(
+	const void *task_token, u64 *out_op_ordinal)
+{
+	return spp_diag_trace_core_runtime_active_operation(
+		task_token, SPP_DIAG_TRACE_RUNTIME_OP_MPROTECT, false,
+		out_op_ordinal);
+}
+
+int spp_diag_trace_core_runtime_connect_active_operation(
+	const void *task_token, u64 *out_op_ordinal)
+{
+	return spp_diag_trace_core_runtime_active_operation(
+		task_token, SPP_DIAG_TRACE_RUNTIME_OP_CONNECT, false,
+		out_op_ordinal);
+}
+
+int spp_diag_trace_core_runtime_sendmsg_active_operation(
+	const void *task_token, u64 *out_op_ordinal)
+{
+	return spp_diag_trace_core_runtime_active_operation(
+		task_token, SPP_DIAG_TRACE_RUNTIME_OP_SENDMSG, false,
+		out_op_ordinal);
+}
+
+static int spp_diag_trace_core_runtime_unsupported(const void *task_token)
+{
+	unsigned long flags;
+	int err = WIRE_OK;
+
+	spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
+	err = spp_diag_trace_core_runtime_interval_status_locked();
+	if (err)
+		goto out;
+	(void)task_token;
+	fail_sticky(WIRE_STATE);
+	err = -EIO;
+
+out:
+	spin_unlock_irqrestore(&spp_diag_trace_core_lock, flags);
+	return err;
+}
+
+int spp_diag_trace_core_runtime_mapping_unsupported(const void *task_token)
+{
+	return spp_diag_trace_core_runtime_unsupported(task_token);
+}
+
+int spp_diag_trace_core_runtime_network_unsupported(const void *task_token)
+{
+	return spp_diag_trace_core_runtime_unsupported(task_token);
+}
+
 int spp_diag_trace_core_runtime_operation_return(
 	const void *task_token, u64 operation_ordinal, s64 result)
 {
@@ -2522,23 +2701,9 @@ int spp_diag_trace_core_runtime_operation_return(
 	u8 payload[16];
 
 	spin_lock_irqsave(&spp_diag_trace_core_lock, flags);
-	if (core.runtime_sealed) {
-		err = SPP_DIAG_TRACE_ERR_INACTIVE;
+	err = spp_diag_trace_core_runtime_interval_status_locked();
+	if (err)
 		goto out;
-	}
-	if (core.runtime_sealing) {
-		err = fail_sticky(WIRE_STATE);
-		goto out;
-	}
-	if (core.failed) {
-		err = fail_sticky(core.reason ? core.reason : WIRE_STATE);
-		goto out;
-	}
-	if (core.runtime_phase < SPP_DIAG_TRACE_PHASE_INIT ||
-	    core.runtime_phase > SPP_DIAG_TRACE_PHASE_EVIDENCE_FINALIZE) {
-		err = fail_sticky(WIRE_STATE);
-		goto out;
-	}
 
 	task = spp_diag_trace_core_runtime_find_task_locked(task_token);
 	if (!task) {
