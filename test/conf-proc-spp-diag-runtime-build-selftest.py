@@ -201,6 +201,50 @@ TESTS = (
 )
 
 
+def test_single_file_transaction_finalize_command_line() -> None:
+    with tempfile.TemporaryDirectory() as work_dir:
+        output_path = os.path.join(work_dir, "cmdline.txt")
+        result = build.finalize_command_line(console="ttyS0", output_path=output_path)
+        with open(output_path, "rb") as handle:
+            on_disk = handle.read()
+        assert on_disk == result.bytes
+        assert hashlib.sha256(on_disk).hexdigest() == result.sha256
+        mode = stat.S_IMODE(os.stat(output_path).st_mode)
+        assert not (mode & 0o222), "published file must not be writable"
+
+        # rebuilding with identical inputs to a fresh path is byte-identical
+        output_path2 = os.path.join(work_dir, "cmdline2.txt")
+        result2 = build.finalize_command_line(console="ttyS0", output_path=output_path2)
+        assert result2.bytes == result.bytes
+
+        # no-replace atomic visibility: publishing again to the SAME path rejects,
+        # and the original file's bytes remain untouched
+        try:
+            build.finalize_command_line(console="ttyS0", output_path=output_path)
+            raise AssertionError("expected no-replace rejection")
+        except build.SppDiagRuntimeBuildError as exc:
+            assert exc.reason_code == build.CP_SPP_DIAG_RUNTIME_BUILD_DESTINATION_EXISTS
+        with open(output_path, "rb") as handle:
+            assert handle.read() == on_disk
+
+        # ordinary error propagation: a bad console value never touches the filesystem
+        missing_path = os.path.join(work_dir, "never-created.txt")
+        try:
+            build.finalize_command_line(console="bad value with spaces", output_path=missing_path)
+            raise AssertionError("expected console validation rejection")
+        except build.SppDiagRuntimeBuildError as exc:
+            assert exc.reason_code == build.CP_SPP_DIAG_RUNTIME_BUILD_CONSOLE
+        assert not os.path.lexists(missing_path)
+
+        # a destination whose parent doesn't exist propagates an ordinary OSError,
+        # not a silently-swallowed failure
+        try:
+            build.finalize_command_line(console="ttyS0", output_path="/nonexistent-parent-dir/x.txt")
+            raise AssertionError("expected OSError")
+        except OSError:
+            pass
+
+
 def test_bind_image_happy_path_and_seams() -> None:
     import importlib.util
 
@@ -250,10 +294,32 @@ def test_bind_image_happy_path_and_seams() -> None:
     except build.SppDiagRuntimeBuildError as exc:
         assert exc.reason_code == build.CP_SPP_DIAG_RUNTIME_BUILD_IMAGE_MEMBERS
 
+    with tempfile.TemporaryDirectory() as work_dir:
+        output_path = os.path.join(work_dir, "signed-image-manifest.json")
+        written = build.bind_image(
+            diagnostic_efi_bytes=data, input_closure_address=input_closure_address, members=members, output_path=output_path
+        )
+        with open(output_path, "rb") as handle:
+            on_disk = handle.read()
+        assert on_disk == written.manifest_bytes
+        mode = stat.S_IMODE(os.stat(output_path).st_mode)
+        assert not (mode & 0o222)
+        try:
+            build.bind_image(
+                diagnostic_efi_bytes=data, input_closure_address=input_closure_address, members=members, output_path=output_path
+            )
+            raise AssertionError("expected no-replace rejection")
+        except build.SppDiagRuntimeBuildError as exc:
+            assert exc.reason_code == build.CP_SPP_DIAG_RUNTIME_BUILD_DESTINATION_EXISTS
+        with open(output_path, "rb") as handle:
+            assert handle.read() == on_disk
+
 
 def main() -> None:
     test_finalize_command_line()
     print("ok   test_finalize_command_line")
+    test_single_file_transaction_finalize_command_line()
+    print("ok   test_single_file_transaction_finalize_command_line")
     test_bind_image_happy_path_and_seams()
     print("ok   test_bind_image_happy_path_and_seams")
     with tempfile.TemporaryDirectory(dir="/var/tmp") as temporary:
@@ -261,7 +327,7 @@ def main() -> None:
         for test in TESTS[1:]:
             test(root)
             print(f"ok   {test.__name__}")
-    print("SPP diagnostic runtime build: ok (%d tests, %d boundaries)" % (len(TESTS) + 1, len(BOUNDARIES)))
+    print("SPP diagnostic runtime build: ok (%d tests, %d boundaries)" % (len(TESTS) + 2, len(BOUNDARIES)))
 
 
 if __name__ == "__main__":

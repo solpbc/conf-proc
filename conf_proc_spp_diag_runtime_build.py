@@ -93,8 +93,57 @@ class StageRuntimeResult:
     inventory_sha256: str
 
 
-def finalize_command_line(*, console: str, reserved_args: tuple[str, ...] = ()) -> FinalizedCommandLine:
-    """Build the sole supported command-line shape with its mandatory rdinit and ``--`` tokens."""
+def _write_single_file_transactional(data: bytes, destination: str) -> None:
+    """Single-file transactional publish: sibling temp file, fsync, read-only, reopen
+    and re-hash to confirm, then no-replace rename and parent fsync. Mirrors
+    stage_runtime's directory transaction at single-file granularity."""
+
+    if os.path.lexists(destination):
+        _fail(CP_SPP_DIAG_RUNTIME_BUILD_DESTINATION_EXISTS)
+    parent = os.path.dirname(destination)
+    parent_fd = os.open(parent, os.O_RDONLY | _O_DIRECTORY)
+    try:
+        candidate = destination + ".staging." + os.urandom(8).hex()
+        try:
+            descriptor = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY | _O_NOFOLLOW, 0o644)
+        except OSError:
+            _fail(CP_SPP_DIAG_RUNTIME_BUILD_STAGING)
+        try:
+            _write_all(descriptor, data)
+            os.fsync(descriptor)
+            os.fchmod(descriptor, 0o444)
+        except OSError:
+            os.close(descriptor)
+            _cleanup_staging(candidate)
+            _fail(CP_SPP_DIAG_RUNTIME_BUILD_STAGING)
+        os.close(descriptor)
+
+        try:
+            reopened = os.open(candidate, os.O_RDONLY | _O_NOFOLLOW)
+        except OSError:
+            _cleanup_staging(candidate)
+            _fail(CP_SPP_DIAG_RUNTIME_BUILD_REOPEN)
+        try:
+            reread = _read_all(reopened)
+        finally:
+            os.close(reopened)
+        if reread != data:
+            _cleanup_staging(candidate)
+            _fail(CP_SPP_DIAG_RUNTIME_BUILD_REOPEN)
+
+        if os.path.lexists(destination):
+            _cleanup_staging(candidate)
+            _fail(CP_SPP_DIAG_RUNTIME_BUILD_DESTINATION_EXISTS)
+        os.rename(candidate, destination)
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
+
+
+def finalize_command_line(*, console: str, reserved_args: tuple[str, ...] = (), output_path: str | None = None) -> FinalizedCommandLine:
+    """Build the sole supported command-line shape with its mandatory rdinit and ``--``
+    tokens; when output_path is given, publishes it via the single-file transaction
+    (no-replace atomic visibility) and confirms it by reopen/re-hash before returning."""
 
     if not _is_safe_command_token(console):
         _fail(CP_SPP_DIAG_RUNTIME_BUILD_CONSOLE)
@@ -110,6 +159,8 @@ def finalize_command_line(*, console: str, reserved_args: tuple[str, ...] = ()) 
     if reserved_args:
         text += " " + " ".join(reserved_args)
     encoded = text.encode("utf-8")
+    if output_path is not None:
+        _write_single_file_transactional(encoded, output_path)
     return FinalizedCommandLine(text=text, bytes=encoded, sha256=hashlib.sha256(encoded).hexdigest())
 
 
@@ -237,11 +288,14 @@ def bind_image(
     diagnostic_efi_bytes: bytes,
     input_closure_address: str,
     members: dict,
+    output_path: str | None = None,
 ) -> BindImageResult:
     """Bind a captured five-member signed image to its input closure via the shared
     protocol constructor, calling extract_sppdiag_descriptor directly. Rejects any
     attempt to widen the fixed five-member inventory (e.g. smuggling a late-binding
-    record in as a sixth member) and any .sppdiag/closure-address mismatch."""
+    record in as a sixth member) and any .sppdiag/closure-address mismatch. When
+    output_path is given, publishes the manifest bytes via the single-file transaction
+    (no-replace atomic visibility) and confirms it by reopen/re-hash before returning."""
 
     if type(members) is not dict or frozenset(members) != _SIGNED_IMAGE_MEMBER_SET:
         _fail(CP_SPP_DIAG_RUNTIME_BUILD_IMAGE_MEMBERS)
@@ -288,6 +342,8 @@ def bind_image(
             "input_closure_address": input_closure_address,
         }
     )
+    if output_path is not None:
+        _write_single_file_transactional(manifest_bytes, output_path)
     return BindImageResult(image_binding_address=address, manifest_bytes=manifest_bytes, late_binding_record=late_binding_record)
 
 
