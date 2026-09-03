@@ -24,13 +24,33 @@ from conf_proc_json import canonical_dumps  # noqa: E402
 import conf_proc_spp_diag_runtime_build as build  # noqa: E402
 from conf_proc_spp_diag_runtime_build_reasons import (  # noqa: E402
     CP_SPP_DIAG_RUNTIME_BUILD_CLOSURE,
-    CP_SPP_DIAG_RUNTIME_BUILD_CONSOLE,
+    CP_SPP_DIAG_RUNTIME_BUILD_COMMAND_LINE,
     CP_SPP_DIAG_RUNTIME_BUILD_DESTINATION_EXISTS,
     CP_SPP_DIAG_RUNTIME_BUILD_DEST_PATH,
-    CP_SPP_DIAG_RUNTIME_BUILD_RESERVED_ARG,
-    CP_SPP_DIAG_RUNTIME_BUILD_RESERVED_DUPLICATE,
     CP_SPP_DIAG_RUNTIME_BUILD_SOURCE_CONTENT,
     SppDiagRuntimeBuildError,
+)
+
+
+COMMAND_ARGS = {
+    "root_data_partuuid": "11111111-1111-4111-8111-111111111111",
+    "root_hash_partuuid": "22222222-2222-4222-8222-222222222222",
+    "root_hash": "aa" * 32,
+    "challenge": "bb" * 32,
+    "run_identity": "cc" * 32,
+    "control_plan_address": "dd" * 32,
+    "target_profile_id": "spp-r1-production",
+    "binding_partuuid": "33333333-3333-4333-8333-333333333333",
+}
+EXPECTED_COMMAND_LINE = (
+    "ro rdinit=/spp-diag-handoff init=/usr/lib/spp/spp-diag-controller "
+    "root=/dev/mapper/spp-diag-root rootfstype=squashfs ip=off ima_policy=critical_data "
+    "spp_diag.root_data=PARTUUID=11111111-1111-4111-8111-111111111111 "
+    "spp_diag.root_hash=PARTUUID=22222222-2222-4222-8222-222222222222 "
+    f"spp_diag.roothash={'aa' * 32} sol_spp_diag.challenge={'bb' * 32} "
+    f"sol_spp_diag.run={'cc' * 32} sol_spp_diag.control_plan={'dd' * 32} -- "
+    "sol_spp_diag.target_profile=spp-r1-production "
+    "sol_spp_diag.binding_partuuid=33333333-3333-4333-8333-333333333333\n"
 )
 
 
@@ -97,21 +117,27 @@ def _stage(guard: HermeticGuard, specs: tuple[build.StagedFileSpec, ...], destin
 
 
 def test_finalize_command_line() -> None:
-    no_args = build.finalize_command_line(console="ttyS0")
-    assert no_args.text == "console=ttyS0 rdinit=/spp-diag-handoff --"
-    assert no_args.bytes == no_args.text.encode("utf-8")
-    assert no_args.sha256 == _sha256(no_args.bytes)
-    assert no_args.text.count("rdinit=/spp-diag-handoff") == 1
-    assert no_args.text.split().count("--") == 1
-    with_args = build.finalize_command_line(console="ttyS1", reserved_args=("diag=1", "quiet"))
-    assert with_args.text == "console=ttyS1 rdinit=/spp-diag-handoff -- diag=1 quiet"
-    assert with_args.text.count("rdinit=/spp-diag-handoff") == 1
-    assert with_args.text.split().count("--") == 1
-    _expect(CP_SPP_DIAG_RUNTIME_BUILD_RESERVED_DUPLICATE, lambda: build.finalize_command_line(console="ttyS0", reserved_args=("quiet", "quiet")))
-    for console in ("tty S0", "tty\nS0", "tty\x7fS0", "console=ttyS0", "init=/bin/sh", "rdinit=/bad", "tty--S0"):
-        _expect(CP_SPP_DIAG_RUNTIME_BUILD_CONSOLE, lambda console=console: build.finalize_command_line(console=console))
-    for argument in ("bad arg", "bad\targ", "--", "x--y", "console=ttyS0", "init=/bin/sh", "rdinit=/bad"):
-        _expect(CP_SPP_DIAG_RUNTIME_BUILD_RESERVED_ARG, lambda argument=argument: build.finalize_command_line(console="ttyS0", reserved_args=(argument,)))
+    result = build.finalize_command_line(**COMMAND_ARGS)
+    assert result.text == EXPECTED_COMMAND_LINE
+    assert result.bytes == EXPECTED_COMMAND_LINE.encode("ascii")
+    assert result.sha256 == _sha256(result.bytes)
+    assert "console=" not in result.text
+    assert result.text.count("\n") == 1 and result.text.endswith("\n")
+    assert result.text.split().count("--") == 1
+    mutations = (
+        {"root_data_partuuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaA"},
+        {"root_hash_partuuid": COMMAND_ARGS["root_data_partuuid"]},
+        {"root_hash": "AA" * 32},
+        {"challenge": "bb" * 31},
+        {"run_identity": "g0" * 32},
+        {"control_plan_address": "dd" * 32 + "00"},
+        {"target_profile_id": "bad profile"},
+        {"binding_partuuid": "not-a-partuuid"},
+    )
+    for mutation in mutations:
+        arguments = dict(COMMAND_ARGS)
+        arguments.update(mutation)
+        _expect(CP_SPP_DIAG_RUNTIME_BUILD_COMMAND_LINE, lambda arguments=arguments: build.finalize_command_line(**arguments))
 
 
 def test_stage_runtime_determinism(root: Path) -> None:
@@ -204,7 +230,7 @@ TESTS = (
 def test_single_file_transaction_finalize_command_line() -> None:
     with tempfile.TemporaryDirectory() as work_dir:
         output_path = os.path.join(work_dir, "cmdline.txt")
-        result = build.finalize_command_line(console="ttyS0", output_path=output_path)
+        result = build.finalize_command_line(**COMMAND_ARGS, output_path=output_path)
         with open(output_path, "rb") as handle:
             on_disk = handle.read()
         assert on_disk == result.bytes
@@ -214,35 +240,117 @@ def test_single_file_transaction_finalize_command_line() -> None:
 
         # rebuilding with identical inputs to a fresh path is byte-identical
         output_path2 = os.path.join(work_dir, "cmdline2.txt")
-        result2 = build.finalize_command_line(console="ttyS0", output_path=output_path2)
+        result2 = build.finalize_command_line(**COMMAND_ARGS, output_path=output_path2)
         assert result2.bytes == result.bytes
 
         # no-replace atomic visibility: publishing again to the SAME path rejects,
         # and the original file's bytes remain untouched
         try:
-            build.finalize_command_line(console="ttyS0", output_path=output_path)
+            build.finalize_command_line(**COMMAND_ARGS, output_path=output_path)
             raise AssertionError("expected no-replace rejection")
         except build.SppDiagRuntimeBuildError as exc:
             assert exc.reason_code == build.CP_SPP_DIAG_RUNTIME_BUILD_DESTINATION_EXISTS
         with open(output_path, "rb") as handle:
             assert handle.read() == on_disk
 
-        # ordinary error propagation: a bad console value never touches the filesystem
+        # command-line validation fails before touching the filesystem
         missing_path = os.path.join(work_dir, "never-created.txt")
+        bad_arguments = dict(COMMAND_ARGS)
+        bad_arguments["challenge"] = "short"
         try:
-            build.finalize_command_line(console="bad value with spaces", output_path=missing_path)
-            raise AssertionError("expected console validation rejection")
+            build.finalize_command_line(**bad_arguments, output_path=missing_path)
+            raise AssertionError("expected command-line validation rejection")
         except build.SppDiagRuntimeBuildError as exc:
-            assert exc.reason_code == build.CP_SPP_DIAG_RUNTIME_BUILD_CONSOLE
+            assert exc.reason_code == build.CP_SPP_DIAG_RUNTIME_BUILD_COMMAND_LINE
         assert not os.path.lexists(missing_path)
 
         # a destination whose parent doesn't exist propagates an ordinary OSError,
         # not a silently-swallowed failure
         try:
-            build.finalize_command_line(console="ttyS0", output_path="/nonexistent-parent-dir/x.txt")
+            build.finalize_command_line(**COMMAND_ARGS, output_path="/nonexistent-parent-dir/x.txt")
             raise AssertionError("expected OSError")
         except OSError:
             pass
+
+        # A destination created at the atomic publish boundary wins untouched.
+        raced_path = os.path.join(work_dir, "raced.txt")
+        original_rename = build._rename_noreplace
+
+        def racing_rename(source: str, destination: str) -> None:
+            Path(destination).write_bytes(b"other-writer")
+            original_rename(source, destination)
+
+        build._rename_noreplace = racing_rename
+        try:
+            try:
+                build.finalize_command_line(**COMMAND_ARGS, output_path=raced_path)
+                raise AssertionError("expected racing destination rejection")
+            except build.SppDiagRuntimeBuildError as exc:
+                assert exc.reason_code == build.CP_SPP_DIAG_RUNTIME_BUILD_DESTINATION_EXISTS
+        finally:
+            build._rename_noreplace = original_rename
+        assert Path(raced_path).read_bytes() == b"other-writer"
+        assert not list(Path(work_dir).glob("raced.txt.staging.*"))
+
+        # A publish syscall failure leaves neither destination nor staging debris.
+        failed_path = os.path.join(work_dir, "failed.txt")
+
+        def failing_rename(_source: str, _destination: str) -> None:
+            raise OSError("simulated rename failure")
+
+        build._rename_noreplace = failing_rename
+        try:
+            try:
+                build.finalize_command_line(**COMMAND_ARGS, output_path=failed_path)
+                raise AssertionError("expected publish failure")
+            except build.SppDiagRuntimeBuildError as exc:
+                assert exc.reason_code == build.CP_SPP_DIAG_RUNTIME_BUILD_STAGING
+        finally:
+            build._rename_noreplace = original_rename
+        assert not os.path.lexists(failed_path)
+        assert not list(Path(work_dir).glob("failed.txt.staging.*"))
+
+        # Readback failure removes the private candidate before failing closed.
+        read_failed_path = os.path.join(work_dir, "read-failed.txt")
+        original_read_all = build._read_all
+
+        def failing_read_all(_descriptor: int) -> bytes:
+            raise OSError("simulated readback failure")
+
+        build._read_all = failing_read_all
+        try:
+            try:
+                build.finalize_command_line(**COMMAND_ARGS, output_path=read_failed_path)
+                raise AssertionError("expected readback failure")
+            except build.SppDiagRuntimeBuildError as exc:
+                assert exc.reason_code == build.CP_SPP_DIAG_RUNTIME_BUILD_REOPEN
+        finally:
+            build._read_all = original_read_all
+        assert not os.path.lexists(read_failed_path)
+        assert not list(Path(work_dir).glob("read-failed.txt.staging.*"))
+
+        # Failure to durably publish the directory removes the exact file just renamed.
+        fsync_failed_path = os.path.join(work_dir, "fsync-failed.txt")
+        original_fsync = build.os.fsync
+        fsync_calls = [0]
+
+        def failing_parent_fsync(descriptor: int) -> None:
+            fsync_calls[0] += 1
+            if fsync_calls[0] == 2:
+                raise OSError("simulated parent fsync failure")
+            original_fsync(descriptor)
+
+        build.os.fsync = failing_parent_fsync
+        try:
+            try:
+                build.finalize_command_line(**COMMAND_ARGS, output_path=fsync_failed_path)
+                raise AssertionError("expected parent fsync failure")
+            except build.SppDiagRuntimeBuildError as exc:
+                assert exc.reason_code == build.CP_SPP_DIAG_RUNTIME_BUILD_STAGING
+        finally:
+            build.os.fsync = original_fsync
+        assert not os.path.lexists(fsync_failed_path)
+        assert not list(Path(work_dir).glob("fsync-failed.txt.staging.*"))
 
 
 def test_bind_image_happy_path_and_seams() -> None:
@@ -332,4 +440,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

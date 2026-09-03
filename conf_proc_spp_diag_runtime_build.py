@@ -6,9 +6,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import ctypes
+import errno
 import hashlib
 import os
 import posixpath
+import re
 import shutil
 import stat
 from typing import Final
@@ -21,7 +24,7 @@ from conf_proc_spp_diagbundle_pe import extract_sppdiag_descriptor
 from conf_proc_spp_diagbundle_protocol import image_binding_address as _protocol_image_binding_address
 from conf_proc_spp_diag_runtime_build_reasons import (
     CP_SPP_DIAG_RUNTIME_BUILD_CLOSURE,
-    CP_SPP_DIAG_RUNTIME_BUILD_CONSOLE,
+    CP_SPP_DIAG_RUNTIME_BUILD_COMMAND_LINE,
     CP_SPP_DIAG_RUNTIME_BUILD_DESTINATION_CHANGED,
     CP_SPP_DIAG_RUNTIME_BUILD_DESTINATION_EXISTS,
     CP_SPP_DIAG_RUNTIME_BUILD_DEST_PATH,
@@ -29,8 +32,6 @@ from conf_proc_spp_diag_runtime_build_reasons import (
     CP_SPP_DIAG_RUNTIME_BUILD_IMAGE_SEAM,
     CP_SPP_DIAG_RUNTIME_BUILD_INTERNAL_NODE,
     CP_SPP_DIAG_RUNTIME_BUILD_REOPEN,
-    CP_SPP_DIAG_RUNTIME_BUILD_RESERVED_ARG,
-    CP_SPP_DIAG_RUNTIME_BUILD_RESERVED_DUPLICATE,
     CP_SPP_DIAG_RUNTIME_BUILD_SOURCE_CONTENT,
     CP_SPP_DIAG_RUNTIME_BUILD_SOURCE_DECLARATION,
     CP_SPP_DIAG_RUNTIME_BUILD_SOURCE_STAT,
@@ -39,9 +40,10 @@ from conf_proc_spp_diag_runtime_build_reasons import (
 )
 
 
-_RDINIT: Final = "rdinit=/spp-diag-handoff"
 _INVENTORY_SCHEMA: Final = "sol-spp-diag-runtime-install-inventory/v1"
 _O_DIRECTORY: Final = getattr(os, "O_DIRECTORY", 0)
+_AT_FDCWD: Final = -100
+_RENAME_NOREPLACE: Final = 1
 
 # Mirrors conf_proc_spp_diagbundle.py's fixed signed-image manifest shape (schema,
 # node_kind, layout, member-name set) as literal constants -- not an import, since
@@ -124,41 +126,79 @@ def _write_single_file_transactional(data: bytes, destination: str) -> None:
             _cleanup_staging(candidate)
             _fail(CP_SPP_DIAG_RUNTIME_BUILD_REOPEN)
         try:
+            reopened_stat = os.fstat(reopened)
             reread = _read_all(reopened)
+        except OSError:
+            _cleanup_staging(candidate)
+            _fail(CP_SPP_DIAG_RUNTIME_BUILD_REOPEN)
         finally:
             os.close(reopened)
         if reread != data:
             _cleanup_staging(candidate)
             _fail(CP_SPP_DIAG_RUNTIME_BUILD_REOPEN)
 
-        if os.path.lexists(destination):
+        try:
+            _rename_noreplace(candidate, destination)
+        except FileExistsError:
             _cleanup_staging(candidate)
             _fail(CP_SPP_DIAG_RUNTIME_BUILD_DESTINATION_EXISTS)
-        os.rename(candidate, destination)
-        os.fsync(parent_fd)
+        except OSError:
+            _cleanup_staging(candidate)
+            _fail(CP_SPP_DIAG_RUNTIME_BUILD_STAGING)
+        try:
+            os.fsync(parent_fd)
+        except OSError:
+            try:
+                published = os.lstat(destination)
+                if (published.st_dev, published.st_ino) == (reopened_stat.st_dev, reopened_stat.st_ino):
+                    os.unlink(destination)
+                    try:
+                        os.fsync(parent_fd)
+                    except OSError:
+                        pass
+            except OSError:
+                pass
+            _fail(CP_SPP_DIAG_RUNTIME_BUILD_STAGING)
     finally:
         os.close(parent_fd)
 
 
-def finalize_command_line(*, console: str, reserved_args: tuple[str, ...] = (), output_path: str | None = None) -> FinalizedCommandLine:
-    """Build the sole supported command-line shape with its mandatory rdinit and ``--``
-    tokens; when output_path is given, publishes it via the single-file transaction
-    (no-replace atomic visibility) and confirms it by reopen/re-hash before returning."""
+def finalize_command_line(
+    *,
+    root_data_partuuid: str,
+    root_hash_partuuid: str,
+    root_hash: str,
+    challenge: str,
+    run_identity: str,
+    control_plan_address: str,
+    target_profile_id: str,
+    binding_partuuid: str,
+    output_path: str | None = None,
+) -> FinalizedCommandLine:
+    """Build and optionally publish the one complete diagnostic UKI command line."""
 
-    if not _is_safe_command_token(console):
-        _fail(CP_SPP_DIAG_RUNTIME_BUILD_CONSOLE)
-    if type(reserved_args) is not tuple:
-        _fail(CP_SPP_DIAG_RUNTIME_BUILD_RESERVED_ARG)
-    if any(type(arg) is not str for arg in reserved_args):
-        _fail(CP_SPP_DIAG_RUNTIME_BUILD_RESERVED_ARG)
-    if len(reserved_args) != len(set(reserved_args)):
-        _fail(CP_SPP_DIAG_RUNTIME_BUILD_RESERVED_DUPLICATE)
-    if any(not _is_safe_command_token(arg) for arg in reserved_args):
-        _fail(CP_SPP_DIAG_RUNTIME_BUILD_RESERVED_ARG)
-    text = f"console={console} {_RDINIT} --"
-    if reserved_args:
-        text += " " + " ".join(reserved_args)
-    encoded = text.encode("utf-8")
+    partuuids = (root_data_partuuid, root_hash_partuuid, binding_partuuid)
+    if any(not _is_canonical_partuuid(value) for value in partuuids) or len(set(partuuids)) != len(partuuids):
+        _fail(CP_SPP_DIAG_RUNTIME_BUILD_COMMAND_LINE)
+    digests = (root_hash, challenge, run_identity, control_plan_address)
+    if any(not _is_sha256(value) for value in digests):
+        _fail(CP_SPP_DIAG_RUNTIME_BUILD_COMMAND_LINE)
+    if not _is_profile_id(target_profile_id):
+        _fail(CP_SPP_DIAG_RUNTIME_BUILD_COMMAND_LINE)
+    text = (
+        "ro rdinit=/spp-diag-handoff init=/usr/lib/spp/spp-diag-controller "
+        "root=/dev/mapper/spp-diag-root rootfstype=squashfs ip=off "
+        "ima_policy=critical_data "
+        f"spp_diag.root_data=PARTUUID={root_data_partuuid} "
+        f"spp_diag.root_hash=PARTUUID={root_hash_partuuid} "
+        f"spp_diag.roothash={root_hash} "
+        f"sol_spp_diag.challenge={challenge} "
+        f"sol_spp_diag.run={run_identity} "
+        f"sol_spp_diag.control_plan={control_plan_address} -- "
+        f"sol_spp_diag.target_profile={target_profile_id} "
+        f"sol_spp_diag.binding_partuuid={binding_partuuid}\n"
+    )
+    encoded = text.encode("ascii")
     if output_path is not None:
         _write_single_file_transactional(encoded, output_path)
     return FinalizedCommandLine(text=text, bytes=encoded, sha256=hashlib.sha256(encoded).hexdigest())
@@ -479,6 +519,27 @@ def _write_all(descriptor: int, data: bytes) -> None:
         offset += written
 
 
+def _rename_noreplace(source: str, destination: str) -> None:
+    """Atomically publish one same-filesystem path without replacing a racer."""
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise OSError(errno.ENOSYS, "renameat2 is unavailable")
+    renameat2.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+    renameat2.restype = ctypes.c_int
+    result = renameat2(
+        _AT_FDCWD,
+        os.fsencode(source),
+        _AT_FDCWD,
+        os.fsencode(destination),
+        _RENAME_NOREPLACE,
+    )
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number), destination)
+
+
 def _read_all(descriptor: int) -> bytes:
     chunks: list[bytes] = []
     while True:
@@ -500,7 +561,7 @@ def _inventory_object(row: InstallInventoryRow) -> dict:
 def _cleanup_staging(staging_dir: str | None) -> None:
     if staging_dir is None or not os.path.lexists(staging_dir):
         return
-    if os.path.islink(staging_dir):
+    if os.path.islink(staging_dir) or not os.path.isdir(staging_dir):
         os.unlink(staging_dir)
     else:
         shutil.rmtree(staging_dir)
@@ -511,13 +572,16 @@ def _call_fault_hook(fault_hook: object, boundary: str) -> None:
         fault_hook(boundary)
 
 
-def _is_safe_command_token(value: object) -> bool:
-    if type(value) is not str or not value:
-        return False
-    if any(character.isspace() or ord(character) < 32 or ord(character) == 127 for character in value):
-        return False
-    forbidden = ("--", "console=", "init=", "rdinit=")
-    return not any(token in value for token in forbidden)
+_PARTUUID_PATTERN: Final = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
+_PROFILE_PATTERN: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+
+
+def _is_canonical_partuuid(value: object) -> bool:
+    return type(value) is str and _PARTUUID_PATTERN.fullmatch(value) is not None
+
+
+def _is_profile_id(value: object) -> bool:
+    return type(value) is str and _PROFILE_PATTERN.fullmatch(value) is not None
 
 
 def _is_relative_path(path: object) -> bool:
