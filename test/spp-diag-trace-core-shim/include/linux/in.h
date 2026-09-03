@@ -25,4 +25,17 @@ static inline u16 htons(u16 value)
 	return ntohs(value);
 }
 
+static inline u32 ntohl(u32 value)
+{
+	return ((value & 0x000000ffu) << 24) |
+		((value & 0x0000ff00u) << 8) |
+		((value & 0x00ff0000u) >> 8) |
+		((value & 0xff000000u) >> 24);
+}
+
+static inline u32 htonl(u32 value)
+{
+	return ntohl(value);
+}
+
 #endif

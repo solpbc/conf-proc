@@ -27,7 +27,7 @@ def main() -> int:
     fixture = sys.argv[1]
     oracle = load_families_oracle()
     actual = oracle.decode_blob(subprocess.check_output([fixture]))
-    expected = oracle.expected()
+    expected = oracle.expected(exact_adapter=True)
     if actual != expected:
         print("FAIL adapter integration stream differs from independent K3 vector")
         return 1
@@ -36,7 +36,7 @@ def main() -> int:
         print(f"FAIL adapter integration wrong-token mutation exit={mutation.returncode}, want 42")
         return 1
     digest = hashlib.sha256(actual).hexdigest()
-    if len(actual) != 1822 or digest != "5fa08ba4084f2edffd2558b02ba26fca82528e8d056ce6d4c5181212f157b361":
+    if len(actual) != 1822 or digest != "431c0f7ca3983247b4962b407bf92b1567019d26984b7fdf1b10a8e2e7a65912":
         print(f"FAIL adapter integration vector bytes={len(actual)} sha256={digest}")
         return 1
     print(f"ok   adapter integration 20-frame vector bytes={len(actual)} sha256={digest}")

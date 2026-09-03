@@ -42,17 +42,21 @@ def main() -> int:
         return 1
     attempts = [item for item in items if item[0] == 5]
     paths = [item[6][16:] for item in attempts]
-    if paths.count(b"/sbin/init") != 3 or paths.count(b"/usr/bin/env") != 2:
+    if paths.count(b"/sbin/init") != 2 or paths.count(b"/usr/bin/env") != 1:
         print(f"FAIL frozen-path/pass counts {paths}")
         return 1
     kernel = [item for item in attempts if item[6][16:] == b"/sbin/init"]
-    if [int.from_bytes(item[6][:4], "big") for item in kernel] != [1, 2, 3]:
+    if [int.from_bytes(item[6][:4], "big") for item in kernel] != [1, 2]:
         print("FAIL recursive bprm pass count did not increment")
         return 1
     if sum(1 for item in items if item[0] == 6) != 2 or sum(1 for item in items if item[0] == 0x104) != 3:
         print("FAIL commit/return lifecycle count")
         return 1
-    for mode in ("--wrong-token", "--unsupported"):
+    file_attempt = next(item for item in items if item[0] == 0x100)
+    if kernel[0][4] != file_attempt[4] + 1:
+        print("FAIL exec reservation consumed an operation ordinal before promotion")
+        return 1
+    for mode in ("--wrong-token", "--unsupported", "--pre-bprm-failure"):
         mutation = subprocess.run([fixture, mode], check=False)
         if mutation.returncode != 42:
             print(f"FAIL {mode} mutation exit={mutation.returncode}, want 42")

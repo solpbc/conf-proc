@@ -41,21 +41,29 @@ def main() -> int:
         return 1
     # Mapping payload result is the eighth u32 after four u16 fields.
     results = [int.from_bytes(item[20:24], "big") for item in maps]
-    if results != [0x80000001, 0x80000001]:
-        print(f"FAIL signed kernel results were not wire-normalized: {results!r}")
+    if results != [0xFFFFFFFF, 0xFFFFFFFF]:
+        print(f"FAIL signed kernel results lost their raw two's-complement bits: {results!r}")
         return 1
-    for mode in ("--cloexec", "--untracked-open", "--fmode-probe"):
+    if int.from_bytes(files[0][2:4], "big") != 0x0008:
+        print("FAIL normal open lost NOFOLLOW modifier")
+        return 1
+    for mode in ("--cloexec", "--exec-correlated"):
         raw = subprocess.check_output([fixture, mode])
         expected_files = 1 if mode == "--cloexec" else 0
         if len(payloads(raw, 0x101)) != expected_files:
             print(f"FAIL {mode} emitted unexpected FILE_POLICY_DECISION frames")
             return 1
-    for mode in ("--mapping-red", "--shm-red"):
+        if mode == "--cloexec" and int.from_bytes(payloads(raw, 0x101)[0][2:4], "big") != 0x0018:
+            print("FAIL CLOEXEC modifier was not preserved from the open attempt")
+            return 1
+    for mode in ("--untracked-open", "--fmode-probe", "--exec-untracked",
+                 "--identity-mismatch", "--gate-denial", "--missing-gate",
+                 "--mapping-red", "--shm-red"):
         red = subprocess.run([fixture, mode], check=False)
         if red.returncode != 42:
             print(f"FAIL {mode} did not sticky-red: exit={red.returncode}")
             return 1
-    print("ok   adapter file/mapping facts, normalized CLOEXEC, neutral open probes, and unsupported red paths")
+    print("ok   adapter file/mapping correlation, exact CLOEXEC, exec-open suppression, and red bypasses")
     return 0
 
 

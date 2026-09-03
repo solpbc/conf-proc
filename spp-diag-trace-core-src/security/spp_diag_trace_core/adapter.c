@@ -6,6 +6,7 @@
 #include <linux/in.h>
 #include <linux/in6.h>
 #include <linux/kdev_t.h>
+#include <linux/limits.h>
 #include <linux/memfd.h>
 #include <linux/mm.h>
 #include <linux/mman.h>
@@ -28,15 +29,8 @@
 #include "../../fs/mount.h"
 #endif
 
-static unsigned long spp_diag_trace_adapter_file_flags(unsigned long flags)
-{
-	/* build_open_flags() removes O_CLOEXEC before it reaches file->f_flags. */
-	return flags & ~O_CLOEXEC;
-}
-
 static u16 spp_diag_trace_adapter_file_access(unsigned long flags)
 {
-	flags = spp_diag_trace_adapter_file_flags(flags);
 	switch (flags & O_ACCMODE) {
 	case O_WRONLY:
 		return SPP_DIAG_TRACE_FILE_ACCESS_WRITE;
@@ -52,7 +46,6 @@ static u16 spp_diag_trace_adapter_file_modifiers(unsigned long flags)
 {
 	u16 modifiers = 0;
 
-	flags = spp_diag_trace_adapter_file_flags(flags);
 	if (flags & O_CREAT)
 		modifiers |= SPP_DIAG_TRACE_FILE_MOD_CREATE;
 	if (flags & O_TRUNC)
@@ -63,6 +56,8 @@ static u16 spp_diag_trace_adapter_file_modifiers(unsigned long flags)
 		modifiers |= SPP_DIAG_TRACE_FILE_MOD_NOFOLLOW;
 	if (flags & O_DIRECTORY)
 		modifiers |= SPP_DIAG_TRACE_FILE_MOD_DIRECTORY;
+	if (flags & O_CLOEXEC)
+		modifiers |= SPP_DIAG_TRACE_FILE_MOD_CLOEXEC;
 	return modifiers;
 }
 
@@ -82,6 +77,7 @@ static void spp_diag_trace_adapter_file_metadata(
 	u64 *inode_number, u64 *mount_identity, u64 *observed_size)
 {
 	const struct inode *inode;
+	loff_t size;
 
 	*fs_magic = 0;
 	*dev_major = 0;
@@ -95,8 +91,8 @@ static void spp_diag_trace_adapter_file_metadata(
 	inode = file_inode(file);
 	if (inode) {
 		*inode_number = inode->i_ino;
-		*observed_size = i_size_read(inode) > 0 ?
-			(u64)i_size_read(inode) : 0;
+		size = i_size_read(inode);
+		*observed_size = size > 0 ? (u64)size : 0;
 		if (inode->i_sb) {
 			*fs_magic = (u32)inode->i_sb->s_magic;
 			*dev_major = MAJOR(inode->i_sb->s_dev);
@@ -120,11 +116,8 @@ static u32 spp_diag_trace_adapter_protection(unsigned long prot)
 	return value;
 }
 
-/* The wire result uses its high bit as the diagnostic failure marker. */
 static u32 spp_diag_trace_adapter_result(s64 result)
 {
-	if (result < 0)
-		return 0x80000000u | (u32)(-(result + 1) + 1);
 	return (u32)result;
 }
 
@@ -202,7 +195,7 @@ static u16 spp_diag_trace_adapter_socket_kind(const struct socket *sock)
 static void spp_diag_trace_adapter_network_fact(
 	struct spp_diag_trace_fact_network_policy *fact, const struct socket *sock,
 	const void *address, int address_len, u16 operation, unsigned int flags,
-	s64 result, bool connected, bool unsupported)
+	s64 result)
 {
 	const struct sockaddr *sa = address;
 
@@ -213,8 +206,7 @@ static void spp_diag_trace_adapter_network_fact(
 	fact->socket_kind = spp_diag_trace_adapter_socket_kind(sock);
 	fact->result = spp_diag_trace_adapter_result(result);
 	fact->flags = operation == SPP_DIAG_TRACE_NETWORK_OPERATION_SENDMSG ? flags : 0;
-	fact->source = connected ? SPP_DIAG_TRACE_NETWORK_ENDPOINT_SOURCE_CONNECTED :
-		SPP_DIAG_TRACE_NETWORK_ENDPOINT_SOURCE_EXPLICIT;
+	fact->source = SPP_DIAG_TRACE_NETWORK_ENDPOINT_SOURCE_EXPLICIT;
 	if (sock && sock->sk) {
 		fact->protocol = sock->sk->sk_protocol;
 		fact->cookie = sock_gen_cookie(sock->sk);
@@ -230,12 +222,6 @@ static void spp_diag_trace_adapter_network_fact(
 		fact->family = 0;
 		return;
 	}
-	if (unsupported) {
-		fact->kind = SPP_DIAG_TRACE_NETWORK_ENDPOINT_UNSUPPORTED;
-		fact->family = sa->sa_family;
-		fact->addrlen = min_t(int, address_len, 128);
-		return;
-	}
 	switch (sa->sa_family) {
 	case AF_INET: {
 		const struct sockaddr_in *sin = address;
@@ -248,7 +234,7 @@ static void spp_diag_trace_adapter_network_fact(
 		}
 		fact->kind = SPP_DIAG_TRACE_NETWORK_ENDPOINT_IPV4;
 		fact->family = SPP_DIAG_TRACE_NETWORK_FAMILY_AF_INET;
-		fact->addrlen = connected ? 0 : sizeof(*sin);
+		fact->addrlen = sizeof(*sin);
 		fact->port = ntohs(sin->sin_port);
 		memcpy(fact->address + 12, &sin->sin_addr, sizeof(sin->sin_addr));
 		return;
@@ -264,10 +250,10 @@ static void spp_diag_trace_adapter_network_fact(
 		}
 		fact->kind = SPP_DIAG_TRACE_NETWORK_ENDPOINT_IPV6;
 		fact->family = SPP_DIAG_TRACE_NETWORK_FAMILY_AF_INET6;
-		fact->addrlen = connected ? 0 : sizeof(*sin6);
+		fact->addrlen = sizeof(*sin6);
 		fact->port = ntohs(sin6->sin6_port);
 		fact->scope = sin6->sin6_scope_id;
-		fact->flow = sin6->sin6_flowinfo;
+		fact->flow = ntohl(sin6->sin6_flowinfo);
 		memcpy(fact->address, &sin6->sin6_addr, sizeof(sin6->sin6_addr));
 		return;
 	}
@@ -279,14 +265,32 @@ static void spp_diag_trace_adapter_network_fact(
 	}
 }
 
+static bool spp_diag_trace_adapter_endpoint_valid(const void *address,
+						   int address_len)
+{
+	const struct sockaddr *sa = address;
+
+	if (!address || address_len < (int)sizeof(sa_family_t))
+		return false;
+	if (sa->sa_family == AF_INET)
+		return address_len == sizeof(struct sockaddr_in);
+	if (sa->sa_family == AF_INET6)
+		return address_len == sizeof(struct sockaddr_in6);
+	return false;
+}
+
 static void spp_diag_trace_adapter_return(const void *task_token,
 						  int (*lookup)(const void *, u64 *), s64 result)
 {
+	int err;
 	u64 operation_ordinal = 0;
 
-	if (!lookup(task_token, &operation_ordinal) && operation_ordinal)
+	err = lookup(task_token, &operation_ordinal);
+	if (!err && operation_ordinal)
 		spp_diag_trace_runtime_operation_return(task_token, operation_ordinal,
 								       result);
+	else if (err == -ENOENT)
+		spp_diag_trace_runtime_operation_unsupported(task_token);
 }
 
 void spp_diag_trace_adapter_exec_reserve(const char *path,
@@ -337,17 +341,15 @@ void spp_diag_trace_adapter_exec_unsupported(void)
 }
 
 void spp_diag_trace_adapter_task_alloc(const struct task_struct *parent,
-					       const struct task_struct *child,
 					       u64 clone_flags)
 {
 	struct spp_diag_trace_fact_task_alloc fact = { .clone_flags = clone_flags };
 
-	(void)child;
 	spp_diag_trace_runtime_task_alloc_attempt(parent, &fact);
 }
 
 void spp_diag_trace_adapter_task_created(const struct task_struct *parent,
-					  const struct task_struct *child,
+					 struct task_struct *child,
 					  u64 clone_flags)
 {
 	struct spp_diag_trace_fact_task_created fact = {
@@ -384,35 +386,51 @@ void spp_diag_trace_adapter_file_open_policy(const struct file *file,
 						     s64 result)
 {
 	struct spp_diag_trace_fact_file_policy fact;
+	int err;
 	u64 operation_ordinal = 0;
+	u16 access = 0;
+	u16 modifiers = 0;
 	const struct inode *inode;
 
 	if (!file)
 		return;
-	if ((file->f_mode & FMODE_EXEC) &&
-	    !spp_diag_trace_runtime_exec_active_operation(current, &(u64){ 0 }))
+	if (file->f_flags & __FMODE_EXEC) {
+		err = spp_diag_trace_runtime_exec_active_operation(
+			current, &(u64){ 0 });
+		if (!err)
+			return;
+		if (err == -ENOENT)
+			spp_diag_trace_runtime_operation_unsupported(current);
 		return;
-	if (spp_diag_trace_runtime_file_open_active_operation(current,
-									 &operation_ordinal))
+	}
+	err = spp_diag_trace_runtime_file_open_active_operation(
+		current, &operation_ordinal, &access, &modifiers);
+	if (err) {
+		if (err == -ENOENT)
+			spp_diag_trace_runtime_operation_unsupported(current);
 		return;
+	}
+	if (result) {
+		spp_diag_trace_runtime_operation_unsupported(current);
+		return;
+	}
 	inode = file_inode(file);
 	memset(&fact, 0, sizeof(fact));
-	fact.access = spp_diag_trace_adapter_file_access(file->f_flags);
-	fact.modifiers = spp_diag_trace_adapter_file_modifiers(file->f_flags);
-	fact.decision = result ? SPP_DIAG_TRACE_POLICY_DENY :
-		SPP_DIAG_TRACE_POLICY_ALLOW;
+	fact.access = access;
+	fact.modifiers = modifiers;
+	fact.decision = SPP_DIAG_TRACE_POLICY_ALLOW;
 	fact.object_kind = spp_diag_trace_adapter_file_object_kind(inode);
-	fact.result = (u32)result;
+	fact.result = 0;
 	spp_diag_trace_adapter_file_metadata(file, &fact.fs_magic, &fact.dev_major,
 					     &fact.dev_minor, &fact.inode,
 					     &fact.mount_identity, &fact.observed_size);
-	spp_diag_trace_runtime_file_policy_decision(current, operation_ordinal, &fact);
+	spp_diag_trace_runtime_file_gate_observation(
+		current, file, operation_ordinal, &fact);
 }
 
-void spp_diag_trace_adapter_file_open_return(s64 result)
+void spp_diag_trace_adapter_file_open_return(s64 result, const struct file *file)
 {
-	spp_diag_trace_adapter_return(current,
-					  spp_diag_trace_runtime_file_open_active_operation, result);
+	spp_diag_trace_runtime_file_open_return(current, file, result);
 }
 
 void spp_diag_trace_adapter_mapping_policy(const struct file *file,
@@ -433,10 +451,18 @@ void spp_diag_trace_adapter_mapping_unsupported(void)
 	spp_diag_trace_runtime_mapping_unsupported(current);
 }
 
-void spp_diag_trace_adapter_mapping_return(s64 result)
+void spp_diag_trace_adapter_mapping_return(u64 result_bits)
 {
-	spp_diag_trace_adapter_return(current,
-					  spp_diag_trace_runtime_mmap_active_operation, result);
+	int err;
+	u64 operation_ordinal = 0;
+
+	err = spp_diag_trace_runtime_mmap_active_operation(
+		current, &operation_ordinal);
+	if (!err && operation_ordinal)
+		spp_diag_trace_runtime_operation_return_raw(
+			current, operation_ordinal, result_bits);
+	else if (err == -ENOENT)
+		spp_diag_trace_runtime_operation_unsupported(current);
 }
 
 void spp_diag_trace_adapter_mprotect_policy(const struct vm_area_struct *vma,
@@ -470,7 +496,11 @@ void spp_diag_trace_adapter_connect_policy(const struct socket *sock,
 	struct spp_diag_trace_fact_network_policy fact;
 
 	spp_diag_trace_adapter_network_fact(&fact, sock, address, address_len,
-		SPP_DIAG_TRACE_NETWORK_OPERATION_CONNECT, 0, result, false, false);
+		SPP_DIAG_TRACE_NETWORK_OPERATION_CONNECT, 0, result);
+	if (!spp_diag_trace_adapter_endpoint_valid(address, address_len)) {
+		spp_diag_trace_runtime_network_unsupported(current);
+		return;
+	}
 	spp_diag_trace_runtime_network_policy_decision(current, &fact, &(u64){ 0 });
 	(void)flags;
 }
@@ -497,23 +527,33 @@ void spp_diag_trace_adapter_sendmsg_policy(const struct socket *sock,
 						  unsigned int flags, s64 result)
 {
 	struct spp_diag_trace_fact_network_policy fact;
-	struct sockaddr_storage peer;
 	const void *address = msg ? msg->msg_name : NULL;
 	int address_len = msg ? msg->msg_namelen : 0;
-	bool connected = !address;
-
-	if (connected && sock && sock->ops && sock->ops->getname) {
-		address_len = sizeof(peer);
-		if (!sock->ops->getname((struct socket *)sock,
-					 (struct sockaddr *)&peer, &address_len, 1))
-			address = &peer;
-	}
+	size_t size = msg ? msg_data_left((struct msghdr *)msg) : 0;
 
 	spp_diag_trace_adapter_network_fact(&fact, sock, address, address_len,
-		SPP_DIAG_TRACE_NETWORK_OPERATION_SENDMSG, flags, result, connected, false);
-	if (msg)
-		fact.size = msg_data_left((struct msghdr *)msg);
+		SPP_DIAG_TRACE_NETWORK_OPERATION_SENDMSG, flags, result);
+	if (!spp_diag_trace_adapter_endpoint_valid(address, address_len) ||
+	    size > INT_MAX) {
+		spp_diag_trace_runtime_network_unsupported(current);
+		return;
+	}
+	fact.size = (u32)size;
 	spp_diag_trace_runtime_network_policy_decision(current, &fact, &(u64){ 0 });
+}
+
+int spp_diag_trace_adapter_sendmsg_precheck(const struct socket *sock,
+					   const struct msghdr *msg)
+{
+	size_t size = msg ? msg_data_left((struct msghdr *)msg) : 0;
+	int err;
+
+	(void)sock;
+	if (msg && spp_diag_trace_adapter_endpoint_valid(
+			msg->msg_name, msg->msg_namelen) && size <= INT_MAX)
+		return 0;
+	err = spp_diag_trace_runtime_network_unsupported(current);
+	return err == SPP_DIAG_TRACE_ERR_INACTIVE ? 0 : -EIO;
 }
 
 void spp_diag_trace_adapter_sendmsg_unsupported(const struct socket *sock,

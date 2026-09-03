@@ -370,6 +370,18 @@ def runtime_source_walk_check(root: Path = ROOT) -> list[str]:
         for hook_pat in forbidden_lsm:
             if hook_pat in text:
                 violations.append(f"{p.name}: forbidden real LSM hook registration pattern: {hook_pat}")
+    adapter = (root / "spp-diag-trace-core-src/security/spp_diag_trace_core/adapter.c").read_text(encoding="utf-8")
+    for required in (
+        "file->f_flags & __FMODE_EXEC",
+        "size > INT_MAX",
+        "spp_diag_trace_adapter_sendmsg_precheck",
+        "ntohl(sin6->sin6_flowinfo)",
+    ):
+        if required not in adapter:
+            violations.append(f"adapter.c: missing exact adapter invariant {required}")
+    for forbidden in ("file->f_mode & FMODE_EXEC", "sock->ops->getname"):
+        if forbidden in adapter:
+            violations.append(f"adapter.c: forbidden lossy adapter path {forbidden}")
     return violations
 
 
@@ -378,15 +390,15 @@ def runtime_source_walk_check(root: Path = ROOT) -> list[str]:
 EXACT_SITES = (
     ("security/security.c", "ret = call_int_hook(bprm_check_security", "spp_diag_trace_adapter_exec_pass(", 1),
     ("security/security.c", "call_void_hook(bprm_committed_creds", "spp_diag_trace_adapter_exec_commit(", 1),
-    ("fs/exec.c", "static int prepare_bprm_creds(", "spp_diag_trace_adapter_exec_return(", 2),
-    ("fs/exec.c", "static int bprm_execve(", "spp_diag_trace_adapter_exec_return(", 2),
+    ("fs/exec.c", "static int bprm_execve(", "spp_diag_trace_adapter_exec_return(", 1),
     ("fs/exec.c", "static int do_execveat_common(", "spp_diag_trace_adapter_exec_reserve(", 1),
-    ("fs/exec.c", "static int do_execveat_common(", "spp_diag_trace_adapter_exec_unsupported(", 1),
-    ("fs/exec.c", "static int do_execveat_common(", "spp_diag_trace_adapter_exec_return(", 8),
+    ("fs/exec.c", "static int do_execveat_common(", "spp_diag_trace_adapter_exec_unsupported(", 2),
+    ("fs/exec.c", "static int do_execveat_common(", "spp_diag_trace_adapter_exec_return(", 1),
     ("fs/exec.c", "int kernel_execve(", "spp_diag_trace_adapter_exec_reserve(", 1),
-    ("fs/exec.c", "int kernel_execve(", "spp_diag_trace_adapter_exec_return(", 7),
-    ("kernel/fork.c", "No more failure paths after this point.", "spp_diag_trace_adapter_task_alloc(", 1),
-    ("kernel/fork.c", "No more failure paths after this point.", "spp_diag_trace_adapter_task_created(", 1),
+    ("fs/exec.c", "int kernel_execve(", "spp_diag_trace_adapter_exec_unsupported(", 2),
+    ("fs/exec.c", "int kernel_execve(", "spp_diag_trace_adapter_exec_return(", 1),
+    ("kernel/fork.c", "INIT_HLIST_NODE(&delayed.node);", "spp_diag_trace_adapter_task_alloc(", 1),
+    ("kernel/fork.c", "copy_oom_score_adj(clone_flags, p);", "spp_diag_trace_adapter_task_created(", 1),
     ("kernel/exit.c", "tsk->exit_code = code;", "spp_diag_trace_adapter_task_exit(", 1),
     ("fs/open.c", "static long do_sys_openat2(", "spp_diag_trace_adapter_file_open_attempt(", 1),
     ("fs/open.c", "static long do_sys_openat2(", "spp_diag_trace_adapter_file_open_return(", 1),
@@ -398,6 +410,7 @@ EXACT_SITES = (
     ("mm/mprotect.c", "static int do_mprotect_pkey(", "spp_diag_trace_adapter_mprotect_policy(", 1),
     ("mm/mprotect.c", "static int do_mprotect_pkey(", "spp_diag_trace_adapter_mprotect_return(", 1),
     ("net/socket.c", "static int __sock_sendmsg(", "spp_diag_trace_adapter_sendmsg_policy(", 1),
+    ("net/socket.c", "static int __sock_sendmsg(", "spp_diag_trace_adapter_sendmsg_precheck(", 1),
     ("net/socket.c", "static int __sock_sendmsg(", "spp_diag_trace_adapter_sendmsg_return(", 1),
     ("net/socket.c", "int __sys_connect_file(", "spp_diag_trace_adapter_connect_policy(", 1),
     ("net/socket.c", "int __sys_connect_file(", "spp_diag_trace_adapter_connect_return(", 1),

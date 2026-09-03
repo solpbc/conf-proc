@@ -36,13 +36,17 @@ def main() -> int:
     if struct.unpack(">HHHH", sendmsg[:8]) != (2, 2, 2, 1):
         print("FAIL IPv6 explicit sendmsg policy shape")
         return 1
-    if int.from_bytes(sendmsg[16:20], "big") != 0x8000000D:
-        print("FAIL sendmsg errno was not represented as a wire failure")
+    if int.from_bytes(sendmsg[16:20], "big") != 0xFFFFFFF3:
+        print("FAIL sendmsg errno lost its raw two's-complement bits")
         return 1
     if int.from_bytes(sendmsg[24:28], "big") != 0x7FFFFFFF:
         print("FAIL INT_MAX sendmsg size boundary")
         return 1
-    for mode in ("--unsupported", "--connect-unsupported"):
+    if int.from_bytes(sendmsg[40:44], "big") != 0x55667788 or int.from_bytes(sendmsg[44:48], "big") != 0x11223344:
+        print("FAIL IPv6 scope/flow byte order")
+        return 1
+    for mode in ("--unsupported", "--connect-unsupported", "--connected",
+                 "--oversized", "--bad-family", "--bad-length"):
         red = subprocess.run([fixture, mode], check=False)
         if red.returncode != 42:
             print(f"FAIL {mode} red path exit={red.returncode}")

@@ -19,26 +19,6 @@
 
 #include "conf-proc-spp-diag-trace-core-runtime-adapter-fixture.h"
 
-static int peer_getname(struct socket *sock, struct sockaddr *address,
-			int *address_len, int peer)
-{
-	struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)address;
-
-	(void)sock;
-	if (!peer || !address_len || *address_len < (int)sizeof(*sin6))
-		return -1;
-	*sin6 = (struct sockaddr_in6){
-		.sin6_family = AF_INET6,
-		.sin6_port = htons(53),
-		.sin6_flowinfo = 2,
-		.sin6_scope_id = 1,
-		.sin6_addr = { .s6_addr = { 0x20, 0x01, 0x0d, 0xb8,
-			0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 } },
-	};
-	*address_len = sizeof(*sin6);
-	return 0;
-}
-
 int main(int argc, char **argv)
 {
 	struct task_struct root;
@@ -63,9 +43,13 @@ int main(int argc, char **argv)
 	struct sockaddr_in connect_address = { .sin_family = AF_INET,
 		.sin_port = htons(443), .sin_addr = { .s_addr = { 10, 0, 0, 1 } } };
 	struct sock send_sk = { .sk_protocol = 17, .cookie = 0x99aabbccddeeff00ull };
-	static const struct proto_ops send_ops = { .getname = peer_getname };
-	struct socket send_sock = { .type = SOCK_DGRAM, .sk = &send_sk, .ops = &send_ops };
-	struct msghdr send_msg = { .msg_iter = { .count = 512 } };
+	struct socket send_sock = { .type = SOCK_DGRAM, .sk = &send_sk };
+	struct sockaddr_in6 send_address = { .sin6_family = AF_INET6,
+		.sin6_port = htons(53), .sin6_flowinfo = htonl(2), .sin6_scope_id = 1,
+		.sin6_addr = { .s6_addr = { 0x20, 0x01, 0x0d, 0xb8,
+			0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 } } };
+	struct msghdr send_msg = { .msg_name = &send_address,
+		.msg_namelen = sizeof(send_address), .msg_iter = { .count = 512 } };
 	u32 reservation = 0;
 	bool wrong_token = argc == 2 && !strcmp(argv[1], "--wrong-token");
 
@@ -77,6 +61,7 @@ int main(int argc, char **argv)
 	/* Simulates reserve-before-open, then the first bprm handler pass. */
 	spp_diag_trace_adapter_exec_reserve(exec_path, &reservation);
 	spp_diag_trace_adapter_exec_pass(&bprm);
+	spp_diag_trace_adapter_exec_pass(&bprm);
 	spp_diag_trace_adapter_exec_commit(&bprm);
 	spp_diag_trace_adapter_exec_return(wrong_token ? reservation + 1 : reservation, 0);
 	if (wrong_token)
@@ -86,7 +71,7 @@ int main(int argc, char **argv)
 
 	spp_diag_trace_adapter_file_open_attempt(-100, file_path, O_RDONLY | O_NOFOLLOW);
 	spp_diag_trace_adapter_file_open_policy(&file, 0);
-	spp_diag_trace_adapter_file_open_return(0);
+	spp_diag_trace_adapter_file_open_return(0, &file);
 	if (!spp_diag_trace_core_is_green())
 		return 10;
 	spp_diag_trace_adapter_mapping_policy(&map_file, PROT_READ | PROT_EXEC, 0, 0);
@@ -105,6 +90,8 @@ int main(int argc, char **argv)
 	spp_diag_trace_adapter_connect_return(0);
 	if (!spp_diag_trace_core_is_green())
 		return 13;
+	if (spp_diag_trace_adapter_sendmsg_precheck(&send_sock, &send_msg))
+		return 14;
 	spp_diag_trace_adapter_sendmsg_policy(&send_sock, &send_msg, 0, -13);
 	spp_diag_trace_adapter_sendmsg_return(-13);
 	if (!spp_diag_trace_core_is_green())

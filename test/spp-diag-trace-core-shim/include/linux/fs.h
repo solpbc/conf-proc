@@ -54,6 +54,7 @@ struct file {
 };
 
 #define FMODE_EXEC 0x0020u
+#define __FMODE_EXEC 0x40000000u
 
 #define S_IFMT 0170000
 #define S_IFREG 0100000

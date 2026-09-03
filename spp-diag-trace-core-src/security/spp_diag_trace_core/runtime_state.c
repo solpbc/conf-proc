@@ -181,7 +181,7 @@ int spp_diag_trace_runtime_exec_return(const void *task_token,
 {
 	if (spp_diag_trace_core_runtime_is_sealed())
 		return SPP_DIAG_TRACE_ERR_INACTIVE;
-	if (!task_token || reservation_token == 0)
+	if (!task_token)
 		return spp_diag_trace_core_mark_failure(WIRE_NULL);
 
 	return spp_diag_trace_core_runtime_exec_return(task_token,
@@ -249,6 +249,19 @@ int spp_diag_trace_runtime_file_policy_decision(
 		task_token, operation_ordinal, fact);
 }
 
+int spp_diag_trace_runtime_file_gate_observation(
+	const void *task_token, const void *file_token, u64 operation_ordinal,
+	const struct spp_diag_trace_fact_file_policy *fact)
+{
+	if (spp_diag_trace_core_runtime_is_sealed())
+		return SPP_DIAG_TRACE_ERR_INACTIVE;
+	if (!task_token || !file_token || !fact)
+		return spp_diag_trace_core_mark_failure(WIRE_NULL);
+
+	return spp_diag_trace_core_runtime_file_gate_observation(
+		task_token, file_token, operation_ordinal, fact);
+}
+
 int spp_diag_trace_runtime_mapping_policy_decision(
 	const void *task_token,
 	const struct spp_diag_trace_fact_mapping_policy *fact,
@@ -283,15 +296,19 @@ int spp_diag_trace_runtime_network_policy_decision(
 }
 
 int spp_diag_trace_runtime_file_open_active_operation(const void *task_token,
-						      u64 *out_op_ordinal)
+						      u64 *out_op_ordinal,
+						      u16 *out_access,
+						      u16 *out_modifiers)
 {
 	if (spp_diag_trace_core_runtime_is_sealed())
 		return SPP_DIAG_TRACE_ERR_INACTIVE;
-	if (!task_token || !out_op_ordinal)
+	if (!task_token || !out_op_ordinal || !out_access || !out_modifiers)
 		return spp_diag_trace_core_mark_failure(WIRE_NULL);
 
 	return spp_diag_trace_core_runtime_file_open_active_operation(task_token,
-									      out_op_ordinal);
+									      out_op_ordinal,
+									      out_access,
+									      out_modifiers);
 }
 
 int spp_diag_trace_runtime_mmap_active_operation(const void *task_token,
@@ -362,6 +379,16 @@ int spp_diag_trace_runtime_network_unsupported(const void *task_token)
 	return spp_diag_trace_core_runtime_network_unsupported(task_token);
 }
 
+int spp_diag_trace_runtime_operation_unsupported(const void *task_token)
+{
+	if (spp_diag_trace_core_runtime_is_sealed())
+		return SPP_DIAG_TRACE_ERR_INACTIVE;
+	if (!task_token)
+		return spp_diag_trace_core_mark_failure(WIRE_NULL);
+
+	return spp_diag_trace_core_runtime_operation_unsupported(task_token);
+}
+
 int spp_diag_trace_runtime_operation_return(const void *task_token,
 					    u64 operation_ordinal, s64 result)
 {
@@ -373,6 +400,30 @@ int spp_diag_trace_runtime_operation_return(const void *task_token,
 	return spp_diag_trace_core_runtime_operation_return(task_token,
 						    operation_ordinal,
 						    result);
+}
+
+int spp_diag_trace_runtime_operation_return_raw(const void *task_token,
+						u64 operation_ordinal, u64 result_bits)
+{
+	if (spp_diag_trace_core_runtime_is_sealed())
+		return SPP_DIAG_TRACE_ERR_INACTIVE;
+	if (!task_token)
+		return spp_diag_trace_core_mark_failure(WIRE_NULL);
+
+	return spp_diag_trace_core_runtime_operation_return_raw(
+		task_token, operation_ordinal, result_bits);
+}
+
+int spp_diag_trace_runtime_file_open_return(const void *task_token,
+					    const void *file_token, s64 result)
+{
+	if (spp_diag_trace_core_runtime_is_sealed())
+		return SPP_DIAG_TRACE_ERR_INACTIVE;
+	if (!task_token)
+		return spp_diag_trace_core_mark_failure(WIRE_NULL);
+
+	return spp_diag_trace_core_runtime_file_open_return(
+		task_token, file_token, result);
 }
 
 /*

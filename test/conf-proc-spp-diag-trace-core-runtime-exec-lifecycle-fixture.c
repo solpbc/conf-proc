@@ -17,11 +17,12 @@ int main(int argc, char **argv)
 	const char user_path[] = "/usr/bin/env";
 	struct linux_binprm kernel_bprm = { .filename = kernel_path };
 	struct linux_binprm user_bprm = { .filename = user_path };
-	u32 kernel_reservation = 0, user_reservation = 0, denied_reservation = 0;
+	u32 kernel_reservation = 0, user_reservation = 0;
 	bool wrong = argc == 2 && !strcmp(argv[1], "--wrong-token");
 	bool unsupported = argc == 2 && !strcmp(argv[1], "--unsupported");
+	bool pre_bprm = argc == 2 && !strcmp(argv[1], "--pre-bprm-failure");
 
-	if (argc > 2 || (argc == 2 && !wrong && !unsupported) ||
+	if (argc > 2 || (argc == 2 && !wrong && !unsupported && !pre_bprm) ||
 	    spp_adapter_fixture_start(&root))
 		return 64;
 	if (unsupported) {
@@ -29,12 +30,19 @@ int main(int argc, char **argv)
 		return spp_diag_trace_core_is_green() ? 2 : 42;
 	}
 	/* Parent/child lifecycle occurs before either task is runnable. */
-	spp_diag_trace_adapter_task_alloc(&root, &child, 0x1234);
+	spp_diag_trace_adapter_task_alloc(&root, 0x1234);
 	spp_diag_trace_adapter_task_created(&root, &child, 0x1234);
 
 	/* Two reservations coexist before their first bprm pass. */
 	host_current_task_ptr = &root;
 	spp_diag_trace_adapter_exec_reserve(kernel_path, &kernel_reservation);
+	if (pre_bprm) {
+		spp_diag_trace_adapter_exec_return(kernel_reservation, -2);
+		return spp_diag_trace_core_is_green() ? 2 : 42;
+	}
+	/* Reservation emits nothing; an independent operation receives the next ordinal. */
+	spp_diag_trace_adapter_file_open_attempt(-100, "/tmp/interleave", 0);
+	spp_diag_trace_adapter_file_open_return(-2, NULL);
 	host_current_task_ptr = &child;
 	spp_diag_trace_adapter_exec_reserve(user_path, &user_reservation);
 	host_current_task_ptr = &root;
@@ -52,13 +60,10 @@ int main(int argc, char **argv)
 	spp_diag_trace_adapter_exec_pass(&user_bprm);
 	spp_diag_trace_adapter_exec_commit(&user_bprm);
 	spp_diag_trace_adapter_exec_return(user_reservation, -13);
-	/* A denial before commit still releases its one reservation. */
-	spp_diag_trace_adapter_exec_reserve("/missing", &denied_reservation);
-	spp_diag_trace_adapter_exec_return(denied_reservation, -2);
 	spp_diag_trace_adapter_task_exit(&child, 17);
 
 	/* Both documented untracked PF_KTHREAD exceptions stay non-recording. */
-	spp_diag_trace_adapter_task_alloc(&kparent, &kchild, 0);
+	spp_diag_trace_adapter_task_alloc(&kparent, 0);
 	spp_diag_trace_adapter_task_created(&kparent, &kchild, 0);
 	spp_diag_trace_adapter_task_exit(&kchild, 0);
 	if (!spp_diag_trace_core_is_green())

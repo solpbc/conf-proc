@@ -24,12 +24,6 @@ enum spp_diag_trace_runtime_op_state {
 	SPP_DIAG_TRACE_RUNTIME_OP_STATE_CLOSED = 3,
 };
 
-#ifndef ESHUTDOWN
-#define ESHUTDOWN 108
-#endif
-
-#define SPP_DIAG_TRACE_ERR_INACTIVE (-ESHUTDOWN)
-
 #define SPP_DIAG_TRACE_TASK_FLAG_LIVE     0x0001u
 #define SPP_DIAG_TRACE_TASK_FLAG_DOOMED   0x0002u
 #define SPP_DIAG_TRACE_TASK_FLAG_EXITED   0x0004u
@@ -67,19 +61,27 @@ struct spp_diag_trace_task_record {
 	u16 mint_phase;
 	u16 flags;
 	u16 open_op_count;
-	u16 reserved;
+	u32 exec_reservation_token;
 };
 
 struct spp_diag_trace_operation_record {
+	const void *file_token;
 	u64 operation_ordinal;
 	u64 task_ordinal;
 	u64 child_task_ordinal;
 	u64 first_sequence;
 	u64 last_sequence;
+	u64 file_inode;
+	u64 file_mount_identity;
+	u64 file_observed_size;
 	u32 pass_count;
 	u32 policy_count;
+	u32 file_fs_magic;
+	u32 file_dev_major;
+	u32 file_dev_minor;
 	u16 file_access;
 	u16 file_modifiers;
+	u16 file_object_kind;
 	u16 kind;
 	u16 phase;
 	u16 state;

@@ -30,7 +30,7 @@ def frame(
     ) + payload
 
 
-def expected() -> bytes:
+def expected(*, exact_adapter: bool = False) -> bytes:
     challenge = bytes(range(32))
     run = bytes(range(32, 64))
     control = bytes(range(64, 96))
@@ -124,7 +124,7 @@ def expected() -> bytes:
                 7,
                 7,
                 1,
-                0x80000001,
+                0xFFFFFFFF if exact_adapter else 0x80000001,
                 0xEF53,
                 8,
                 1,
@@ -178,12 +178,12 @@ def expected() -> bytes:
                 2,
                 2,
                 2,
-                2,
+                1 if exact_adapter else 2,
                 2,
                 17,
                 10,
-                0,
-                0x8000000D,
+                28 if exact_adapter else 0,
+                0xFFFFFFF3 if exact_adapter else 0x8000000D,
                 0,
                 512,
                 0x99AABBCCDDEEFF00,
