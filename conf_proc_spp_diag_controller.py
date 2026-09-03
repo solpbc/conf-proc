@@ -153,6 +153,7 @@ class ControllerOps:
     run_child: Callable[[str, tuple[str, ...], float, int], ChildResult]
     direct_operation: Callable[[str, object], bool]
     read_file: Callable[[str, int], bytes]
+    read_binding: Callable[[str], bytes]
     write_file: Callable[[str, bytes], None]
     write_uart: Callable[[bytes, float], None]
     request_poweroff: Callable[[], None]
@@ -424,6 +425,32 @@ def _read_regular(path: str, cap: int) -> bytes:
         os.close(fd)
 
 
+def _read_binding_device(path: str) -> bytes:
+    """Read exactly the first late-binding record from its validated block device."""
+
+    node = os.stat(path)
+    if not stat.S_ISBLK(node.st_mode):
+        raise OSError("binding is not a block device")
+    fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        opened = os.fstat(fd)
+        if (
+            not stat.S_ISBLK(opened.st_mode)
+            or (opened.st_rdev, opened.st_ino) != (node.st_rdev, node.st_ino)
+        ):
+            raise OSError("binding device changed")
+        parts, total = [], 0
+        while total < BINDING_SIZE:
+            chunk = os.read(fd, BINDING_SIZE - total)
+            if not chunk:
+                raise OSError("short binding device")
+            parts.append(chunk)
+            total += len(chunk)
+        return b"".join(parts)
+    finally:
+        os.close(fd)
+
+
 def _read_fd(fd: int, cap: int) -> bytes:
     """Perform the one bounded post-SEAL stream read from the inherited fd."""
 
@@ -502,13 +529,37 @@ def _uart_once(ops: ControllerOps, data: bytes) -> int:
     return len(data)
 
 
+def _inherited_fd_listing_is_exact(names: list[str], readlink: Callable[[str], str]) -> bool:
+    """Allow only listdir's already-closed directory descriptor beyond FDs 0--5."""
+
+    expected = {0, 1, 2, 3, 4, 5}
+    try:
+        found = {int(name) for name in names if name.isdecimal()}
+    except ValueError:
+        return False
+    extras = found - expected
+    if found - extras != expected:
+        return False
+    if not extras:
+        return True
+    if len(extras) != 1:
+        return False
+    try:
+        readlink(f"/proc/self/fd/{extras.pop()}")
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
 def _verify_pid_fds() -> None:
     if os.getpid() != 1:
         _fail(SPPFLR1_INPUT, 1)
     status = _read_regular("/proc/self/status", 65536)
     if re.search(br"^Tgid:\s*1$", status, re.MULTILINE) is None:
         _fail(SPPFLR1_INPUT, 1)
-    if {int(name) for name in os.listdir("/proc/self/fd") if name.isdecimal()} != {0, 1, 2, 3, 4, 5}:
+    if not _inherited_fd_listing_is_exact(os.listdir("/proc/self/fd"), os.readlink):
         _fail(SPPFLR1_INPUT, 1)
     for fd, access in ((CONTROL_FD, os.O_WRONLY), (STREAM_FD, os.O_RDONLY), (UART_FD, os.O_WRONLY)):
         if fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE != access:
@@ -571,20 +622,43 @@ def _real_direct(action: str, value: object) -> bool:
     return False
 
 
+def _adopted_child_pids() -> frozenset[int]:
+    """Return PID 1's current direct children, including adopted setsid descendants."""
+
+    data = _read_regular("/proc/self/task/1/children", 65536)
+    try:
+        pids = frozenset(int(value) for value in data.split())
+    except ValueError as exc:
+        raise OSError("malformed children census") from exc
+    if any(pid <= 0 for pid in pids):
+        raise OSError("invalid child PID")
+    return pids
+
+
+def _signal_adopted(pids: frozenset[int], sig: int) -> None:
+    for adopted in pids:
+        try:
+            os.kill(adopted, sig)
+        except ProcessLookupError:
+            pass
+
+
 def _reap_adopted(deadline: float) -> None:
-    # PID 1 must reap direct and adopted descendants after each fixed child.
-    while time.monotonic() < deadline:
-        active = False
+    """Reap every child of PID 1, including descendants that escaped the child group."""
+
+    while True:
         while True:
             try:
                 pid, _status = os.waitpid(-1, os.WNOHANG)
             except ChildProcessError:
                 return
             if pid == 0:
-                active = True
                 break
-        if active:
-            time.sleep(0.002)
+        if not _adopted_child_pids():
+            return
+        if time.monotonic() >= deadline:
+            raise OSError("adopted child not reaped")
+        time.sleep(0.002)
 
 
 def _drain_child_pipes(open_fds: set[int], captures: dict[int, bytearray], cap: int) -> bool:
@@ -660,10 +734,11 @@ def _run_fixed_child(name: str, argv: tuple[str, ...], deadline: float, cap: int
     status: int | None = None
     timed_out = False
     overflow = False
+    descendant_seen = False
     term_deadline: float | None = None
     kill_deadline: float | None = None
     try:
-        while status is None or open_fds:
+        while True:
             if status is None:
                 waited, candidate = os.waitpid(pid, os.WNOHANG)
                 if waited == pid:
@@ -671,22 +746,29 @@ def _run_fixed_child(name: str, argv: tuple[str, ...], deadline: float, cap: int
             if not _drain_child_pipes(open_fds, captures, cap):
                 overflow = True
             now = time.monotonic()
-            if status is None and (overflow or now >= deadline) and term_deadline is None:
+            adopted = _adopted_child_pids() if status is not None else frozenset()
+            descendant_seen = descendant_seen or bool(adopted)
+            needs_termination = overflow or now >= deadline or bool(adopted)
+            if needs_termination and term_deadline is None:
                 timed_out = timed_out or now >= deadline
                 try:
                     os.killpg(pid, signal.SIGTERM)
                 except ProcessLookupError:
                     pass
+                _signal_adopted(adopted, signal.SIGTERM)
                 term_deadline = now + _TERM_GRACE
-            if status is None and term_deadline is not None and now >= term_deadline and kill_deadline is None:
+            if term_deadline is not None and now >= term_deadline and kill_deadline is None:
                 try:
                     os.killpg(pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+                _signal_adopted(_adopted_child_pids(), signal.SIGKILL)
                 kill_deadline = now + _POST_KILL
-            if status is None and kill_deadline is not None and now >= kill_deadline:
-                raise OSError("child not reaped after SIGKILL")
-            if status is not None and not open_fds:
+            if kill_deadline is not None and now >= kill_deadline:
+                _reap_adopted(kill_deadline)
+                if status is None or open_fds:
+                    raise OSError("child not reaped after SIGKILL")
+            if status is not None and not open_fds and not adopted:
                 break
             time.sleep(0.002)
         stdout, stderr = bytes(captures[out_r]), bytes(captures[err_r])
@@ -694,7 +776,7 @@ def _run_fixed_child(name: str, argv: tuple[str, ...], deadline: float, cap: int
         for descriptor in tuple(open_fds):
             os.close(descriptor)
         _reap_adopted(time.monotonic() + _POST_KILL)
-    if status is None or timed_out or overflow or not os.WIFEXITED(status):
+    if status is None or timed_out or overflow or descendant_seen or not os.WIFEXITED(status):
         return ChildResult(255)
     return ChildResult(os.WEXITSTATUS(status), stdout, stderr)
 
@@ -733,6 +815,10 @@ def _mount_scratch_once() -> None:
         _fail(SPPFLR1_INPUT, 1)
 
 
+def _is_fixed_exec_target(node: os.stat_result) -> bool:
+    return stat.S_ISREG(node.st_mode) and node.st_nlink == 1 and bool(node.st_mode & 0o111)
+
+
 def _preflight_fixture_contract(boot: BootInputs, model: bytes) -> None:
     """Keep fixed root fixture and poison/canary identities out of signed plan choice."""
 
@@ -751,9 +837,18 @@ def _preflight_fixture_contract(boot: BootInputs, model: bytes) -> None:
         or hashlib.sha256(model).hexdigest() != _MODEL_FIXTURE_SHA256
     ):
         _fail(SPPFLR1_INPUT, 1)
-    # JIT is an immutable fixture; poison targets and execution canaries must remain
-    # absent/known paths until their literal direct operations enter phases 4--13.
-    if not stat.S_ISREG(os.stat(_JIT).st_mode) or any(os.path.lexists(path) for path in _POISONS + _EXEC_DENIALS):
+    # JIT is an immutable fixture and poison targets must stay absent.  The three
+    # execution targets are fixed executable files so execve reaches AppArmor.
+    try:
+        jit = os.stat(_JIT)
+        exec_targets = tuple(os.lstat(path) for path in _EXEC_DENIALS)
+    except OSError:
+        _fail(SPPFLR1_POLICY, 1)
+    if (
+        not stat.S_ISREG(jit.st_mode)
+        or any(os.path.lexists(path) for path in _POISONS)
+        or not all(_is_fixed_exec_target(node) for node in exec_targets)
+    ):
         _fail(SPPFLR1_POLICY, 1)
 
 
@@ -778,6 +873,7 @@ def real_controller_ops() -> ControllerOps:
     return ControllerOps(
         write_control=lambda data: _write_all(CONTROL_FD, data), read_stream=lambda cap: _read_fd(STREAM_FD, cap),
         monotonic=time.monotonic, run_child=_run_fixed_child, direct_operation=_real_direct, read_file=_read_regular,
+        read_binding=_read_binding_device,
         write_file=_write_path, write_uart=uart, request_poweroff=_poweroff,
         verify_pid_fds=_verify_pid_fds, configure_uart=_configure_uart, mount_scratch=_mount_scratch_once,
         preflight_fixture=_preflight_fixture_contract,
@@ -786,7 +882,7 @@ def real_controller_ops() -> ControllerOps:
 
 def _preflight(ops: ControllerOps, boot: BootInputs) -> tuple[ControllerIdentity, bytes]:
     try:
-        binding = ops.read_file(BINDING_PATH_PREFIX + boot.binding_partuuid, BINDING_SIZE)
+        binding = ops.read_binding(BINDING_PATH_PREFIX + boot.binding_partuuid)
     except Exception:
         _fail(SPPFLR1_BINDING, 1)
     identity = parse_binding_record(binding, boot)

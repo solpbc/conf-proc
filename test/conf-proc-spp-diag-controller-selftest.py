@@ -16,17 +16,20 @@ import json
 import os
 from pathlib import Path
 import socket
+import stat
 import struct
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+import conf_proc_spp_diag_controller as controller  # noqa: E402
 from conf_proc_spp_diag_controller import (  # noqa: E402
     BINDING_DOMAIN, BINDING_MAGIC, CONTROLLER_PATH, ChildResult, ControllerFault, ControllerIdentity,
     ControllerOps, TARGET_PROFILE, _CUDA, _EXEC_DENIALS, _JIT, _MODEL, _MODEL_FIXTURE_SHA256,
-    _POISONS, _output_oracle, encode_command, parse_binding_record, parse_boot_inputs, parse_control_plan,
-    main as controller_main, run_controller,
+    _POISONS, _adopted_child_pids, _inherited_fd_listing_is_exact, _is_fixed_exec_target, _output_oracle,
+    encode_command, parse_binding_record, parse_boot_inputs, parse_control_plan, main as controller_main,
+    run_controller,
 )
 from conf_proc_json import canonical_dumps  # noqa: E402
 from conf_proc_spp_diagbundle_protocol import DOMAIN_CONTROL_PLAN  # noqa: E402
@@ -51,6 +54,7 @@ class Recorder:
         self.fail_direct: str | None = None
         self.fail_write_at: int | None = None
         self.files: dict[str, bytes] = {}
+        self.binding_reads: list[str] = []
         self.fail_reads: set[str] = set()
         self.read_errnos: dict[str, int] = {}
         self.bootstrap: list[str] = []
@@ -96,6 +100,10 @@ class Recorder:
             raise OSError(path)
         return self.files[path]
 
+    def read_binding(self, path: str) -> bytes:
+        self.binding_reads.append(path)
+        return self.read_file(path, 4096)
+
     def write_uart(self, data: bytes, _deadline: float) -> None:
         self.uart.append(data)
 
@@ -106,7 +114,8 @@ class Recorder:
         return ControllerOps(
             write_control=self.write_control, read_stream=self.read_stream, monotonic=self.monotonic,
             run_child=self.run_child, direct_operation=self.direct_operation,
-            read_file=self.read_file, write_file=lambda _path, _data: self.bootstrap.append("changeprofile"),
+            read_file=self.read_file, read_binding=self.read_binding,
+            write_file=lambda _path, _data: self.bootstrap.append("changeprofile"),
             write_uart=self.write_uart, request_poweroff=self.poweroff,
             verify_pid_fds=lambda: self.bootstrap.append("fds"),
             configure_uart=lambda: self.bootstrap.append("uart"),
@@ -211,6 +220,52 @@ def test_cmdline_plan_and_4096_binding_reject_twins() -> None:
     _expect(SPPFLR1_POLICY, lambda: parse_control_plan(mutated, hashlib.sha256(DOMAIN_CONTROL_PLAN + mutated).digest()))
 
 
+def test_binding_device_seam_is_used_and_binding_failure_is_terminal() -> None:
+    recorder = Recorder()
+    argv = _main_fixture(recorder)
+    assert controller_main(argv, recorder.ops()) == 1
+    binding_uuid = argv[2].removeprefix("sol_spp_diag.binding_partuuid=")
+    assert recorder.binding_reads == [f"/dev/disk/by-partuuid/{binding_uuid}"]
+
+    broken = Recorder()
+    broken_ops = broken.ops()
+    broken_ops.read_binding = lambda _path: (_ for _ in ()).throw(OSError("not a block device"))
+    assert controller_main(_main_fixture(broken), broken_ops) == 1
+    terminals = [data for data in broken.uart if len(data) == 112 and data.startswith(b"SPPFLR1\0")]
+    assert len(terminals) == 1 and parse_failure_terminal(terminals[0]).reason_code == 3
+
+
+def test_fd_listing_and_exec_target_rejecting_twins() -> None:
+    expected = [str(value) for value in range(6)]
+    assert _inherited_fd_listing_is_exact(expected, lambda _path: (_ for _ in ()).throw(AssertionError("no transient fd")))
+    assert _inherited_fd_listing_is_exact(expected + ["6"], lambda _path: (_ for _ in ()).throw(FileNotFoundError()))
+    assert not _inherited_fd_listing_is_exact(expected + ["6"], lambda _path: "pipe:[1]")
+    assert not _inherited_fd_listing_is_exact(expected + ["6", "7"], lambda _path: (_ for _ in ()).throw(FileNotFoundError()))
+
+    def node(mode: int, nlink: int = 1) -> os.stat_result:
+        return os.stat_result((mode, 1, 1, nlink, 0, 0, 0, 0, 0, 0))
+
+    assert _is_fixed_exec_target(node(stat.S_IFREG | 0o755))
+    assert not _is_fixed_exec_target(node(stat.S_IFREG | 0o644))
+    assert not _is_fixed_exec_target(node(stat.S_IFLNK | 0o777))
+
+
+def test_adopted_descendant_census_rejects_malformed_output() -> None:
+    original = controller._read_regular
+    try:
+        controller._read_regular = lambda _path, _cap: b"17 19\n"
+        assert _adopted_child_pids() == frozenset({17, 19})
+        controller._read_regular = lambda _path, _cap: b"17 invalid\n"
+        try:
+            _adopted_child_pids()
+        except OSError:
+            pass
+        else:
+            raise AssertionError("malformed adopted-child census accepted")
+    finally:
+        controller._read_regular = original
+
+
 def _main_fixture(recorder: Recorder) -> list[str]:
     data_uuid = "11111111-1111-4111-8111-111111111111"
     hash_uuid = "22222222-2222-4222-8222-222222222222"
@@ -278,6 +333,10 @@ def test_fd_uart_and_runner_source_contract() -> None:
         "{0, 1, 2, 3, 4, 5}", "fcntl.F_SETFD", "fcntl.F_GETFD", "termios.B115200",
         "termios.VMIN", "termios.VTIME", "os.setsid()", "_TERM_GRACE", "_POST_KILL",
         "_drain_child_pipes", "os.killpg(pid, signal.SIGTERM)", "os.killpg(pid, signal.SIGKILL)",
+        "_inherited_fd_listing_is_exact", "readlink(f\"/proc/self/fd/{extras.pop()}\")",
+        "read_binding=_read_binding_device", "ops.read_binding(BINDING_PATH_PREFIX + boot.binding_partuuid)",
+        "_is_fixed_exec_target", "_adopted_child_pids()", "_signal_adopted(adopted, signal.SIGTERM)",
+        "_signal_adopted(_adopted_child_pids(), signal.SIGKILL)",
         "read_stream=lambda cap: _read_fd(STREAM_FD, cap)", "return os.read(fd, cap)",
         "_LINUX_REBOOT_CMD_POWER_OFF", "libc.reboot(_LINUX_REBOOT_CMD_POWER_OFF)",
     ):
@@ -334,6 +393,9 @@ TESTS = (
     test_fixed_choreography_and_seal_before_read,
     test_rejecting_twins_map_to_closed_reasons,
     test_cmdline_plan_and_4096_binding_reject_twins,
+    test_binding_device_seam_is_used_and_binding_failure_is_terminal,
+    test_fd_listing_and_exec_target_rejecting_twins,
+    test_adopted_descendant_census_rejects_malformed_output,
     test_main_uses_the_same_injected_production_core_and_one_failure_record,
     test_uart_setup_and_collector_failures_fail_stop_without_second_record,
     test_fd_uart_and_runner_source_contract,

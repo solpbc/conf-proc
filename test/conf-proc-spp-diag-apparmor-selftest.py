@@ -42,12 +42,19 @@ def test_attachment_children_and_closed_files() -> None:
     assert not any("/**" in line or " px," in line or " ux," in line for line in lines)
     assert not any("sys_admin" in line or "mac_admin" in line for line in lines)
     assert "capability sys_boot," in lines
+    assert "/proc/self/task/1/children r," in lines
 
 
 def test_network_exec_and_signal_matrix() -> None:
     lines = _lines()
-    assert {"network inet stream,", "network inet6 stream,", "network inet dgram,"} <= set(lines)
-    assert {line for line in lines if line.startswith("deny ")} == {
+    assert {
+        "network create inet stream,", "network create inet6 stream,", "network create inet dgram,",
+        "deny network connect inet stream peer=(ip=198.51.100.7 port=443),",
+        "deny network connect inet6 stream peer=(ip=2001:db8::8 port=443),",
+        "deny network send inet dgram peer=(ip=203.0.113.9 port=443),",
+    } <= set(lines)
+    assert not any(line in {"deny network inet stream,", "deny network inet6 stream,", "deny network inet dgram,"} for line in lines)
+    assert {line for line in lines if line.startswith("deny /")} == {
         "deny /var/tmp/solstone-writable-exec x,",
         "deny /mnt/solstone-attached/foreign-exec x,",
         "deny /run/solstone/remote-code/foreign-exec x,",

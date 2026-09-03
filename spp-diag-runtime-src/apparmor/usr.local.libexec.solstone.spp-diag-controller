@@ -31,6 +31,7 @@ profile /usr/lib/spp/spp-diag-controller {
   /proc/self/attr/current w,
   /proc/self/status r,
   /proc/self/fd/ r,
+  /proc/self/task/1/children r,
   /dev/disk/by-partuuid/* r,
   /usr/share/spp-diag/control-plan.json r,
   /opt/solstone/models/synthetic-fixture-v1.bin r,
@@ -44,12 +45,14 @@ profile /usr/lib/spp/spp-diag-controller {
   /sys/kernel/security/tpm0/binary_bios_measurements r,
   /sys/kernel/security/ima/ascii_runtime_measurements r,
 
-  # AppArmor network mediation authorizes socket creation by family/type.  The
-  # controller's direct connect/sendmsg probes require their expected EACCES/EPERM
-  # operation outcome and use only the three literal peers in its local constants.
-  network inet stream,
-  network inet6 stream,
-  network inet dgram,
+  # Socket creation is restricted to the three probe shapes.  Their only literal
+  # outbound operations are denied by peer so the controller records EACCES/EPERM.
+  network create inet stream,
+  network create inet6 stream,
+  network create inet dgram,
+  deny network connect inet stream peer=(ip=198.51.100.7 port=443),
+  deny network connect inet6 stream peer=(ip=2001:db8::8 port=443),
+  deny network send inet dgram peer=(ip=203.0.113.9 port=443),
 
   deny /var/tmp/solstone-writable-exec x,
   deny /mnt/solstone-attached/foreign-exec x,
