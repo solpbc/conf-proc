@@ -7,6 +7,9 @@
 #ifndef EAGAIN
 #define EAGAIN 11
 #endif
+#ifndef ENOENT
+#define ENOENT 2
+#endif
 #ifndef ENOMEM
 #define ENOMEM 12
 #endif

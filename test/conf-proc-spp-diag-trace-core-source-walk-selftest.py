@@ -381,6 +381,7 @@ EXACT_SITES = (
     ("fs/exec.c", "static int prepare_bprm_creds(", "spp_diag_trace_adapter_exec_return(", 2),
     ("fs/exec.c", "static int bprm_execve(", "spp_diag_trace_adapter_exec_return(", 2),
     ("fs/exec.c", "static int do_execveat_common(", "spp_diag_trace_adapter_exec_reserve(", 1),
+    ("fs/exec.c", "static int do_execveat_common(", "spp_diag_trace_adapter_exec_unsupported(", 1),
     ("fs/exec.c", "static int do_execveat_common(", "spp_diag_trace_adapter_exec_return(", 8),
     ("fs/exec.c", "int kernel_execve(", "spp_diag_trace_adapter_exec_reserve(", 1),
     ("fs/exec.c", "int kernel_execve(", "spp_diag_trace_adapter_exec_return(", 7),

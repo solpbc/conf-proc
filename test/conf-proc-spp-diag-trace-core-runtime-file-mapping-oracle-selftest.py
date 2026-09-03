@@ -44,12 +44,18 @@ def main() -> int:
     if results != [0x80000001, 0x80000001]:
         print(f"FAIL signed kernel results were not wire-normalized: {results!r}")
         return 1
-    for mode in ("--fmode-red", "--mapping-red", "--shm-red"):
+    for mode in ("--cloexec", "--untracked-open", "--fmode-probe"):
+        raw = subprocess.check_output([fixture, mode])
+        expected_files = 1 if mode == "--cloexec" else 0
+        if len(payloads(raw, 0x101)) != expected_files:
+            print(f"FAIL {mode} emitted unexpected FILE_POLICY_DECISION frames")
+            return 1
+    for mode in ("--mapping-red", "--shm-red"):
         red = subprocess.run([fixture, mode], check=False)
         if red.returncode != 42:
             print(f"FAIL {mode} did not sticky-red: exit={red.returncode}")
             return 1
-    print("ok   adapter file/mapping facts, FMODE_EXEC twin, and unsupported red paths")
+    print("ok   adapter file/mapping facts, normalized CLOEXEC, neutral open probes, and unsupported red paths")
     return 0
 
 

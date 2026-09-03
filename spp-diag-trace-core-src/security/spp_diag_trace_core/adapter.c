@@ -28,8 +28,15 @@
 #include "../../fs/mount.h"
 #endif
 
+static unsigned long spp_diag_trace_adapter_file_flags(unsigned long flags)
+{
+	/* build_open_flags() removes O_CLOEXEC before it reaches file->f_flags. */
+	return flags & ~O_CLOEXEC;
+}
+
 static u16 spp_diag_trace_adapter_file_access(unsigned long flags)
 {
+	flags = spp_diag_trace_adapter_file_flags(flags);
 	switch (flags & O_ACCMODE) {
 	case O_WRONLY:
 		return SPP_DIAG_TRACE_FILE_ACCESS_WRITE;
@@ -45,6 +52,7 @@ static u16 spp_diag_trace_adapter_file_modifiers(unsigned long flags)
 {
 	u16 modifiers = 0;
 
+	flags = spp_diag_trace_adapter_file_flags(flags);
 	if (flags & O_CREAT)
 		modifiers |= SPP_DIAG_TRACE_FILE_MOD_CREATE;
 	if (flags & O_TRUNC)
@@ -53,8 +61,6 @@ static u16 spp_diag_trace_adapter_file_modifiers(unsigned long flags)
 		modifiers |= SPP_DIAG_TRACE_FILE_MOD_APPEND;
 	if (flags & O_NOFOLLOW)
 		modifiers |= SPP_DIAG_TRACE_FILE_MOD_NOFOLLOW;
-	if (flags & O_CLOEXEC)
-		modifiers |= SPP_DIAG_TRACE_FILE_MOD_CLOEXEC;
 	if (flags & O_DIRECTORY)
 		modifiers |= SPP_DIAG_TRACE_FILE_MOD_DIRECTORY;
 	return modifiers;

@@ -20,11 +20,14 @@ int main(int argc, char **argv)
 	struct file file = { .f_inode = &inode, .f_flags = O_RDONLY | O_NOFOLLOW,
 		.f_path = { .mnt = &mount.mnt } };
 	struct vm_area_struct vma = { .vm_file = &file, .vm_flags = VM_READ | VM_SHARED };
-	bool fmode_red = argc == 2 && !strcmp(argv[1], "--fmode-red");
+	bool cloexec = argc == 2 && !strcmp(argv[1], "--cloexec");
+	bool untracked_open = argc == 2 && !strcmp(argv[1], "--untracked-open");
+	bool fmode_probe = argc == 2 && !strcmp(argv[1], "--fmode-probe");
 	bool mapping_red = argc == 2 && !strcmp(argv[1], "--mapping-red");
 	bool shm_red = argc == 2 && !strcmp(argv[1], "--shm-red");
 
-	if (argc > 2 || (argc == 2 && !fmode_red && !mapping_red && !shm_red) ||
+	if (argc > 2 || (argc == 2 && !cloexec && !untracked_open &&
+					  !fmode_probe && !mapping_red && !shm_red) ||
 	    spp_adapter_fixture_start(&root))
 		return 64;
 	if (mapping_red || shm_red) {
@@ -32,13 +35,23 @@ int main(int argc, char **argv)
 		spp_diag_trace_adapter_mapping_unsupported();
 		return spp_diag_trace_core_is_green() ? 2 : 42;
 	}
-	if (fmode_red)
-		file.f_mode = FMODE_EXEC;
-	spp_diag_trace_adapter_file_open_attempt(-100, "/tmp/openat2", file.f_flags);
+	if (untracked_open || fmode_probe) {
+		if (fmode_probe)
+			file.f_mode = FMODE_EXEC;
+		/* vfs_open()/kernel_file_open() do not have a syscall attempt. */
+		spp_diag_trace_adapter_file_open_policy(&file, 0);
+		if (!spp_diag_trace_core_is_green())
+			return 3;
+		return spp_adapter_fixture_stream() ? 6 : 0;
+	}
+	if (cloexec)
+		/* build_open_flags() strips this before file->f_flags is observed. */
+		spp_diag_trace_adapter_file_open_attempt(-100, "/tmp/openat2",
+			file.f_flags | O_CLOEXEC);
+	else
+		spp_diag_trace_adapter_file_open_attempt(-100, "/tmp/openat2", file.f_flags);
 	spp_diag_trace_adapter_file_open_policy(&file, 0);
 	spp_diag_trace_adapter_file_open_return(0);
-	if (fmode_red)
-		return spp_diag_trace_core_is_green() ? 3 : 42;
 	if (!spp_diag_trace_core_is_green())
 		return 4;
 	/* Non-executable mmap is intentionally a no-op adapter boundary. */

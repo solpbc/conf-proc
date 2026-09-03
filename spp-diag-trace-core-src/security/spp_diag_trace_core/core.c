@@ -1615,7 +1615,7 @@ static int spp_diag_trace_core_runtime_find_active_op_locked(
 			return WIRE_OK;
 		}
 	}
-	return fail_sticky(WIRE_STATE);
+	return -ENOENT;
 }
 
 #if IS_ENABLED(CONFIG_KUNIT)
@@ -2097,6 +2097,8 @@ int spp_diag_trace_core_runtime_exec_pass(
 	}
 	err = spp_diag_trace_core_runtime_find_active_op_locked(
 		task, SPP_DIAG_TRACE_RUNTIME_OP_EXEC, false, &op);
+	if (err == -ENOENT)
+		err = fail_sticky(WIRE_STATE);
 	if (err)
 		goto out;
 	err = spp_diag_trace_core_runtime_append_exec_attempt_locked(
@@ -2158,6 +2160,8 @@ int spp_diag_trace_core_runtime_exec_return(
 	}
 	err = spp_diag_trace_core_runtime_find_active_op_locked(
 		task, SPP_DIAG_TRACE_RUNTIME_OP_EXEC, true, &op);
+	if (err == -ENOENT)
+		err = fail_sticky(WIRE_STATE);
 	if (err)
 		goto out;
 	if (reservation_token == 0 || op->reservation_token != reservation_token) {
