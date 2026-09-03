@@ -332,6 +332,27 @@ def test_existing_destination_precedes_reads(root: Path) -> None:
     assert destination.read_text(encoding="utf-8") == "already here\n"
 
 
+def test_racing_destination_wins_untouched(root: Path) -> None:
+    guard, specs, case, _contents = _fixture(root, "destination-race")
+    destination = case / "raced"
+    original_rename = build._rename_noreplace
+
+    def racing_rename(source: str, target: str) -> None:
+        Path(target).write_text("other writer\n", encoding="utf-8")
+        original_rename(source, target)
+
+    build._rename_noreplace = racing_rename
+    try:
+        _expect(
+            CP_SPP_DIAG_RUNTIME_BUILD_DESTINATION_EXISTS,
+            lambda: _stage(guard, specs, destination),
+        )
+    finally:
+        build._rename_noreplace = original_rename
+    assert destination.read_text(encoding="utf-8") == "other writer\n"
+    assert not list(case.glob("raced.staging.*"))
+
+
 def test_closure_failure_prevents_publish(root: Path) -> None:
     guard, specs, case, _contents = _fixture(root, "closure", controller=b"import socket\n")
     _expect(CP_SPP_DIAG_RUNTIME_BUILD_CLOSURE, lambda: _stage(guard, specs, case / "runtime"))
@@ -344,6 +365,7 @@ TESTS = (
     test_fault_cleanup_and_retry,
     test_stage_input_rejections,
     test_existing_destination_precedes_reads,
+    test_racing_destination_wins_untouched,
     test_closure_failure_prevents_publish,
 )
 

@@ -454,7 +454,12 @@ def stage_runtime(
         # test-only probe runs before rename while the actual parent fsync remains after it.
         _call_fault_hook(fault_hook, "fsync-parent")
         _call_fault_hook(fault_hook, "rename")
-        os.rename(staging_dir, destination)
+        try:
+            _rename_noreplace(staging_dir, destination)
+        except FileExistsError:
+            _fail(CP_SPP_DIAG_RUNTIME_BUILD_DESTINATION_EXISTS)
+        except OSError:
+            _fail(CP_SPP_DIAG_RUNTIME_BUILD_STAGING)
         staging_dir = None
         os.fsync(parent_fd)
 
