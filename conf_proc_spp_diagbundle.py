@@ -680,7 +680,7 @@ def _is_target_profile(value: object) -> bool:
         type(value) is str
         and 1 <= len(value) <= 128
         and value[0] in "abcdefghijklmnopqrstuvwxyz0123456789"
-        and all(character in "abcdefghijklmnopqrstuvwxyz0123456789._/-" for character in value)
+        and all(character in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/:-" for character in value)
     )
 
 
