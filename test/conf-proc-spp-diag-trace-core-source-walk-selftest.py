@@ -419,6 +419,13 @@ EXACT_SITES = (
     ("net/socket.c", "int kernel_sendmsg_locked(", "spp_diag_trace_adapter_sendmsg_unsupported(", 1),
 )
 
+EXEC_POLICY_ANCHOR = (
+    "\tret = call_int_hook(bprm_check_security, 0, bprm);\n"
+    "\tif (ret)\n"
+    "\t\treturn ret;\n"
+)
+EXEC_PASS_BEFORE_POLICY = "\tspp_diag_trace_adapter_exec_pass(bprm);\n" + EXEC_POLICY_ANCHOR
+
 
 def exact_site_check(manifest: dict) -> list[str]:
     violations: list[str] = []
@@ -433,6 +440,20 @@ def exact_site_check(manifest: dict) -> list[str]:
             violations.append(
                 f"{destination}:{anchor_part!r}: {call} count={count}, targets={len(matching)}"
             )
+    exec_targets = [
+        item for item in targets
+        if item.get("destination") == "security/security.c"
+        and item.get("anchor") == EXEC_POLICY_ANCHOR
+    ]
+    if len(exec_targets) != 1:
+        violations.append(f"security/security.c: exec policy target count={len(exec_targets)}")
+    elif (
+        exec_targets[0].get("placement") != "anchor-replace"
+        or exec_targets[0].get("insertion") != EXEC_PASS_BEFORE_POLICY
+    ):
+        violations.append(
+            "security/security.c: exec pass must run immediately before the aggregate LSM policy hook"
+        )
     return violations
 
 
@@ -641,6 +662,14 @@ def main() -> int:
     if not exact_site_check(moved):
         print("FAIL exact-site-check did not reject a moved neighbouring-function adapter call")
         return 1
+    late = json.loads(json.dumps(manifest))
+    late_target = next(item for item in late["targets"] if item.get("destination") == "security/security.c" and
+                       item.get("anchor") == EXEC_POLICY_ANCHOR)
+    late_target["placement"] = "anchor-insert"
+    late_target["insertion"] = "\tspp_diag_trace_adapter_exec_pass(bprm);\n"
+    if not exact_site_check(late):
+        print("FAIL exact-site-check did not reject exec observation after an LSM denial return")
+        return 1
     duplicate = json.loads(json.dumps(manifest))
     duplicate_target = next(item for item in duplicate["targets"] if item.get("destination") == "net/socket.c" and
                             "static int __sock_sendmsg(" in item.get("anchor", ""))
@@ -648,7 +677,7 @@ def main() -> int:
     if not exact_site_check(duplicate):
         print("FAIL exact-site-check did not reject a duplicated adapter call")
         return 1
-    print("ok   exact-site-check-detects-move-and-duplicate")
+    print("ok   exact-site-check-detects-move-late-order-and-duplicate")
 
     adapter_off_violations = adapter_k3off_check(makefile_text)
     if adapter_off_violations:
