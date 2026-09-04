@@ -199,18 +199,21 @@ def derive_output_oracle(
 def derive_gpu_witness_policy(
     *,
     output_oracle_address: str,
-    runtime_inventory_sha256: str,
     gpu_helper_sha256: str,
     cuda_child_sha256: str,
     nvattest_sha256: str,
     nvidia_smi_sha256: str,
     libcuda_sha256: str,
 ) -> DerivedGpuWitnessPolicy:
-    """Derive the fixed exact-H100 witness-policy address."""
+    """Derive the fixed exact-H100 witness-policy address.
+
+    The complete install inventory already binds this policy through the staged
+    control plan.  Re-hashing that inventory here would make the plan depend on
+    a digest that itself depends on the plan.
+    """
 
     digests = (
         output_oracle_address,
-        runtime_inventory_sha256,
         gpu_helper_sha256,
         cuda_child_sha256,
         nvattest_sha256,
@@ -238,7 +241,6 @@ def derive_gpu_witness_policy(
             "nvattest_sha256": nvattest_sha256,
             "output_oracle_address": output_oracle_address,
             "public_ip": False,
-            "runtime_inventory_sha256": runtime_inventory_sha256,
             "schema": "sol-spp-diag-gpu-witness-policy-v1",
             "secure_boot": True,
             "target_profile_id": SPP_DIAG_TARGET_PROFILE_ID,

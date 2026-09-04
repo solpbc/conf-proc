@@ -203,7 +203,6 @@ def test_derived_output_and_gpu_policy_addresses() -> None:
 
     policy_args = {
         "output_oracle_address": output.address,
-        "runtime_inventory_sha256": "44" * 32,
         "gpu_helper_sha256": "55" * 32,
         "cuda_child_sha256": cuda_digest,
         "nvattest_sha256": "66" * 32,
@@ -229,7 +228,6 @@ def test_derived_output_and_gpu_policy_addresses() -> None:
         "nvattest_sha256": "66" * 32,
         "output_oracle_address": output.address,
         "public_ip": False,
-        "runtime_inventory_sha256": "44" * 32,
         "schema": "sol-spp-diag-gpu-witness-policy-v1",
         "secure_boot": True,
         "target_profile_id": "azure:centralus:3:Standard_NCC40ads_H100_v5:ConfidentialVM:v1",
