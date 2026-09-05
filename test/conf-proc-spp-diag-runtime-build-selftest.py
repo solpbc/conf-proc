@@ -588,6 +588,7 @@ def test_declared_controller_staging_graph() -> None:
         "usr/lib/python3.10/conf_proc_reasons.py",
         "usr/lib/python3.10/conf_proc_json.py",
         "usr/lib/python3.10/conf_proc_spp_diag_failure_terminal_reasons.py",
+        "usr/lib/python3.10/conf_proc_spp_diag_gpt.py",
         "usr/lib/python3.10/conf_proc_spp_diag_export.py",
         "usr/lib/python3.10/conf_proc_spp_diag_export_reasons.py",
         "usr/lib/python3.10/conf_proc_spp_diag_quote.py",

@@ -91,12 +91,10 @@ def compile_production(build_dir: str) -> str:
 
 
 def run_production_ops_oracle(build_dir: str) -> None:
-    """Execute the production resolver/DM/fd functions with libc calls link-wrapped.
+    """Exercise production DM/fd operations independently of the scripted harness.
 
-    Unlike the orchestration harness, this compiles and invokes the real production
-    implementations. The independent wrapper checks exact sysfs interpretation,
-    retained block-fd identity, ioctl buffer packing, mapped-node creation/removal,
-    and close-on-exec manipulation without requiring host root privileges.
+    The GPT resolver has a filesystem fixture test below; this wrapper remains
+    focused on the native DM and close-on-exec contract.
     """
 
     wrapper_source = os.path.join(build_dir, "production-ops-oracle.c")
@@ -117,51 +115,6 @@ def run_production_ops_oracle(build_dir: str) -> None:
 
         static void require_true(int condition) {{
             if (!condition) oracle_failed = 1;
-        }}
-
-        int __wrap_glob(const char *pattern, int flags, int (*errfunc)(const char *, int), glob_t *out) {{
-            static char path[] = "/sys/class/block/sda2/uevent";
-            static char *paths[] = {{path, NULL}};
-            (void)flags; (void)errfunc;
-            require_true(strcmp(pattern, "/sys/class/block/*/uevent") == 0);
-            memset(out, 0, sizeof(*out));
-            out->gl_pathc = 1;
-            out->gl_pathv = paths;
-            return 0;
-        }}
-
-        void __wrap_globfree(glob_t *paths) {{ (void)paths; }}
-
-        int __wrap_open(const char *path, int flags, ...) {{
-            if (strcmp(path, "/sys/class/block/sda2/uevent") == 0) {{
-                require_true(flags == (O_RDONLY | O_CLOEXEC));
-                return 100;
-            }}
-            if (strcmp(path, "/dev/sda2") == 0) {{
-                require_true(flags == (O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
-                return 102;
-            }}
-            oracle_failed = 1;
-            return -1;
-        }}
-
-        ssize_t __wrap_read(int fd, void *buf, size_t count) {{
-            static const char uevent[] =
-                "MAJOR=8\\nMINOR=2\\nDEVNAME=sda2\\nDEVTYPE=partition\\nPARTN=2\\n"
-                "PARTUUID={DATA_PARTUUID}\\n";
-            require_true(fd == 100 && count >= sizeof(uevent) - 1);
-            memcpy(buf, uevent, sizeof(uevent) - 1);
-            return (ssize_t)(sizeof(uevent) - 1);
-        }}
-
-        int __wrap_close(int fd) {{ require_true(fd == 100 || fd == 102); return 0; }}
-
-        int __wrap_fstat(int fd, struct stat *st) {{
-            require_true(fd == 102);
-            memset(st, 0, sizeof(*st));
-            st->st_mode = S_IFBLK | 0600;
-            st->st_rdev = makedev(8, 2);
-            return 0;
         }}
 
         int __wrap_mknod(const char *path, mode_t mode, dev_t dev) {{
@@ -231,11 +184,6 @@ def run_production_ops_oracle(build_dir: str) -> None:
         }}
 
         int main(void) {{
-            char device_id[64];
-            dev_t rdev = 0;
-            int retained_fd = -1;
-            require_true(real_resolve_partuuid(NULL, "{DATA_PARTUUID}", device_id, sizeof(device_id), &rdev, &retained_fd) == 0);
-            require_true(strcmp(device_id, "8:2") == 0 && rdev == makedev(8, 2) && retained_fd == 102);
             require_true(real_dm_dev_create(NULL, 77, SPP_DIAG_DM_NAME) == 0);
             require_true(real_dm_table_load(NULL, 77, SPP_DIAG_DM_NAME, (uint64_t)262144 * 8, expected_table) == 0);
             require_true(real_dm_dev_suspend(NULL, 77, SPP_DIAG_DM_NAME) == 0);
@@ -251,7 +199,7 @@ def run_production_ops_oracle(build_dir: str) -> None:
     )
     with open(wrapper_source, "w", encoding="utf-8") as handle:
         handle.write(code)
-    wrapped = ("glob", "globfree", "open", "read", "close", "fstat", "mknod", "unlink", "ioctl", "fcntl", "close_range")
+    wrapped = ("mknod", "unlink", "ioctl", "fcntl", "close_range")
     command = ["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-pedantic", "-o", wrapper_binary, wrapper_source]
     command.extend(f"-Wl,--wrap={name}" for name in wrapped)
     compiled = subprocess.run(command, capture_output=True, text=True)
@@ -372,7 +320,7 @@ def find_log_entry(log_lines: list[str], op: str, occurrence: int = 0) -> str:
 
 
 def main() -> int:
-    with tempfile.TemporaryDirectory() as build_dir:
+    with tempfile.TemporaryDirectory(dir="/var/tmp") as build_dir:
         compile_production(build_dir)
         print("ok   production_binary_excludes_test_harness")
         run_production_ops_oracle(build_dir)
@@ -380,7 +328,7 @@ def main() -> int:
         fixture = compile_fixture(build_dir)
         tests = 2
 
-        with tempfile.TemporaryDirectory() as work_dir:
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as work_dir:
             rc, log = run_fixture(fixture, happy_path_script(), work_dir)
             assert rc == 0, f"happy path exit {rc}, log={log}"
             assert log_ops(log)[-1] == "execve", log
@@ -419,7 +367,7 @@ def main() -> int:
             print("ok   happy_path_full_sequence")
             tests += 1
 
-        with tempfile.TemporaryDirectory() as work_dir:
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as work_dir:
             script = happy_path_script()
             first_resolve = next(i for i, line in enumerate(script) if line.startswith("resolve_partuuid\t"))
             script[first_resolve] = script_line("resolve_partuuid", result=-1)
@@ -430,7 +378,7 @@ def main() -> int:
             print("ok   missing_partuuid_rejects_before_verity")
             tests += 1
 
-        with tempfile.TemporaryDirectory() as work_dir:
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as work_dir:
             script = happy_path_script()
             first_resolve = next(i for i, line in enumerate(script) if line.startswith("resolve_partuuid\t"))
             script[first_resolve] = script_line("resolve_partuuid", result=0, device_id="8:2", rdev=2050, fd=1100)
@@ -442,7 +390,7 @@ def main() -> int:
             print("ok   duplicate_partuuid_rejects")
             tests += 1
 
-        with tempfile.TemporaryDirectory() as work_dir:
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as work_dir:
             wrong_root = ("0" if ROOT_HASH[0] != "0" else "1") + ROOT_HASH[1:]
             script = happy_path_script(cmdline=CMDLINE_OK.replace(ROOT_HASH, wrong_root), root_mount_ok=False)
             rc, log = run_fixture(fixture, script, work_dir)
@@ -454,7 +402,7 @@ def main() -> int:
             print("ok   mutated_root_hash_reaches_only_failing_verified_mount_and_cleans_mapper")
             tests += 1
 
-        with tempfile.TemporaryDirectory() as work_dir:
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as work_dir:
             script = happy_path_script(mount_writable=True)
             rc, log = run_fixture(fixture, script, work_dir)
             assert rc == 17, f"expected ERR_MOUNT_WRITABLE(17), got {rc}"
@@ -474,7 +422,7 @@ def main() -> int:
             "duplicate_partition": CMDLINE_OK.replace(HASH_PARTUUID, DATA_PARTUUID),
         }
         for name, cmdline in malformed_cases.items():
-            with tempfile.TemporaryDirectory() as work_dir:
+            with tempfile.TemporaryDirectory(dir="/var/tmp") as work_dir:
                 script = [
                     script_line("mount", result=0),
                     script_line("mount", result=0),
@@ -491,14 +439,14 @@ def main() -> int:
                 print(f"ok   malformed_cmdline_{name}")
                 tests += 1
 
-        with tempfile.TemporaryDirectory() as work_dir:
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as work_dir:
             script = happy_path_script()[:-1]
             rc, log = run_fixture(fixture, script, work_dir)
             assert rc == 99, f"expected harness-exhaustion sentinel(99), got {rc}"
             print("ok   script_exhaustion_after_last_fd_setup_is_a_test_failure_not_a_pass")
             tests += 1
 
-        with tempfile.TemporaryDirectory() as work_dir:
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as work_dir:
             rc, log = run_fixture(fixture, happy_path_script(direct_runtime_fds=True), work_dir)
             assert rc == 0, f"direct 3/4/5 path exit {rc}, log={log}"
             runtime_dup2 = [line for line in log if line.startswith("dup2\t") and any(f"newfd={fd}" in line for fd in (3, 4, 5))]
@@ -511,7 +459,7 @@ def main() -> int:
             print("ok   already_assigned_runtime_fds_are_not_closed_or_duplicated")
             tests += 1
 
-        with tempfile.TemporaryDirectory() as work_dir:
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as work_dir:
             script = happy_path_script()
             pread_index = next(i for i, line in enumerate(script) if line.startswith("pread\t"))
             corrupted_header = ("0" if VERITY_HEADER_HEX[0] != "0" else "1") + VERITY_HEADER_HEX[1:]
@@ -545,7 +493,7 @@ def main() -> int:
             elif op == "statvfs_rdonly":
                 mutated.insert(index + 1, script_line("umount2", result=0))
                 mutated.insert(index + 2, script_line("dm_dev_remove", result=0))
-            with tempfile.TemporaryDirectory() as work_dir:
+            with tempfile.TemporaryDirectory(dir="/var/tmp") as work_dir:
                 rc, log = run_fixture(fixture, mutated, work_dir)
             assert rc != 0, f"{op}[{occurrence}] fault unexpectedly passed: {log}"
             if op != "execve":
@@ -559,7 +507,7 @@ def main() -> int:
 
         veritysetup = shutil.which("veritysetup")
         assert veritysetup is not None
-        with tempfile.TemporaryDirectory() as work_dir:
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as work_dir:
             data_path = os.path.join(work_dir, "data")
             hash_path = os.path.join(work_dir, "hash")
             with open(data_path, "wb") as handle:

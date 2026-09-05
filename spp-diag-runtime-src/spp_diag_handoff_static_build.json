@@ -1,0 +1,75 @@
+{
+  "schema": "sol-spp-diag-static-native-build-requirements-v1",
+  "purpose": "authoritative hermetic static-link requirements for /spp-diag-handoff; this is not an initramfs packaging recipe",
+  "source_set": [
+    "spp-diag-runtime-src/spp_diag_handoff.c"
+  ],
+  "target": "x86_64-unknown-linux-musl",
+  "artifacts": {
+    "toolchain": {
+      "artifact": "toolchain/x86_64-unknown-linux-musl.tar.zst",
+      "sha256": "6f841a90c8f8f3346791b38b59e78be0c41d9c47019ee62ca564be97e10a17f0"
+    },
+    "sysroot": {
+      "artifact": "sysroots/x86_64-unknown-linux-musl.tar.zst",
+      "sha256": "c7bd2dbe5aa8d3d1470682a8591784b0846468b2d2b45f8fc314a50c38540c48"
+    }
+  },
+  "compile": {
+    "argv": [
+      "{toolchain}/bin/x86_64-unknown-linux-musl-gcc",
+      "--sysroot={sysroot}",
+      "-std=c11",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-pedantic",
+      "-ffreestanding",
+      "-fno-stack-protector",
+      "-c",
+      "spp-diag-runtime-src/spp_diag_handoff.c",
+      "-o",
+      "{build}/spp_diag_handoff.o"
+    ]
+  },
+  "link": {
+    "argv": [
+      "{toolchain}/bin/x86_64-unknown-linux-musl-gcc",
+      "--sysroot={sysroot}",
+      "-nostdlib",
+      "-static",
+      "-o",
+      "{output}/spp-diag-handoff",
+      "{sysroot}/usr/lib/crt1.o",
+      "{sysroot}/usr/lib/crti.o",
+      "{build}/spp_diag_handoff.o",
+      "-Wl,--start-group",
+      "{sysroot}/usr/lib/libc.a",
+      "{toolchain}/lib/gcc/x86_64-unknown-linux-musl/14.2.0/libgcc.a",
+      "-Wl,--end-group",
+      "{sysroot}/usr/lib/crtn.o"
+    ],
+    "explicit_static_inputs": [
+      "{sysroot}/usr/lib/crt1.o",
+      "{sysroot}/usr/lib/crti.o",
+      "{sysroot}/usr/lib/crtn.o",
+      "{sysroot}/usr/lib/libc.a",
+      "{toolchain}/lib/gcc/x86_64-unknown-linux-musl/14.2.0/libgcc.a"
+    ],
+    "forbidden_dependencies": [
+      "libfdisk",
+      "libblkid",
+      "libudev"
+    ]
+  },
+  "output": {
+    "path": "/spp-diag-handoff",
+    "mode": "0755",
+    "expectations": {
+      "elf_type": "ET_EXEC",
+      "static": true,
+      "interpreter": null,
+      "dt_needed": []
+    }
+  }
+}

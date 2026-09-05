@@ -31,7 +31,7 @@ import conf_proc_spp_diag_controller as controller  # noqa: E402
 from conf_proc_spp_diag_controller import (  # noqa: E402
     BINDING_DOMAIN, BINDING_MAGIC, CONTROLLER_PATH, ChildResult, ControllerFault, ControllerIdentity,
     ControllerOps, TARGET_PROFILE, _CUDA, _EXEC_DENIALS, _JIT, _MODEL, _MODEL_FIXTURE_SHA256,
-    _JIT_FIXTURE_SHA256, _POISONS, _adopted_child_pids, _binding_device_path, _gpu_nonce,
+    _JIT_FIXTURE_SHA256, _POISONS, _adopted_child_pids, _gpu_nonce,
     _inherited_fd_listing_is_exact, _is_fixed_exec_target, _output_oracle, _read_fd, _real_direct,
     encode_command, parse_binding_record, parse_boot_inputs, parse_control_plan, main as controller_main,
     run_controller,
@@ -295,28 +295,7 @@ def test_adopted_descendant_census_rejects_malformed_output() -> None:
         controller._read_regular = original
 
 
-def test_binding_resolver_and_stream_eof_are_not_alias_or_one_read_checks() -> None:
-    original_listdir = controller.os.listdir
-    original_read = controller._read_regular
-    try:
-        controller.os.listdir = lambda path: ["sdc1", "sdb1"] if path == "/sys/class/block" else []
-        records = {
-            "/sys/class/block/sdb1/uevent": b"DEVNAME=sdb1\nPARTUUID=33333333-3333-4333-8333-333333333333\n",
-            "/sys/class/block/sdc1/uevent": b"DEVNAME=sdc1\nPARTUUID=44444444-4444-4444-8444-444444444444\n",
-        }
-        controller._read_regular = lambda path, cap: records[path] if cap == 4096 else b""
-        assert _binding_device_path("33333333-3333-4333-8333-333333333333") == "/dev/sdb1"
-        records["/sys/class/block/sdc1/uevent"] = records["/sys/class/block/sdb1/uevent"].replace(b"sdb1", b"sdc1")
-        try:
-            _binding_device_path("33333333-3333-4333-8333-333333333333")
-        except OSError:
-            pass
-        else:
-            raise AssertionError("duplicate PARTUUID was accepted")
-    finally:
-        controller.os.listdir = original_listdir
-        controller._read_regular = original_read
-
+def test_binding_stream_eof_is_not_a_one_read_check() -> None:
     read_fd, write_fd = os.pipe()
     try:
         os.write(write_fd, b"0123456789")
@@ -503,7 +482,7 @@ def test_fd_uart_and_runner_source_contract() -> None:
         "termios.VMIN", "termios.VTIME", "os.setsid()", "_TERM_GRACE", "_POST_KILL",
         "_drain_child_pipes", "os.killpg(pid, signal.SIGTERM)", "os.killpg(pid, signal.SIGKILL)",
         "_inherited_fd_listing_is_exact", "readlink(f\"/proc/self/fd/{extras.pop()}\")",
-        "read_binding=_read_binding_device", "ops.read_binding(boot.binding_partuuid)", "_binding_device_path",
+        "read_binding=_read_binding_device", "ops.read_binding(boot.binding_partuuid)", "resolve_partuuid(partuuid, roots)",
         "_is_fixed_exec_target", "_adopted_child_pids()", "_signal_adopted(adopted, signal.SIGTERM)",
         "_signal_adopted(_adopted_child_pids(), signal.SIGKILL)",
         "read_stream=lambda cap: _read_fd(STREAM_FD, cap)", "while total <= cap", "termios.TIOCOUTQ",
@@ -540,11 +519,12 @@ def test_source_has_a_real_entrypoint_and_no_appraiser_import() -> None:
         assert required in source
 
 
-def test_shipped_entrypoint_exact_eight_module_import_graph() -> None:
+def test_shipped_entrypoint_exact_nine_module_import_graph() -> None:
     """Source/reachability assertion for the extensionless installed controller."""
 
     expected = {
         "conf_proc_reasons.py", "conf_proc_json.py", "conf_proc_spp_diag_failure_terminal_reasons.py",
+        "conf_proc_spp_diag_gpt.py",
         "conf_proc_spp_diag_export.py", "conf_proc_spp_diag_export_reasons.py", "conf_proc_spp_diag_quote.py",
         "conf_proc_spp_diag_pcr.py", "conf_proc_spp_diagbundle_protocol.py",
     }
@@ -569,11 +549,12 @@ def test_shipped_entrypoint_exact_eight_module_import_graph() -> None:
 def test_isolated_staged_controller_import_reaches_real_main() -> None:
     support = (
         "conf_proc_reasons.py", "conf_proc_json.py", "conf_proc_spp_diag_failure_terminal_reasons.py",
+        "conf_proc_spp_diag_gpt.py",
         "conf_proc_spp_diag_export.py", "conf_proc_spp_diag_export_reasons.py", "conf_proc_spp_diag_quote.py",
         "conf_proc_spp_diag_pcr.py", "conf_proc_spp_diagbundle_protocol.py",
     )
     module_names = tuple(path.removesuffix(".py") for path in support)
-    with tempfile.TemporaryDirectory() as work_dir:
+    with tempfile.TemporaryDirectory(dir="/var/tmp") as work_dir:
         root = Path(work_dir)
         import_root = root / "usr/lib/python3.10"
         controller_root = root / "usr/lib/spp"
@@ -619,13 +600,13 @@ TESTS = (
     test_binding_device_seam_is_used_and_binding_failure_is_terminal,
     test_fd_listing_and_exec_target_rejecting_twins,
     test_adopted_descendant_census_rejects_malformed_output,
-    test_binding_resolver_and_stream_eof_are_not_alias_or_one_read_checks,
+    test_binding_stream_eof_is_not_a_one_read_check,
     test_direct_network_and_poison_syscalls_pin_the_trace_coordinates,
     test_main_uses_the_same_injected_production_core_and_one_failure_record,
     test_uart_setup_and_collector_failures_fail_stop_without_second_record,
     test_fd_uart_and_runner_source_contract,
     test_source_has_a_real_entrypoint_and_no_appraiser_import,
-    test_shipped_entrypoint_exact_eight_module_import_graph,
+    test_shipped_entrypoint_exact_nine_module_import_graph,
     test_isolated_staged_controller_import_reaches_real_main,
 )
 

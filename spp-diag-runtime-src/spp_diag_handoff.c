@@ -25,9 +25,9 @@
 #define _GNU_SOURCE
 
 #include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <glob.h>
 #include <inttypes.h>
 #include <linux/dm-ioctl.h>
 #include <linux/fs.h>
@@ -37,6 +37,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mount.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/sysmacros.h>
@@ -595,99 +596,845 @@ static ssize_t real_pread(void *ctx, int fd, void *buf, size_t count, off_t offs
     return pread(fd, buf, count, offset);
 }
 
-static int real_resolve_partuuid(
-    void *ctx,
-    const char *partuuid,
-    char *out_device_id,
-    size_t out_size,
-    dev_t *out_rdev,
-    int *out_fd
-) {
-    (void)ctx;
-    glob_t paths;
-    memset(&paths, 0, sizeof(paths));
-    int glob_rc = glob("/sys/class/block/*/uevent", GLOB_NOSORT, NULL, &paths);
-    if (glob_rc != 0) {
-        globfree(&paths);
+/*
+ * Sysfs tells us which kernel partition belongs to which disk; GPT bytes tell
+ * us which UUID it has.  In particular, neither a sysfs name nor a uevent
+ * PARTUUID is ever an authority for this resolver.
+ *
+ * The roots/bindings argument is deliberately a direct-call fixture seam.  It
+ * has no environment switch and is not used by the production wrapper below.
+ */
+#define SPP_DIAG_GPT_SECTOR 512U
+#define SPP_DIAG_GPT_ENTRIES 128U
+#define SPP_DIAG_GPT_ENTRY_SIZE 128U
+#define SPP_DIAG_GPT_ARRAY_BYTES (SPP_DIAG_GPT_ENTRIES * SPP_DIAG_GPT_ENTRY_SIZE)
+#define SPP_DIAG_GPT_ARRAY_SECTORS (SPP_DIAG_GPT_ARRAY_BYTES / SPP_DIAG_GPT_SECTOR)
+#define SPP_DIAG_GPT_MAX_METADATA_BYTES (64U * 1024U)
+#define SPP_DIAG_GPT_MAX_DISKS 256U
+#define SPP_DIAG_GPT_MAX_CLASS 65536U
+#define SPP_DIAG_GPT_MAX_ANCESTORS 64U
+
+struct spp_diag_fixture_node_binding {
+    unsigned int major_number;
+    unsigned int minor_number;
+    dev_t st_dev;
+    ino_t st_ino;
+};
+
+struct spp_diag_resolver_roots {
+    const char *class_block_root;
+    const char *dev_block_root;
+    const char *virtual_root;
+    const char *device_root;
+    const struct spp_diag_fixture_node_binding *fixture_bindings;
+    size_t fixture_binding_count;
+};
+
+struct spp_diag_sysfs_identity {
+    dev_t st_dev;
+    ino_t st_ino;
+};
+
+struct spp_diag_resolver_disk {
+    struct spp_diag_sysfs_identity object;
+    unsigned int major_number;
+    unsigned int minor_number;
+    char devname[128];
+    unsigned char part_seen[SPP_DIAG_GPT_ENTRIES];
+};
+
+struct spp_diag_resolver_part {
+    struct spp_diag_sysfs_identity parent;
+    unsigned int major_number;
+    unsigned int minor_number;
+    unsigned int number;
+    uint64_t start;
+    uint64_t size;
+    char devname[128];
+};
+
+struct spp_diag_gpt_header {
+    uint32_t header_size;
+    uint64_t current_lba;
+    uint64_t alternate_lba;
+    uint64_t first_usable;
+    uint64_t last_usable;
+    uint64_t array_lba;
+    uint32_t array_crc;
+    unsigned char disk_guid[16];
+};
+
+struct spp_diag_gpt_match {
+    struct spp_diag_sysfs_identity disk;
+    unsigned int number;
+    uint64_t start;
+    uint64_t size;
+};
+
+static uint32_t spp_diag_crc32(const unsigned char *data, size_t size) {
+    uint32_t crc = UINT32_MAX;
+    for (size_t i = 0; i < size; i++) {
+        crc ^= data[i];
+        for (unsigned int bit = 0; bit < 8; bit++) {
+            crc = (crc >> 1) ^ ((crc & 1U) ? UINT32_C(0xedb88320) : 0U);
+        }
+    }
+    return ~crc;
+}
+
+static int spp_diag_u64_add(uint64_t left, uint64_t right, uint64_t *out) {
+    if (left > UINT64_MAX - right) {
         return -1;
     }
-    int found = 0;
-    int selected_fd = -1;
-    dev_t selected_rdev = 0;
-    for (size_t i = 0; i < paths.gl_pathc; i++) {
-        int fd = open(paths.gl_pathv[i], O_RDONLY | O_CLOEXEC);
-        if (fd < 0) {
-            goto fail;
+    *out = left + right;
+    return 0;
+}
+
+static int spp_diag_u64_mul(uint64_t left, uint64_t right, uint64_t *out) {
+    if (left != 0 && right > UINT64_MAX / left) {
+        return -1;
+    }
+    *out = left * right;
+    return 0;
+}
+
+static int spp_diag_identity_equal(struct spp_diag_sysfs_identity left, struct spp_diag_sysfs_identity right) {
+    return left.st_dev == right.st_dev && left.st_ino == right.st_ino;
+}
+
+static int spp_diag_fd_identity(int fd, struct spp_diag_sysfs_identity *out) {
+    struct stat st;
+    if (fstat(fd, &st) != 0) {
+        return -1;
+    }
+    out->st_dev = st.st_dev;
+    out->st_ino = st.st_ino;
+    return 0;
+}
+
+static int spp_diag_read_exact_at(int fd, unsigned char *out, size_t count, uint64_t offset, uint64_t size) {
+    uint64_t end;
+    if (spp_diag_u64_add(offset, (uint64_t)count, &end) != 0 || end > size || offset > (uint64_t)INT64_MAX) {
+        return -1;
+    }
+    size_t done = 0;
+    while (done < count) {
+        ssize_t got = pread(fd, out + done, count - done, (off_t)(offset + done));
+        if (got <= 0) {
+            return -1;
         }
-        char uevent[4096];
-        ssize_t n = read(fd, uevent, sizeof(uevent) - 1);
-        int saved_errno = errno;
-        if (close(fd) != 0 || n < 0 || n == (ssize_t)(sizeof(uevent) - 1)) {
-            errno = saved_errno;
-            goto fail;
+        done += (size_t)got;
+    }
+    return 0;
+}
+
+static int spp_diag_read_text_at(int directory_fd, const char *name, char *out, size_t out_size) {
+    if (out_size < 2) {
+        return -1;
+    }
+    int fd = openat(directory_fd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) {
+        return -1;
+    }
+    struct stat st;
+    size_t used = 0;
+    int result = -1;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        goto done;
+    }
+    while (used < out_size - 1) {
+        ssize_t got = read(fd, out + used, out_size - 1 - used);
+        if (got < 0) {
+            goto done;
         }
-        uevent[n] = '\0';
-        const char *matched_uuid = NULL;
-        const char *devname = NULL;
-        char *save = NULL;
-        char *line = strtok_r(uevent, "\n", &save);
-        while (line != NULL) {
-            if (strncmp(line, "PARTUUID=", 9) == 0) {
-                matched_uuid = line + 9;
-            } else if (strncmp(line, "DEVNAME=", 8) == 0) {
-                devname = line + 8;
+        if (got == 0) {
+            out[used] = '\0';
+            result = 0;
+            goto done;
+        }
+        used += (size_t)got;
+    }
+    {
+        unsigned char extra;
+        if (read(fd, &extra, 1) != 0) {
+            goto done;
+        }
+    }
+    out[used] = '\0';
+    result = 0;
+done:
+    if (close(fd) != 0) {
+        result = -1;
+    }
+    return result;
+}
+
+static int spp_diag_parse_uint(const char *value, uint64_t maximum, uint64_t *out) {
+    if (value == NULL || *value == '\0') {
+        return -1;
+    }
+    uint64_t result = 0;
+    for (const unsigned char *p = (const unsigned char *)value; *p != '\0'; p++) {
+        if (*p < '0' || *p > '9' || result > (maximum - (uint64_t)(*p - '0')) / 10U) {
+            return -1;
+        }
+        result = result * 10U + (uint64_t)(*p - '0');
+    }
+    *out = result;
+    return 0;
+}
+
+static int spp_diag_parse_dev_text(const char *text, unsigned int *major_number, unsigned int *minor_number) {
+    char copy[64];
+    size_t length = strlen(text);
+    if (length == 0 || length >= sizeof(copy)) {
+        return -1;
+    }
+    memcpy(copy, text, length + 1);
+    while (length > 0 && (copy[length - 1] == '\n' || copy[length - 1] == '\r')) {
+        copy[--length] = '\0';
+    }
+    char *colon = strchr(copy, ':');
+    uint64_t major_value;
+    uint64_t minor_value;
+    if (colon == NULL || strchr(colon + 1, ':') != NULL) {
+        return -1;
+    }
+    *colon = '\0';
+    if (spp_diag_parse_uint(copy, UINT32_MAX, &major_value) != 0 ||
+        spp_diag_parse_uint(colon + 1, UINT32_MAX, &minor_value) != 0) {
+        return -1;
+    }
+    *major_number = (unsigned int)major_value;
+    *minor_number = (unsigned int)minor_value;
+    return 0;
+}
+
+static int spp_diag_read_dev_at(int directory_fd, unsigned int *major_number, unsigned int *minor_number) {
+    char text[64];
+    return spp_diag_read_text_at(directory_fd, "dev", text, sizeof(text)) == 0
+        ? spp_diag_parse_dev_text(text, major_number, minor_number) : -1;
+}
+
+static int spp_diag_optional_uint_at(int directory_fd, const char *name, uint64_t *out, int *present) {
+    int fd = openat(directory_fd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) {
+        if (errno == ENOENT) {
+            *present = 0;
+            return 0;
+        }
+        return -1;
+    }
+    char text[64];
+    struct stat st;
+    ssize_t got;
+    int result = -1;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
+        (got = read(fd, text, sizeof(text) - 1)) < 0 || got == (ssize_t)(sizeof(text) - 1)) {
+        goto done;
+    }
+    text[got] = '\0';
+    while (got > 0 && (text[got - 1] == '\n' || text[got - 1] == '\r')) {
+        text[--got] = '\0';
+    }
+    if (spp_diag_parse_uint(text, UINT64_MAX, out) != 0) {
+        goto done;
+    }
+    *present = 1;
+    result = 0;
+done:
+    if (close(fd) != 0) {
+        result = -1;
+    }
+    return result;
+}
+
+struct spp_diag_uevent {
+    char devname[128];
+    char devtype[32];
+    unsigned int major_number;
+    unsigned int minor_number;
+    uint64_t partn;
+    int has_partn;
+};
+
+static int spp_diag_copy_field(char *out, size_t out_size, const char *value) {
+    size_t length = strlen(value);
+    if (length == 0 || length >= out_size) {
+        return -1;
+    }
+    memcpy(out, value, length + 1);
+    return 0;
+}
+
+static int spp_diag_safe_devname(const char *value) {
+    if (value == NULL || *value == '\0') {
+        return -1;
+    }
+    for (const unsigned char *p = (const unsigned char *)value; *p != '\0'; p++) {
+        if (!(isalnum(*p) || *p == '.' || *p == '_' || *p == '-')) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int spp_diag_read_uevent(int directory_fd, struct spp_diag_uevent *out) {
+    char text[4097];
+    unsigned int seen = 0;
+    memset(out, 0, sizeof(*out));
+    if (spp_diag_read_text_at(directory_fd, "uevent", text, sizeof(text)) != 0) {
+        return -1;
+    }
+    char *save = NULL;
+    for (char *line = strtok_r(text, "\n", &save); line != NULL; line = strtok_r(NULL, "\n", &save)) {
+        char *equals = strchr(line, '=');
+        if (equals == NULL || equals == line) {
+            return -1;
+        }
+        *equals = '\0';
+        const char *value = equals + 1;
+        uint64_t number;
+        if (strcmp(line, "DEVNAME") == 0) {
+            if ((seen & 1U) != 0 || spp_diag_copy_field(out->devname, sizeof(out->devname), value) != 0) return -1;
+            seen |= 1U;
+        } else if (strcmp(line, "DEVTYPE") == 0) {
+            if ((seen & 2U) != 0 || spp_diag_copy_field(out->devtype, sizeof(out->devtype), value) != 0) return -1;
+            seen |= 2U;
+        } else if (strcmp(line, "MAJOR") == 0) {
+            if ((seen & 4U) != 0 || spp_diag_parse_uint(value, UINT32_MAX, &number) != 0) return -1;
+            out->major_number = (unsigned int)number;
+            seen |= 4U;
+        } else if (strcmp(line, "MINOR") == 0) {
+            if ((seen & 8U) != 0 || spp_diag_parse_uint(value, UINT32_MAX, &number) != 0) return -1;
+            out->minor_number = (unsigned int)number;
+            seen |= 8U;
+        } else if (strcmp(line, "PARTN") == 0) {
+            if ((seen & 16U) != 0 || spp_diag_parse_uint(value, SPP_DIAG_GPT_ENTRIES, &out->partn) != 0) return -1;
+            out->has_partn = 1;
+            seen |= 16U;
+        }
+    }
+    return (seen & 15U) == 15U && spp_diag_safe_devname(out->devname) == 0 ? 0 : -1;
+}
+
+static int spp_diag_is_virtual_ancestor(int fd, struct spp_diag_sysfs_identity virtual_root) {
+    int current = dup(fd);
+    if (current < 0) {
+        return -1;
+    }
+    for (unsigned int depth = 0; depth < SPP_DIAG_GPT_MAX_ANCESTORS; depth++) {
+        struct spp_diag_sysfs_identity current_identity;
+        struct spp_diag_sysfs_identity parent_identity;
+        int parent;
+        if (spp_diag_fd_identity(current, &current_identity) != 0) {
+            close(current);
+            return -1;
+        }
+        if (spp_diag_identity_equal(current_identity, virtual_root)) {
+            close(current);
+            return 1;
+        }
+        parent = openat(current, "..", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (parent < 0 || spp_diag_fd_identity(parent, &parent_identity) != 0) {
+            if (parent >= 0) close(parent);
+            close(current);
+            return -1;
+        }
+        if (spp_diag_identity_equal(current_identity, parent_identity)) {
+            close(parent);
+            close(current);
+            return 0;
+        }
+        close(current);
+        current = parent;
+    }
+    close(current);
+    return -1;
+}
+
+static int spp_diag_read_disk(int fd, struct spp_diag_resolver_disk *out) {
+    uint64_t ignored;
+    int present;
+    struct spp_diag_uevent uevent;
+    if (spp_diag_optional_uint_at(fd, "partition", &ignored, &present) != 0 || present ||
+        spp_diag_read_uevent(fd, &uevent) != 0 || strcmp(uevent.devtype, "disk") != 0 ||
+        spp_diag_read_dev_at(fd, &out->major_number, &out->minor_number) != 0 ||
+        uevent.major_number != out->major_number || uevent.minor_number != out->minor_number ||
+        spp_diag_fd_identity(fd, &out->object) != 0) {
+        return -1;
+    }
+    memcpy(out->devname, uevent.devname, sizeof(out->devname));
+    return 0;
+}
+
+static int spp_diag_read_part(int fd, struct spp_diag_resolver_part *out, struct spp_diag_resolver_disk *parent) {
+    uint64_t number;
+    uint64_t start;
+    uint64_t size;
+    int present;
+    struct spp_diag_uevent uevent;
+    if (spp_diag_optional_uint_at(fd, "partition", &number, &present) != 0 || !present || number == 0 ||
+        number > SPP_DIAG_GPT_ENTRIES || spp_diag_read_uevent(fd, &uevent) != 0 ||
+        strcmp(uevent.devtype, "partition") != 0 || !uevent.has_partn || uevent.partn != number ||
+        spp_diag_read_dev_at(fd, &out->major_number, &out->minor_number) != 0 ||
+        uevent.major_number != out->major_number || uevent.minor_number != out->minor_number ||
+        spp_diag_optional_uint_at(fd, "start", &start, &present) != 0 || !present ||
+        spp_diag_optional_uint_at(fd, "size", &size, &present) != 0 || !present || size == 0 ||
+        start > UINT64_MAX - (size - 1)) {
+        return -1;
+    }
+    int parent_fd = openat(fd, "..", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (parent_fd < 0) {
+        return -1;
+    }
+    int result = spp_diag_read_disk(parent_fd, parent);
+    if (close(parent_fd) != 0) {
+        result = -1;
+    }
+    if (result != 0) {
+        return -1;
+    }
+    out->parent = parent->object;
+    out->number = (unsigned int)number;
+    out->start = start;
+    out->size = size;
+    memcpy(out->devname, uevent.devname, sizeof(out->devname));
+    return 0;
+}
+
+static int spp_diag_find_disk(const struct spp_diag_resolver_disk *disks, size_t count, struct spp_diag_sysfs_identity object) {
+    for (size_t i = 0; i < count; i++) {
+        if (spp_diag_identity_equal(disks[i].object, object)) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static int spp_diag_add_disk(struct spp_diag_resolver_disk *disks, size_t *count, const struct spp_diag_resolver_disk *disk) {
+    int existing = spp_diag_find_disk(disks, *count, disk->object);
+    if (existing >= 0) {
+        if (disks[existing].major_number != disk->major_number || disks[existing].minor_number != disk->minor_number ||
+            strcmp(disks[existing].devname, disk->devname) != 0) {
+            return -1;
+        }
+        return existing;
+    }
+    if (*count >= SPP_DIAG_GPT_MAX_DISKS) {
+        return -1;
+    }
+    disks[*count] = *disk;
+    memset(disks[*count].part_seen, 0, sizeof(disks[*count].part_seen));
+    (*count)++;
+    return (int)(*count - 1);
+}
+
+static int spp_diag_collect_topology(
+    const struct spp_diag_resolver_roots *roots,
+    struct spp_diag_resolver_disk *disks,
+    size_t *disk_count,
+    const struct spp_diag_gpt_match *wanted,
+    struct spp_diag_resolver_part *selected_part,
+    unsigned int *selected_count
+) {
+    int virtual_fd = -1;
+    int class_fd = -1;
+    int dev_block_fd = -1;
+    DIR *class_dir = NULL;
+    struct spp_diag_sysfs_identity virtual_identity;
+    unsigned int class_count = 0;
+    int result = -1;
+    *disk_count = 0;
+    *selected_count = 0;
+    virtual_fd = open(roots->virtual_root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    class_fd = open(roots->class_block_root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    dev_block_fd = open(roots->dev_block_root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (virtual_fd < 0 || class_fd < 0 || dev_block_fd < 0 || spp_diag_fd_identity(virtual_fd, &virtual_identity) != 0) {
+        goto done;
+    }
+    class_dir = fdopendir(class_fd);
+    if (class_dir == NULL) {
+        goto done;
+    }
+    class_fd = -1;
+    for (;;) {
+        errno = 0;
+        struct dirent *entry = readdir(class_dir);
+        if (entry == NULL) {
+            if (errno != 0) {
+                goto done;
             }
-            line = strtok_r(NULL, "\n", &save);
+            break;
         }
-        if (matched_uuid == NULL || strcmp(matched_uuid, partuuid) != 0) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
             continue;
         }
-        if (found || devname == NULL || *devname == '\0' || strchr(devname, '/') != NULL) {
-            goto fail;
+        if (++class_count > SPP_DIAG_GPT_MAX_CLASS || strchr(entry->d_name, '/') != NULL) {
+            goto done;
         }
-        for (const unsigned char *p = (const unsigned char *)devname; *p != '\0'; p++) {
-            if (!(isalnum(*p) || *p == '.' || *p == '_' || *p == '-')) {
-                goto fail;
+        int class_object_fd = openat(dirfd(class_dir), entry->d_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        int physical_fd = -1;
+        unsigned int major_number;
+        unsigned int minor_number;
+        char dev_text[64];
+        int virtual_result;
+        if (class_object_fd < 0 || spp_diag_read_dev_at(class_object_fd, &major_number, &minor_number) != 0 ||
+            snprintf(dev_text, sizeof(dev_text), "%u:%u", major_number, minor_number) < 0) {
+            if (class_object_fd >= 0) close(class_object_fd);
+            goto done;
+        }
+        physical_fd = openat(dev_block_fd, dev_text, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (close(class_object_fd) != 0 || physical_fd < 0) {
+            if (physical_fd >= 0) close(physical_fd);
+            goto done;
+        }
+        unsigned int physical_major;
+        unsigned int physical_minor;
+        if (spp_diag_read_dev_at(physical_fd, &physical_major, &physical_minor) != 0 ||
+            physical_major != major_number || physical_minor != minor_number ||
+            (virtual_result = spp_diag_is_virtual_ancestor(physical_fd, virtual_identity)) < 0) {
+            close(physical_fd);
+            goto done;
+        }
+        if (virtual_result == 0) {
+            uint64_t partition_number;
+            int partition_present;
+            if (spp_diag_optional_uint_at(physical_fd, "partition", &partition_number, &partition_present) != 0) {
+                close(physical_fd);
+                goto done;
+            }
+            if (!partition_present) {
+                struct spp_diag_resolver_disk disk;
+                if (spp_diag_read_disk(physical_fd, &disk) != 0 || spp_diag_add_disk(disks, disk_count, &disk) < 0) {
+                    close(physical_fd);
+                    goto done;
+                }
+            } else {
+                struct spp_diag_resolver_part part;
+                struct spp_diag_resolver_disk parent;
+                if (spp_diag_read_part(physical_fd, &part, &parent) != 0) {
+                    close(physical_fd);
+                    goto done;
+                }
+                int disk_index = spp_diag_add_disk(disks, disk_count, &parent);
+                if (disk_index < 0 || disks[disk_index].part_seen[part.number - 1] != 0) {
+                    close(physical_fd);
+                    goto done;
+                }
+                disks[disk_index].part_seen[part.number - 1] = 1;
+                if (wanted != NULL && spp_diag_identity_equal(part.parent, wanted->disk) &&
+                    part.number == wanted->number && part.start == wanted->start && part.size == wanted->size) {
+                    if (++*selected_count > 1) {
+                        close(physical_fd);
+                        goto done;
+                    }
+                    *selected_part = part;
+                }
             }
         }
-        char device_path[256];
-        int written = snprintf(device_path, sizeof(device_path), "/dev/%s", devname);
-        if (written < 0 || (size_t)written >= sizeof(device_path)) {
-            goto fail;
+        if (close(physical_fd) != 0) {
+            goto done;
         }
-        int device_fd = open(device_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-        if (device_fd < 0) {
-            goto fail;
-        }
-        struct stat st;
-        int stat_rc = fstat(device_fd, &st);
-        if (stat_rc != 0 || !S_ISBLK(st.st_mode)) {
-            close(device_fd);
-            goto fail;
-        }
-        selected_rdev = st.st_rdev;
-        selected_fd = device_fd;
-        found = 1;
     }
-    globfree(&paths);
-    if (!found) {
+    result = 0;
+done:
+    if (class_dir != NULL) {
+        closedir(class_dir);
+    } else if (class_fd >= 0) {
+        close(class_fd);
+    }
+    if (dev_block_fd >= 0) close(dev_block_fd);
+    if (virtual_fd >= 0) close(virtual_fd);
+    return result;
+}
+
+static int spp_diag_parse_partuuid(const char *value, unsigned char out[16]) {
+    unsigned char rfc[16];
+    unsigned int position = 0;
+    if (!spp_diag_is_partuuid(value)) {
         return -1;
     }
-    int written = snprintf(out_device_id, out_size, "%u:%u", major(selected_rdev), minor(selected_rdev));
+    for (size_t i = 0; value[i] != '\0';) {
+        if (value[i] == '-') {
+            i++;
+            continue;
+        }
+        unsigned char high = (unsigned char)(isdigit((unsigned char)value[i]) ? value[i] - '0' : value[i] - 'a' + 10);
+        unsigned char low = (unsigned char)(isdigit((unsigned char)value[i + 1]) ? value[i + 1] - '0' : value[i + 1] - 'a' + 10);
+        rfc[position++] = (unsigned char)((high << 4) | low);
+        i += 2;
+    }
+    if (position != sizeof(rfc)) return -1;
+    out[0] = rfc[3]; out[1] = rfc[2]; out[2] = rfc[1]; out[3] = rfc[0];
+    out[4] = rfc[5]; out[5] = rfc[4]; out[6] = rfc[7]; out[7] = rfc[6];
+    memcpy(out + 8, rfc + 8, 8);
+    return 0;
+}
+
+static int spp_diag_protective_mbr(const unsigned char mbr[SPP_DIAG_GPT_SECTOR], uint64_t final_lba) {
+    unsigned int nonempty = 0;
+    const unsigned char *protective = NULL;
+    for (unsigned int i = 0; i < 4; i++) {
+        const unsigned char *entry = mbr + 446 + i * 16;
+        int empty = 1;
+        for (unsigned int j = 0; j < 16; j++) if (entry[j] != 0) empty = 0;
+        if (!empty) nonempty++;
+        if (entry[4] == 0xee) protective = entry;
+    }
+    if (protective == NULL) return 0;
+    if (mbr[510] != 0x55 || mbr[511] != 0xaa || nonempty != 1 || protective[0] != 0 ||
+        spp_diag_le32(protective + 8) != 1 || spp_diag_le32(protective + 12) != (uint32_t)(final_lba > UINT32_MAX ? UINT32_MAX : final_lba)) {
+        return -1;
+    }
+    return 1;
+}
+
+static int spp_diag_parse_gpt_header(
+    const unsigned char data[SPP_DIAG_GPT_SECTOR], uint64_t expected_current, uint64_t final_lba, struct spp_diag_gpt_header *out
+) {
+    if (memcmp(data, "EFI PART", 8) != 0 || spp_diag_le32(data + 8) != UINT32_C(0x00010000)) return -1;
+    uint32_t header_size = spp_diag_le32(data + 12);
+    if (header_size < 92 || header_size > SPP_DIAG_GPT_SECTOR || spp_diag_le32(data + 20) != 0) return -1;
+    unsigned char checked[SPP_DIAG_GPT_SECTOR];
+    memcpy(checked, data, header_size);
+    memset(checked + 16, 0, 4);
+    if (spp_diag_crc32(checked, header_size) != spp_diag_le32(data + 16)) return -1;
+    out->header_size = header_size;
+    out->current_lba = spp_diag_le64(data + 24);
+    out->alternate_lba = spp_diag_le64(data + 32);
+    out->first_usable = spp_diag_le64(data + 40);
+    out->last_usable = spp_diag_le64(data + 48);
+    memcpy(out->disk_guid, data + 56, sizeof(out->disk_guid));
+    out->array_lba = spp_diag_le64(data + 72);
+    out->array_crc = spp_diag_le32(data + 88);
+    if (out->current_lba != expected_current || out->alternate_lba > final_lba ||
+        out->first_usable < 2 || out->first_usable > out->last_usable || out->last_usable >= final_lba ||
+        spp_diag_le32(data + 80) != SPP_DIAG_GPT_ENTRIES || spp_diag_le32(data + 84) != SPP_DIAG_GPT_ENTRY_SIZE ||
+        out->array_lba == 0 || out->array_lba > final_lba || !memcmp(out->disk_guid, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0", 16)) return -1;
+    uint64_t array_end;
+    return spp_diag_u64_add(out->array_lba, SPP_DIAG_GPT_ARRAY_SECTORS - 1, &array_end) == 0 && array_end <= final_lba ? 0 : -1;
+}
+
+static int spp_diag_gpt_ranges_valid(const struct spp_diag_gpt_header *first, const struct spp_diag_gpt_header *second, uint64_t final_lba) {
+    uint64_t first_end;
+    uint64_t second_end;
+    if (first->alternate_lba != final_lba || second->alternate_lba != 1 || first->header_size != second->header_size ||
+        first->first_usable != second->first_usable || first->last_usable != second->last_usable ||
+        first->array_crc != second->array_crc || memcmp(first->disk_guid, second->disk_guid, 16) != 0 ||
+        spp_diag_u64_add(first->array_lba, SPP_DIAG_GPT_ARRAY_SECTORS - 1, &first_end) != 0 ||
+        spp_diag_u64_add(second->array_lba, SPP_DIAG_GPT_ARRAY_SECTORS - 1, &second_end) != 0) return -1;
+    uint64_t starts[2] = {first->array_lba, second->array_lba};
+    uint64_t ends[2] = {first_end, second_end};
+    for (unsigned int i = 0; i < 2; i++) {
+        if (starts[i] == 0 || (starts[i] <= 1 && 1 <= ends[i]) || (starts[i] <= final_lba && final_lba <= ends[i]) ||
+            !(ends[i] < first->first_usable || starts[i] > first->last_usable)) return -1;
+    }
+    return first_end < second->array_lba || second_end < first->array_lba ? 0 : -1;
+}
+
+static int spp_diag_fixture_binding(
+    const struct spp_diag_resolver_roots *roots, unsigned int major_number, unsigned int minor_number, const struct stat *st
+) {
+    if (roots->fixture_bindings == NULL) {
+        return S_ISBLK(st->st_mode) && st->st_rdev == makedev(major_number, minor_number) ? 0 : -1;
+    }
+    for (size_t i = 0; i < roots->fixture_binding_count; i++) {
+        const struct spp_diag_fixture_node_binding *binding = &roots->fixture_bindings[i];
+        if (binding->major_number == major_number && binding->minor_number == minor_number) {
+            return S_ISREG(st->st_mode) && st->st_dev == binding->st_dev && st->st_ino == binding->st_ino ? 0 : -1;
+        }
+    }
+    return -1;
+}
+
+static int spp_diag_open_node(
+    const struct spp_diag_resolver_roots *roots, const char *devname, unsigned int major_number, unsigned int minor_number,
+    int *out_fd, uint64_t *out_size
+) {
+    char path[PATH_MAX];
+    struct stat before;
+    struct stat opened;
+    uint64_t size;
+    int written = snprintf(path, sizeof(path), "%s/%s", roots->device_root, devname);
+    if (written < 0 || (size_t)written >= sizeof(path) || lstat(path, &before) != 0) return -1;
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return -1;
+    int result = -1;
+    if (fstat(fd, &opened) != 0 || before.st_dev != opened.st_dev || before.st_ino != opened.st_ino ||
+        spp_diag_fixture_binding(roots, major_number, minor_number, &opened) != 0) goto done;
+    if (roots->fixture_bindings != NULL) {
+        if (opened.st_size < 0) goto done;
+        size = (uint64_t)opened.st_size;
+    } else {
+        int sector_size = 0;
+        if (ioctl(fd, BLKSSZGET, &sector_size) != 0 || sector_size != (int)SPP_DIAG_GPT_SECTOR || ioctl(fd, BLKGETSIZE64, &size) != 0) goto done;
+    }
+    *out_fd = fd;
+    *out_size = size;
+    return 0;
+done:
+    close(fd);
+    return result;
+}
+
+static int spp_diag_revalidate_node(
+    const struct spp_diag_resolver_roots *roots, int fd, unsigned int major_number, unsigned int minor_number, const struct stat *expected
+) {
+    struct stat st;
+    return fstat(fd, &st) == 0 && st.st_dev == expected->st_dev && st.st_ino == expected->st_ino &&
+        spp_diag_fixture_binding(roots, major_number, minor_number, &st) == 0 ? 0 : -1;
+}
+
+static int spp_diag_scan_disk(
+    const struct spp_diag_resolver_roots *roots, const struct spp_diag_resolver_disk *disk, const unsigned char wanted[16],
+    struct spp_diag_gpt_match *match, int *found
+) {
+    int fd = -1;
+    uint64_t size;
+    unsigned char mbr[SPP_DIAG_GPT_SECTOR];
+    unsigned char primary[SPP_DIAG_GPT_SECTOR];
+    unsigned char backup[SPP_DIAG_GPT_SECTOR];
+    unsigned char first_array[SPP_DIAG_GPT_ARRAY_BYTES];
+    unsigned char second_array[SPP_DIAG_GPT_ARRAY_BYTES];
+    struct stat selected_stat;
+    int result = -1;
+    *found = 0;
+    if (3U * SPP_DIAG_GPT_SECTOR + 2U * SPP_DIAG_GPT_ARRAY_BYTES > SPP_DIAG_GPT_MAX_METADATA_BYTES) goto done;
+    if (spp_diag_open_node(roots, disk->devname, disk->major_number, disk->minor_number, &fd, &size) != 0 ||
+        fstat(fd, &selected_stat) != 0 || size < 2 * SPP_DIAG_GPT_SECTOR || size % SPP_DIAG_GPT_SECTOR != 0) goto done;
+    uint64_t final_lba = size / SPP_DIAG_GPT_SECTOR - 1;
+    uint64_t final_offset;
+    if (spp_diag_u64_mul(final_lba, SPP_DIAG_GPT_SECTOR, &final_offset) != 0 ||
+        spp_diag_read_exact_at(fd, mbr, sizeof(mbr), 0, size) != 0 ||
+        spp_diag_read_exact_at(fd, primary, sizeof(primary), SPP_DIAG_GPT_SECTOR, size) != 0 ||
+        spp_diag_read_exact_at(fd, backup, sizeof(backup), final_offset, size) != 0) goto done;
+    int protective = spp_diag_protective_mbr(mbr, final_lba);
+    int marked = protective != 0 || memcmp(primary, "EFI PART", 8) == 0 || memcmp(backup, "EFI PART", 8) == 0;
+    if (!marked) {
+        result = 0;
+        goto done;
+    }
+    if (protective != 1 || memcmp(primary, "EFI PART", 8) != 0 || memcmp(backup, "EFI PART", 8) != 0) goto done;
+    struct spp_diag_gpt_header first;
+    struct spp_diag_gpt_header second;
+    if (spp_diag_parse_gpt_header(primary, 1, final_lba, &first) != 0 ||
+        spp_diag_parse_gpt_header(backup, final_lba, final_lba, &second) != 0 ||
+        spp_diag_gpt_ranges_valid(&first, &second, final_lba) != 0) goto done;
+    uint64_t first_offset;
+    uint64_t second_offset;
+    if (spp_diag_u64_mul(first.array_lba, SPP_DIAG_GPT_SECTOR, &first_offset) != 0 ||
+        spp_diag_u64_mul(second.array_lba, SPP_DIAG_GPT_SECTOR, &second_offset) != 0 ||
+        spp_diag_read_exact_at(fd, first_array, sizeof(first_array), first_offset, size) != 0 ||
+        spp_diag_read_exact_at(fd, second_array, sizeof(second_array), second_offset, size) != 0 ||
+        spp_diag_crc32(first_array, sizeof(first_array)) != first.array_crc ||
+        spp_diag_crc32(second_array, sizeof(second_array)) != second.array_crc || memcmp(first_array, second_array, sizeof(first_array)) != 0) goto done;
+    unsigned char entry_guids[SPP_DIAG_GPT_ENTRIES][16];
+    uint64_t starts[SPP_DIAG_GPT_ENTRIES];
+    uint64_t ends[SPP_DIAG_GPT_ENTRIES];
+    size_t used = 0;
+    for (unsigned int index = 0; index < SPP_DIAG_GPT_ENTRIES; index++) {
+        const unsigned char *entry = first_array + index * SPP_DIAG_GPT_ENTRY_SIZE;
+        int type_zero = 1;
+        int entry_zero = 1;
+        for (unsigned int i = 0; i < 16; i++) if (entry[i] != 0) type_zero = 0;
+        for (unsigned int i = 0; i < SPP_DIAG_GPT_ENTRY_SIZE; i++) if (entry[i] != 0) entry_zero = 0;
+        if (type_zero) {
+            if (!entry_zero) goto done;
+            continue;
+        }
+        int unique_zero = 1;
+        for (unsigned int i = 0; i < 16; i++) if (entry[16 + i] != 0) unique_zero = 0;
+        uint64_t start = spp_diag_le64(entry + 32);
+        uint64_t end = spp_diag_le64(entry + 40);
+        if (unique_zero || start > end || start < first.first_usable || end > first.last_usable) goto done;
+        for (size_t other = 0; other < used; other++) {
+            if (memcmp(entry + 16, entry_guids[other], 16) == 0 || !(end < starts[other] || start > ends[other])) goto done;
+        }
+        memcpy(entry_guids[used], entry + 16, 16);
+        starts[used] = start;
+        ends[used] = end;
+        used++;
+        if (memcmp(entry + 16, wanted, 16) == 0) {
+            if (*found) goto done;
+            uint64_t entry_size;
+            if (spp_diag_u64_add(end - start, 1, &entry_size) != 0) goto done;
+            match->disk = disk->object;
+            match->number = index + 1;
+            match->start = start;
+            match->size = entry_size;
+            *found = 1;
+        }
+    }
+    result = spp_diag_revalidate_node(roots, fd, disk->major_number, disk->minor_number, &selected_stat);
+done:
+    if (fd >= 0 && close(fd) != 0) result = -1;
+    return result;
+}
+
+int spp_diag_resolve_partuuid_at(
+    const struct spp_diag_resolver_roots *roots, const char *partuuid, char *out_device_id, size_t out_size, dev_t *out_rdev, int *out_fd
+) {
+    struct spp_diag_resolver_disk first[SPP_DIAG_GPT_MAX_DISKS];
+    struct spp_diag_resolver_disk second[SPP_DIAG_GPT_MAX_DISKS];
+    struct spp_diag_resolver_part selected_part;
+    struct spp_diag_gpt_match winning;
+    unsigned char wanted[16];
+    size_t first_count;
+    size_t second_count;
+    unsigned int ignored_selected;
+    unsigned int selected_count;
+    int matching_disks = 0;
+    if (roots == NULL || out_device_id == NULL || out_rdev == NULL || out_fd == NULL ||
+        spp_diag_parse_partuuid(partuuid, wanted) != 0 ||
+        spp_diag_collect_topology(roots, first, &first_count, NULL, NULL, &ignored_selected) != 0) return -1;
+    for (size_t i = 0; i < first_count; i++) {
+        struct spp_diag_gpt_match candidate;
+        int found;
+        if (spp_diag_scan_disk(roots, &first[i], wanted, &candidate, &found) != 0) return -1;
+        if (found && ++matching_disks > 1) return -1;
+        if (found) winning = candidate;
+    }
+    if (matching_disks != 1 || spp_diag_collect_topology(roots, second, &second_count, &winning, &selected_part, &selected_count) != 0 ||
+        second_count != first_count || selected_count != 1) return -1;
+    for (size_t i = 0; i < first_count; i++) {
+        int match = spp_diag_find_disk(second, second_count, first[i].object);
+        if (match < 0 || second[match].major_number != first[i].major_number || second[match].minor_number != first[i].minor_number ||
+            strcmp(second[match].devname, first[i].devname) != 0) return -1;
+    }
+    int selected_fd = -1;
+    uint64_t selected_size;
+    struct stat selected_stat;
+    if (spp_diag_open_node(roots, selected_part.devname, selected_part.major_number, selected_part.minor_number, &selected_fd, &selected_size) != 0 ||
+        fstat(selected_fd, &selected_stat) != 0 || selected_part.size > UINT64_MAX / SPP_DIAG_GPT_SECTOR ||
+        selected_size != selected_part.size * SPP_DIAG_GPT_SECTOR ||
+        spp_diag_revalidate_node(roots, selected_fd, selected_part.major_number, selected_part.minor_number, &selected_stat) != 0) {
+        if (selected_fd >= 0) close(selected_fd);
+        return -1;
+    }
+    int written = snprintf(out_device_id, out_size, "%u:%u", selected_part.major_number, selected_part.minor_number);
     if (written < 0 || (size_t)written >= out_size) {
         close(selected_fd);
         return -1;
     }
-    *out_rdev = selected_rdev;
+    *out_rdev = makedev(selected_part.major_number, selected_part.minor_number);
     *out_fd = selected_fd;
     return 0;
+}
 
-fail:
-    globfree(&paths);
-    if (selected_fd >= 0) {
-        close(selected_fd);
-    }
-    return -1;
+static int real_resolve_partuuid(
+    void *ctx, const char *partuuid, char *out_device_id, size_t out_size, dev_t *out_rdev, int *out_fd
+) {
+    static const struct spp_diag_resolver_roots roots = {
+        .class_block_root = "/sys/class/block",
+        .dev_block_root = "/sys/dev/block",
+        .virtual_root = "/sys/devices/virtual",
+        .device_root = "/dev",
+        .fixture_bindings = NULL,
+        .fixture_binding_count = 0,
+    };
+    (void)ctx;
+    return spp_diag_resolve_partuuid_at(&roots, partuuid, out_device_id, out_size, out_rdev, out_fd);
 }
 
 static int real_blkgetsize64(void *ctx, int fd, uint64_t *out_bytes) {

@@ -17,7 +17,6 @@ import fcntl
 import hashlib
 import mmap
 import os
-import posixpath
 import re
 import select
 import signal
@@ -36,6 +35,7 @@ from conf_proc_spp_diag_failure_terminal_reasons import (
     SPPFLR1_INPUT, SPPFLR1_POLICY, SPPFLR1_TPM, SPPFLR1_TRACE, encode_failure_terminal,
 )
 from conf_proc_spp_diag_quote import build_quote_invocation
+from conf_proc_spp_diag_gpt import close_selected, read_selected_exact, resolve_partuuid
 from conf_proc_spp_diagbundle_protocol import DOMAIN_CONTROL_PLAN, inner_receipt_digest
 
 
@@ -460,67 +460,14 @@ def _read_regular(path: str, cap: int) -> bytes:
         os.close(fd)
 
 
-def _binding_device_path(partuuid: str) -> str:
-    """Resolve exactly one matching sysfs PARTUUID to its literal /dev/DEVNAME."""
+def _read_binding_device(partuuid: str, roots=None) -> bytes:
+    """Read the binding record through the retained GPT/topology-proven FD."""
 
-    if _PARTUUID.fullmatch(partuuid) is None:
-        raise OSError("invalid binding PARTUUID")
-    matches: list[str] = []
-    for entry in sorted(os.listdir("/sys/class/block")):
-        data = _read_regular(f"/sys/class/block/{entry}/uevent", 4096)
-        fields: dict[str, str] = {}
-        try:
-            lines = data.decode("ascii").splitlines()
-        except UnicodeDecodeError as exc:
-            raise OSError("malformed block uevent") from exc
-        for line in lines:
-            if "=" not in line:
-                raise OSError("malformed block uevent")
-            key, value = line.split("=", 1)
-            if not key or key in fields:
-                raise OSError("malformed block uevent")
-            fields[key] = value
-        if fields.get("PARTUUID") != partuuid:
-            continue
-        devname = fields.get("DEVNAME", "")
-        if (
-            not devname
-            or devname.startswith("/")
-            or posixpath.normpath(devname) != devname
-            or any(component in ("", ".", "..") for component in devname.split("/"))
-        ):
-            raise OSError("invalid binding DEVNAME")
-        matches.append("/dev/" + devname)
-    if len(matches) != 1:
-        raise OSError("binding PARTUUID is not unique")
-    return matches[0]
-
-
-def _read_binding_device(partuuid: str) -> bytes:
-    """Read exactly the first late-binding record from its validated block device."""
-
-    path = _binding_device_path(partuuid)
-    node = os.lstat(path)
-    if not stat.S_ISBLK(node.st_mode):
-        raise OSError("binding is not a block device")
-    fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0))
+    selected = resolve_partuuid(partuuid, roots)
     try:
-        opened = os.fstat(fd)
-        if (
-            not stat.S_ISBLK(opened.st_mode)
-            or (opened.st_rdev, opened.st_ino) != (node.st_rdev, node.st_ino)
-        ):
-            raise OSError("binding device changed")
-        parts, total = [], 0
-        while total < BINDING_SIZE:
-            chunk = os.read(fd, BINDING_SIZE - total)
-            if not chunk:
-                raise OSError("short binding device")
-            parts.append(chunk)
-            total += len(chunk)
-        return b"".join(parts)
+        return read_selected_exact(selected, BINDING_SIZE)
     finally:
-        os.close(fd)
+        close_selected(selected)
 
 
 def _read_fd(fd: int, cap: int) -> bytes:
