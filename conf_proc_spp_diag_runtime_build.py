@@ -76,7 +76,7 @@ _LATE_BINDING_SIZE: Final = 4096
 _LATE_BINDING_DOMAIN: Final = b"sol-spp-diag-runtime-late-binding/v1\0"
 
 # This is the complete Python closure of the extensionless controller.  GPU
-# evidence is an invoked fixed child, never a ninth Python runtime dependency.
+# evidence is an invoked fixed child, never an additional Python dependency.
 SPP_DIAG_RUNTIME_STAGED_PYTHON: Final = (
     "usr/lib/spp/spp-diag-controller",
     "usr/lib/python3.10/conf_proc_reasons.py",

@@ -1,18 +1,27 @@
 {
   "schema": "sol-spp-diag-static-native-build-requirements-v1",
   "purpose": "authoritative hermetic static-link requirements for /spp-diag-handoff; this is not an initramfs packaging recipe",
-  "source_set": [
-    "spp-diag-runtime-src/spp_diag_handoff.c"
-  ],
+  "in_repo_inputs": {
+    "sources": [
+      {
+        "path": "spp-diag-runtime-src/spp_diag_handoff.c",
+        "sha256": "b22a39e4534cbdba3c81ad1480ae216b188f23b35e38f3b278024347daad6a48"
+      }
+    ],
+    "headers": []
+  },
   "target": "x86_64-unknown-linux-musl",
-  "artifacts": {
-    "toolchain": {
-      "artifact": "toolchain/x86_64-unknown-linux-musl.tar.zst",
-      "sha256": "6f841a90c8f8f3346791b38b59e78be0c41d9c47019ee62ca564be97e10a17f0"
-    },
-    "sysroot": {
-      "artifact": "sysroots/x86_64-unknown-linux-musl.tar.zst",
-      "sha256": "c7bd2dbe5aa8d3d1470682a8591784b0846468b2d2b45f8fc314a50c38540c48"
+  "external_materialization": {
+    "required_manifest_reference": "sol-spp-diag-static-toolchain-materialization-v1",
+    "required_artifacts": {
+      "toolchain": {
+        "artifact": "toolchain/x86_64-unknown-linux-musl.tar.zst",
+        "sha256": "6f841a90c8f8f3346791b38b59e78be0c41d9c47019ee62ca564be97e10a17f0"
+      },
+      "sysroot": {
+        "artifact": "sysroots/x86_64-unknown-linux-musl.tar.zst",
+        "sha256": "c7bd2dbe5aa8d3d1470682a8591784b0846468b2d2b45f8fc314a50c38540c48"
+      }
     }
   },
   "compile": {

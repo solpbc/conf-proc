@@ -1075,18 +1075,27 @@ static int spp_diag_collect_topology(
         }
         int class_object_fd = openat(dirfd(class_dir), entry->d_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
         int physical_fd = -1;
+        struct spp_diag_sysfs_identity class_identity;
+        struct spp_diag_sysfs_identity physical_identity;
         unsigned int major_number;
         unsigned int minor_number;
         char dev_text[64];
         int virtual_result;
-        if (class_object_fd < 0 || spp_diag_read_dev_at(class_object_fd, &major_number, &minor_number) != 0 ||
+        if (class_object_fd < 0 || spp_diag_fd_identity(class_object_fd, &class_identity) != 0 ||
+            spp_diag_read_dev_at(class_object_fd, &major_number, &minor_number) != 0 ||
             snprintf(dev_text, sizeof(dev_text), "%u:%u", major_number, minor_number) < 0) {
             if (class_object_fd >= 0) close(class_object_fd);
             goto done;
         }
         physical_fd = openat(dev_block_fd, dev_text, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-        if (close(class_object_fd) != 0 || physical_fd < 0) {
+        if (physical_fd < 0 || spp_diag_fd_identity(physical_fd, &physical_identity) != 0 ||
+            !spp_diag_identity_equal(class_identity, physical_identity)) {
             if (physical_fd >= 0) close(physical_fd);
+            close(class_object_fd);
+            goto done;
+        }
+        if (close(class_object_fd) != 0) {
+            close(physical_fd);
             goto done;
         }
         unsigned int physical_major;
@@ -1372,7 +1381,7 @@ done:
     return result;
 }
 
-int spp_diag_resolve_partuuid_at(
+static int spp_diag_resolve_partuuid_at(
     const struct spp_diag_resolver_roots *roots, const char *partuuid, char *out_device_id, size_t out_size, dev_t *out_rdev, int *out_fd
 ) {
     struct spp_diag_resolver_disk first[SPP_DIAG_GPT_MAX_DISKS];

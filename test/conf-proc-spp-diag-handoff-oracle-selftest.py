@@ -93,8 +93,8 @@ def compile_production(build_dir: str) -> str:
 def run_production_ops_oracle(build_dir: str) -> None:
     """Exercise production DM/fd operations independently of the scripted harness.
 
-    The GPT resolver has a filesystem fixture test below; this wrapper remains
-    focused on the native DM and close-on-exec contract.
+    The separate GPT fixture suite covers resolver discovery; this wrapper
+    remains focused on the native DM and close-on-exec contract.
     """
 
     wrapper_source = os.path.join(build_dir, "production-ops-oracle.c")

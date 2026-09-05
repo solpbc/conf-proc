@@ -126,7 +126,13 @@ def resolve_partuuid(partuuid: str, roots: TopologyRoots | None = None) -> Selec
         expected_bytes = _checked_mul(candidates[0].size, _SECTOR)
         if _node_size(selected.fd, selected.fixture) != expected_bytes:
             raise OSError("partition device size disagrees with GPT")
-        return selected
+        return SelectedPartition(
+            selected.fd,
+            selected.devnum,
+            selected.object_identity,
+            candidates[0].size,
+            selected.fixture,
+        )
     except Exception:
         os.close(selected.fd)
         raise
@@ -137,6 +143,8 @@ def read_selected_exact(selected: SelectedPartition, count: int, offset: int = 0
         raise OSError("invalid selected-device read")
     _revalidate(selected)
     size = _node_size(selected.fd, selected.fixture)
+    if selected.size_sectors <= 0 or size != _checked_mul(selected.size_sectors, _SECTOR):
+        raise OSError("selected-device size changed")
     if _checked_add(offset, count) > size:
         raise OSError("selected-device read exceeds bounds")
     return _pread_exact(selected.fd, count, offset, size)
@@ -163,13 +171,12 @@ def _scan_topology(roots: TopologyRoots) -> tuple[dict[tuple[int, int], _Disk], 
             if name in (".", ".."):
                 continue
             object_fd = _open_dir_at(class_fd, name)
+            physical_fd = -1
             try:
+                class_identity = _identity(object_fd)
                 devnum = _read_dev(object_fd)
                 physical_fd = _open_dir_at(dev_block_fd, _dev_text(devnum))
-            finally:
-                os.close(object_fd)
-            try:
-                if _read_dev(physical_fd) != devnum:
+                if _identity(physical_fd) != class_identity or _read_dev(physical_fd) != devnum:
                     raise OSError("class/dev-block device identity mismatch")
                 if _has_virtual_ancestor(physical_fd, virtual_identity):
                     continue
@@ -188,7 +195,9 @@ def _scan_topology(roots: TopologyRoots) -> tuple[dict[tuple[int, int], _Disk], 
                 numbers.add(partition.number)
                 partitions.append(partition)
             finally:
-                os.close(physical_fd)
+                if physical_fd >= 0:
+                    os.close(physical_fd)
+                os.close(object_fd)
         return disks, tuple(partitions)
     finally:
         os.close(dev_block_fd)
@@ -376,7 +385,12 @@ def _open_node(roots: TopologyRoots, devname: str, devnum: tuple[int, int]) -> S
         fixture = roots.fixture_bindings is not None
         if fixture:
             binding = roots.fixture_bindings.get(devnum)
-            if binding is None or not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (binding.st_dev, binding.st_ino):
+            if (
+                binding is None
+                or binding.devnum != devnum
+                or not stat.S_ISREG(opened.st_mode)
+                or (opened.st_dev, opened.st_ino) != (binding.st_dev, binding.st_ino)
+            ):
                 raise OSError("fixture device identity changed")
         elif not stat.S_ISBLK(opened.st_mode) or opened.st_rdev != os.makedev(*devnum):
             raise OSError("device node does not match sysfs dev")
