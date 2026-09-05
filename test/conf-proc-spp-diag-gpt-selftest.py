@@ -454,11 +454,31 @@ def test_topology_read_and_resource_matrix(root: Path, probe: CResolverProbe) ->
     assert len(os.listdir("/proc/self/fd")) == before
 
 
+def test_root_acquisition_failures_close_opened_descriptors(root: Path, _probe: CResolverProbe) -> None:
+    _fixture(root)
+    missing = str(root / "missing-sysfs-root")
+    roots = gpt.TopologyRoots(
+        str(root / "sys/devices/virtual"), missing, str(root / "sys/dev/block"), str(root / "dev"), {},
+    )
+    before = len(os.listdir("/proc/self/fd"))
+    for _ in range(16):
+        _expect_failure(lambda: gpt.resolve_partuuid(TARGET_UUID, roots))
+    assert len(os.listdir("/proc/self/fd")) == before
+
+    roots = gpt.TopologyRoots(
+        str(root / "sys/devices/virtual"), str(root / "sys/class/block"), missing, str(root / "dev"), {},
+    )
+    for _ in range(16):
+        _expect_failure(lambda: gpt.resolve_partuuid(TARGET_UUID, roots))
+    assert len(os.listdir("/proc/self/fd")) == before
+
+
 def main() -> None:
     tests = (
         test_retained_descriptors_and_fixture_binding,
         test_uuid_and_gpt_validation_matrix,
         test_topology_read_and_resource_matrix,
+        test_root_acquisition_failures_close_opened_descriptors,
     )
     with tempfile.TemporaryDirectory(dir="/var/tmp") as temporary:
         root = Path(temporary)

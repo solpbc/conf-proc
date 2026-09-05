@@ -155,10 +155,13 @@ def close_selected(selected: SelectedPartition) -> None:
 
 
 def _scan_topology(roots: TopologyRoots) -> tuple[dict[tuple[int, int], _Disk], tuple[_Partition, ...]]:
-    virtual_fd = os.open(roots.virtual_root, os.O_RDONLY | _odirectory() | os.O_CLOEXEC)
-    class_fd = os.open(roots.class_block_root, os.O_RDONLY | _odirectory() | os.O_CLOEXEC)
-    dev_block_fd = os.open(roots.dev_block_root, os.O_RDONLY | _odirectory() | os.O_CLOEXEC)
+    virtual_fd = -1
+    class_fd = -1
+    dev_block_fd = -1
     try:
+        virtual_fd = os.open(roots.virtual_root, os.O_RDONLY | _odirectory() | os.O_CLOEXEC)
+        class_fd = os.open(roots.class_block_root, os.O_RDONLY | _odirectory() | os.O_CLOEXEC)
+        dev_block_fd = os.open(roots.dev_block_root, os.O_RDONLY | _odirectory() | os.O_CLOEXEC)
         virtual_identity = _identity(virtual_fd)
         names = os.listdir(class_fd)
         if len(names) > _MAX_CLASS_ENTRIES:
@@ -200,9 +203,16 @@ def _scan_topology(roots: TopologyRoots) -> tuple[dict[tuple[int, int], _Disk], 
                 os.close(object_fd)
         return disks, tuple(partitions)
     finally:
-        os.close(dev_block_fd)
-        os.close(class_fd)
-        os.close(virtual_fd)
+        close_error: OSError | None = None
+        for fd in (dev_block_fd, class_fd, virtual_fd):
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError as exc:
+                    if close_error is None:
+                        close_error = exc
+        if close_error is not None:
+            raise close_error
 
 
 def _add_disk(disks: dict[tuple[int, int], _Disk], disk: _Disk) -> None:
