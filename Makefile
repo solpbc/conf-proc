@@ -115,6 +115,7 @@ check: test-spp-diag-handoff test-spp-diag-controller test-spp-diag-uart test-sp
 
 test:
 	$(PYTHON) test/conf-proc-spp-candidate-cold-selftest.py
+	$(PYTHON) test/conf-proc-spp-candidate-finite-selftest.py
 	$(PYTHON) test/conf-proc-spp-candidate-serving-selftest.py
 	$(PYTHON) test/conf-proc-spp-candidate-filesystem-selftest.py
 	$(PYTHON) test/conf-proc-spp-candidate-device-selftest.py
