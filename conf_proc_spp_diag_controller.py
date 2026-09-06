@@ -107,6 +107,7 @@ _EXEC_DENIALS: Final = (
 )
 _PARSER: Final = "/usr/sbin/apparmor_parser"
 _NVIDIA_MODPROBE: Final = "/usr/bin/nvidia-modprobe"
+_MODPROBE: Final = "/usr/sbin/modprobe"
 _PROFILE_FILE: Final = "/etc/apparmor.d/spp-diag-controller.bin"
 _PROFILE_NAME: Final = "/usr/lib/spp/spp-diag-controller"
 _GPU_HELPER: Final = "/usr/lib/spp/spp-diag-gpu-evidence.py"
@@ -840,7 +841,9 @@ def _prepare_nvidia_device_links() -> None:
 
 
 def _run_fixed_child(name: str, argv: tuple[str, ...], deadline: float, cap: int) -> ChildResult:
-    if name == "nvidia-device":
+    if name == "nvidia-crypto":
+        valid = argv == (_MODPROBE, "--all", "ecdh_generic", "ecdsa_generic")
+    elif name == "nvidia-device":
         valid = argv == (_NVIDIA_MODPROBE, "-c", "0")
     elif name == "nvidia-uvm":
         valid = argv == (_NVIDIA_MODPROBE, "-u")
@@ -1134,8 +1137,13 @@ def _preflight(ops: ControllerOps, boot: BootInputs) -> tuple[ControllerIdentity
     except Exception:
         _fail(SPPFLR1_INPUT, 1)
     # rdinit bypasses the distribution initramfs hooks.  Bootstrap only the
-    # fixed CUDA device and UVM module paths before AppArmor confinement; both
-    # children use the same bounded PID-1 supervisor as every later helper.
+    # fixed SPDM crypto, CUDA device and UVM modules before confinement. Crypto
+    # algorithms must exist before NVIDIA's first certificate verification;
+    # late kernel autoloading is not part of this appliance's bootstrap.
+    _child(
+        ops, "nvidia-crypto", (_MODPROBE, "--all", "ecdh_generic", "ecdsa_generic"),
+        ops.monotonic() + 30.0, _CHILD_CAPTURE_BYTES, 1,
+    )
     _child(
         ops, "nvidia-device", (_NVIDIA_MODPROBE, "-c", "0"),
         ops.monotonic() + 30.0, _CHILD_CAPTURE_BYTES, 1,

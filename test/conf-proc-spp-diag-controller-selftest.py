@@ -440,13 +440,32 @@ def test_policy_loader_and_enforcement_readback() -> None:
         assert not recorder.writes and recorder.poweroffs == 1
 
 
+def test_crypto_bootstrap_is_fixed_and_dominates_driver_startup() -> None:
+    recorder = Recorder()
+    argv = _main_fixture(recorder)
+    recorder.fail_child = "nvidia-crypto"
+    assert controller_main(argv, recorder.ops()) == 1
+    assert recorder.children == [("nvidia-crypto", (
+        "/usr/sbin/modprobe", "--all", "ecdh_generic", "ecdsa_generic"))]
+    assert recorder.poweroffs == 1 and not recorder.writes
+    for changed in (("/usr/sbin/modprobe", "--all", "ecdsa_generic"),
+                    ("/usr/sbin/modprobe", "--all", "ecdh_generic", "ecdsa_generic", "extra")):
+        with patch.object(controller.os, 'fork', side_effect=AssertionError('unexpected launch')):
+            try:
+                controller._run_fixed_child("nvidia-crypto", changed, 1.0, 4096)
+            except OSError:
+                pass
+            else:
+                raise AssertionError('altered crypto module command accepted')
+
+
 def test_main_uses_the_same_injected_production_core_and_framed_late_failure() -> None:
     recorder = Recorder()
     argv = _main_fixture(recorder)
     assert controller_main(argv, recorder.ops()) == 1
     assert recorder.bootstrap == ["uart", "fds", "fixtures", "scratch", "changeprofile"]
     assert [name for name, _argv in recorder.children] == [
-        "nvidia-device", "nvidia-uvm", "apparmor", "cuda-cold", "cuda-infer", "gpu-helper",
+        "nvidia-crypto", "nvidia-device", "nvidia-uvm", "apparmor", "cuda-cold", "cuda-infer", "gpu-helper",
         "tpm-readpublic-pem", "tpm-readpublic-tpmt", "tpm-nvread", "tpm-quote",
     ]
     boot = parse_boot_inputs(argv, recorder.files["/proc/cmdline"])
@@ -697,8 +716,8 @@ def test_isolated_staged_controller_import_reaches_real_main() -> None:
         argv = _main_fixture(recorder)
         assert namespace["main"](argv, recorder.ops()) == 1
         assert recorder.bootstrap == ["uart", "fds", "fixtures", "scratch", "changeprofile"]
-        assert [name for name, _argv in recorder.children[:3]] == [
-            "nvidia-device", "nvidia-uvm", "apparmor",
+        assert [name for name, _argv in recorder.children[:4]] == [
+            "nvidia-crypto", "nvidia-device", "nvidia-uvm", "apparmor",
         ]
 
 
@@ -751,6 +770,7 @@ def test_uart_configuration_roundtrips_linux_terminal_settings() -> None:
 
 
 TESTS = (
+    test_crypto_bootstrap_is_fixed_and_dominates_driver_startup,
     test_policy_loader_and_enforcement_readback,
     test_statfs_layout_matches_native_abi_before_syscall,
     test_uart_configuration_roundtrips_linux_terminal_settings,
