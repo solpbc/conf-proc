@@ -84,6 +84,10 @@ DORMANT_MODULES = frozenset(
         "conf_proc_spp_boot_v3_wire",
         "conf_proc_spp_boot_v3_resource",
         "conf_proc_spp_init",
+        "conf_proc_spp_candidate_controller",
+        "conf_proc_spp_candidate_session",
+        "conf_proc_spp_candidate_workloads",
+        "conf_proc_spp_candidate_workload_entry",
     }
 )
 DORMANT_INSPECTOR_MODULES = frozenset(
@@ -874,6 +878,10 @@ class ProvenanceIndependenceTests(unittest.TestCase):
                     "conf_proc_spp_boot_v3_wire",
                     "conf_proc_spp_boot_v3_resource",
                     "conf_proc_spp_init",
+                    "conf_proc_spp_candidate_controller",
+                    "conf_proc_spp_candidate_session",
+                    "conf_proc_spp_candidate_workloads",
+                    "conf_proc_spp_candidate_workload_entry",
                 }
             ),
         )

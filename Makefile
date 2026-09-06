@@ -114,6 +114,9 @@ check: test-spp-diag-handoff test-spp-diag-controller test-spp-diag-uart test-sp
 	bash -n run-collector.sh
 
 test:
+	$(PYTHON) test/conf-proc-spp-candidate-controller-selftest.py
+	$(PYTHON) test/conf-proc-spp-candidate-session-selftest.py
+	$(PYTHON) test/conf-proc-spp-candidate-workloads-selftest.py
 	$(PYTHON) test/python-verifier-selftest.py
 	$(PYTHON) test/ratls-gateway-selftest.py
 	$(PYTHON) test/spp-health-selftest.py

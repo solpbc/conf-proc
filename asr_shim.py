@@ -44,6 +44,7 @@ import logging
 import os
 import queue
 import re
+import socket
 import subprocess
 import threading
 import time
@@ -509,11 +510,26 @@ class AsrServer(ThreadingHTTPServer):
         worker: BatchWorker,
         metrics: Metrics,
         request_timeout_s: float,
+        *,
+        inherited_socket: socket.socket | None = None,
     ) -> None:
         self.worker = worker
         self.metrics = metrics
         self.request_timeout_s = request_timeout_s
-        super().__init__(address, AsrHandler)
+        if inherited_socket is None:
+            super().__init__(address, AsrHandler)
+        else:
+            if (inherited_socket.family != socket.AF_INET
+                    or inherited_socket.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) != socket.SOCK_STREAM
+                    or inherited_socket.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN) != 1
+                    or inherited_socket.getsockname() != address):
+                raise ValueError("inherited ASR listener identity differs")
+            super().__init__(address, AsrHandler, bind_and_activate=False)
+            self.socket.close()
+            self.socket = inherited_socket.dup()
+            self.server_address = self.socket.getsockname()
+            self.server_name = address[0]
+            self.server_port = address[1]
 
 
 def create_server(
