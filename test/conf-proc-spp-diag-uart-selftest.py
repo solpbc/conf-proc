@@ -307,7 +307,7 @@ def test_observation_statuses_padding_resync_limits_and_identity_binding() -> No
     assert observe_uart_blob(success + literal_frame(KIND_INVALIDATE, 1, b"\0") + b"x", expected_challenge=CHALLENGE, expected_run_identity=RUN).status == STATUS_INVALID
 
 
-def test_observation_frame_wire_and_raw_one_over_limits() -> None:
+def test_observation_frame_wire_raw_and_incomplete_one_over_limits() -> None:
     stream = inner_stream()
     success_258 = b"".join(
         literal_frame(KIND_SUCCESS, index, payload) for index, payload in enumerate(split_success(stream, MAX_FRAMES))
@@ -330,15 +330,21 @@ def test_observation_frame_wire_and_raw_one_over_limits() -> None:
     )
     assert over_frames.status == STATUS_INVALID and over_frames.reason == "SPPUART/1 frame limit"
 
-    over_success = bytearray()
+    full_success = bytearray()
     for index in range(MAX_SNAPSHOT_BYTES // MAX_S_PAYLOAD_BYTES):
-        over_success.extend(literal_frame(KIND_SUCCESS, index, b"x" * MAX_S_PAYLOAD_BYTES))
-    over_success.extend(literal_frame(KIND_SUCCESS, MAX_SNAPSHOT_BYTES // MAX_S_PAYLOAD_BYTES, b"x"))
-    over_decoded = observe_uart_blob(bytes(over_success), expected_challenge=CHALLENGE, expected_run_identity=RUN)
+        full_success.extend(literal_frame(KIND_SUCCESS, index, b"x" * MAX_S_PAYLOAD_BYTES))
+    full_success_wire = bytes(full_success)
+    del full_success
+    over_success = full_success_wire + literal_frame(
+        KIND_SUCCESS, MAX_SNAPSHOT_BYTES // MAX_S_PAYLOAD_BYTES, b"x"
+    )
+    over_decoded = observe_uart_blob(over_success, expected_challenge=CHALLENGE, expected_run_identity=RUN)
     assert over_decoded.status == STATUS_INVALID and over_decoded.reason == "SPPUART/1 success decoded limit"
+    del over_success
 
     over_wire = b"SPPUART/1|k=" + b"x" * MAX_WIRE_BYTES + b"\n"
     assert observe_uart_blob(over_wire, expected_challenge=CHALLENGE, expected_run_identity=RUN).status == STATUS_INVALID
+    del over_wire
     try:
         observe_uart_blob(b"x" * (32 * 1024 * 1024 + 1), expected_challenge=CHALLENGE, expected_run_identity=RUN)
     except SppDiagUartError:
@@ -346,13 +352,41 @@ def test_observation_frame_wire_and_raw_one_over_limits() -> None:
     else:
         raise AssertionError("raw snapshot cap +1 accepted")
 
+    marker_free_exact = b"x" * MAX_PREAMBLE_BYTES
+    assert observe_uart_blob(
+        marker_free_exact, expected_challenge=CHALLENGE, expected_run_identity=RUN
+    ).status == STATUS_INCOMPLETE
+    assert observe_uart_blob(
+        marker_free_exact + b"x", expected_challenge=CHALLENGE, expected_run_identity=RUN
+    ).status == STATUS_INVALID
+
+    partial_marker = b"SPPUART/1|k="
+    partial_exact = partial_marker + b"x" * (MAX_RECORD_WIRE_BYTES - len(partial_marker))
+    assert observe_uart_blob(
+        partial_exact, expected_challenge=CHALLENGE, expected_run_identity=RUN
+    ).status == STATUS_INCOMPLETE
+    assert observe_uart_blob(
+        partial_exact + b"x", expected_challenge=CHALLENGE, expected_run_identity=RUN
+    ).status == STATUS_INVALID
+
+    aggregate_exact = full_success_wire + partial_marker + b"x" * (
+        MAX_WIRE_BYTES - len(full_success_wire) - len(partial_marker)
+    )
+    assert len(aggregate_exact) == MAX_WIRE_BYTES
+    assert observe_uart_blob(
+        aggregate_exact, expected_challenge=CHALLENGE, expected_run_identity=RUN
+    ).status == STATUS_INCOMPLETE
+    assert observe_uart_blob(
+        aggregate_exact + b"x", expected_challenge=CHALLENGE, expected_run_identity=RUN
+    ).status == STATUS_INVALID
+
 
 TESTS = (
     test_literal_fixture_grammar_overhead_and_canonicality,
     test_writer_short_eagain_eintr_pending_and_poisoning,
     test_export_state_deadlines_and_terminal_order,
     test_observation_statuses_padding_resync_limits_and_identity_binding,
-    test_observation_frame_wire_and_raw_one_over_limits,
+    test_observation_frame_wire_raw_and_incomplete_one_over_limits,
 )
 
 

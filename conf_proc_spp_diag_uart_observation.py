@@ -43,6 +43,8 @@ from conf_proc_spp_diag_uart_reasons import (
 
 MAX_RAW_SNAPSHOT_BYTES: Final = 32 * 1024 * 1024
 MAX_PREAMBLE_BYTES: Final = 1 * 1024 * 1024
+_PREAMBLE_LIMIT_REASON: Final = "SPPUART/1 preamble exceeds 1048576 bytes"
+_WIRE_LIMIT_REASON: Final = "SPPUART/1 wire limit"
 
 STATUS_COMPLETE_RESULT: Final = "complete_result"
 STATUS_STANDALONE_FAILURE: Final = "standalone_failure"
@@ -186,8 +188,8 @@ def observe_uart_blob(
     marker = data.find(MARKER)
     if marker < 0:
         return _observation(
-            status=STATUS_INCOMPLETE,
-            reason="SPPUART/1 marker absent",
+            status=STATUS_INVALID if len(data) > MAX_PREAMBLE_BYTES else STATUS_INCOMPLETE,
+            reason=_PREAMBLE_LIMIT_REASON if len(data) > MAX_PREAMBLE_BYTES else "SPPUART/1 marker absent",
             data=data,
             expected_challenge=expected_challenge,
             expected_run_identity=expected_run_identity,
@@ -201,7 +203,7 @@ def observe_uart_blob(
     if marker > MAX_PREAMBLE_BYTES:
         return _observation(
             status=STATUS_INVALID,
-            reason="SPPUART/1 preamble exceeds 1048576 bytes",
+            reason=_PREAMBLE_LIMIT_REASON,
             data=data,
             expected_challenge=expected_challenge,
             expected_run_identity=expected_run_identity,
@@ -281,10 +283,12 @@ def observe_uart_blob(
             return result(STATUS_INVALID, "nonzero suffix outside an outer record")
         line_end = data.find(b"\n", offset)
         if line_end < 0:
+            if len(data) - offset > MAX_RECORD_WIRE_BYTES or len(data) - marker > MAX_WIRE_BYTES:
+                return result(STATUS_INVALID, _WIRE_LIMIT_REASON)
             return result(STATUS_INCOMPLETE, "unterminated SPPUART/1 record")
         line_size = line_end + 1 - offset
         if line_size > MAX_RECORD_WIRE_BYTES or line_end + 1 - marker > MAX_WIRE_BYTES:
-            return result(STATUS_INVALID, "SPPUART/1 wire limit")
+            return result(STATUS_INVALID, _WIRE_LIMIT_REASON)
         if len(records) >= MAX_FRAMES:
             return result(STATUS_INVALID, "SPPUART/1 frame limit")
         record_wire = data[offset : line_end + 1]
