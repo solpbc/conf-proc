@@ -683,7 +683,7 @@ def _configure_uart() -> None:
             or flags & os.O_ACCMODE != os.O_WRONLY or not flags & os.O_NONBLOCK):
         _fail(SPPFLR1_INPUT, 1)
     attrs = termios.tcgetattr(UART_FD)
-    attrs[0], attrs[1], attrs[2], attrs[3] = 0, 0, termios.CLOCAL | termios.CREAD | termios.CS8, 0
+    attrs[0], attrs[1], attrs[2], attrs[3] = 0, 0, termios.CLOCAL | termios.CREAD | termios.CS8 | termios.B115200, 0
     attrs[4], attrs[5] = termios.B115200, termios.B115200
     attrs[6][termios.VMIN], attrs[6][termios.VTIME] = 1, 0
     termios.tcsetattr(UART_FD, termios.TCSANOW, attrs)

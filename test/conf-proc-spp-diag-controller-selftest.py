@@ -3,8 +3,8 @@
 # Copyright (c) 2026 sol pbc
 """Focused unit tests for the isolated SPP PID-1 controller core.
 
-These use recording operations.  They deliberately do not claim a live kernel,
-AppArmor, UART, or multiprocess-appliance integration environment.
+These use recording operations plus a host pseudo-terminal configuration check.
+They do not claim target-kernel, AppArmor, hardware-UART, or appliance integration.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import errno
 import hashlib
 import json
 import os
+import pty
 from pathlib import Path
 import runpy
 import shutil
@@ -23,6 +24,8 @@ import struct
 import sys
 import sysconfig
 import tempfile
+import termios
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -592,7 +595,36 @@ def test_isolated_staged_controller_import_reaches_real_main() -> None:
         ]
 
 
+def test_uart_configuration_roundtrips_linux_terminal_settings() -> None:
+    master, slave = pty.openpty()
+    writer = -1
+    try:
+        path = os.ttyname(slave)
+        writer = os.open(path, os.O_WRONLY | os.O_NONBLOCK | os.O_NOCTTY)
+        node = os.fstat(writer)
+        with patch.multiple(controller, UART_FD=writer, UART_PATH=path,
+                            UART_MAJOR=os.major(node.st_rdev), UART_MINOR=os.minor(node.st_rdev)):
+            with patch.object(controller, "_read_regular", return_value=b"tty0\n"):
+                controller._configure_uart()
+                actual = termios.tcgetattr(writer)
+                assert actual[4:6] == [termios.B115200, termios.B115200]
+                assert actual[0] == actual[1] == actual[3] == 0
+            with patch.object(controller, "_read_regular", return_value=b"ttyS0\n"):
+                try:
+                    controller._configure_uart()
+                except ControllerFault:
+                    pass
+                else:
+                    raise AssertionError("active result console accepted")
+    finally:
+        if writer >= 0:
+            os.close(writer)
+        os.close(slave)
+        os.close(master)
+
+
 TESTS = (
+    test_uart_configuration_roundtrips_linux_terminal_settings,
     test_command_wire,
     test_fixed_choreography_and_seal_before_read,
     test_rejecting_twins_map_to_closed_reasons,
