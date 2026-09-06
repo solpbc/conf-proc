@@ -43,6 +43,7 @@
 #include <sys/syscall.h>
 #include <sys/sysmacros.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 /* ------------------------------------------------------------------ */
@@ -412,6 +413,32 @@ static int spp_diag_setup_stdio(const struct spp_diag_handoff_ops *ops, void *ct
 /* Core orchestration -- calls only through the ops vtable             */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Resolve a partition by PARTUUID. On the default (diagnostic) build this is a
+ * single attempt, identical to calling ops->resolve_partuuid directly. On the
+ * R1 build the block layer probes partitions asynchronously after the disk
+ * attaches (Azure storvsc/SCSI attaches the OS disk late, then enumerates
+ * partitions a moment later), so retry with a short sleep for up to ~30s before
+ * giving up. Bounded; it never blocks forever.
+ */
+static int spp_diag_resolve_or_wait(
+    const struct spp_diag_handoff_ops *ops, void *ctx, const char *partuuid,
+    char *out, size_t out_size, dev_t *out_rdev, int *out_fd
+) {
+#ifdef SPP_R1_SYSTEMD_INIT
+    for (int attempt = 0; attempt < 300; attempt++) {
+        if (ops->resolve_partuuid(ctx, partuuid, out, out_size, out_rdev, out_fd) == 0) {
+            return 0;
+        }
+        struct timespec ts = {0, 100000000L};  /* 100ms */
+        nanosleep(&ts, NULL);
+    }
+    return -1;
+#else
+    return ops->resolve_partuuid(ctx, partuuid, out, out_size, out_rdev, out_fd);
+#endif
+}
+
 int spp_diag_handoff_run(const struct spp_diag_handoff_ops *ops, void *ctx) {
     if (ops->mount(ctx, "proc", "/proc", "proc", 0, NULL) != 0) {
         return SPP_DIAG_HANDOFF_ERR_MOUNT_PROC;
@@ -452,13 +479,13 @@ int spp_diag_handoff_run(const struct spp_diag_handoff_ops *ops, void *ctx) {
     dev_t hash_rdev = 0;
     int data_fd = -1;
     int hash_fd = -1;
-    if (ops->resolve_partuuid(
-            ctx, fields.data_partuuid, data_device_id, sizeof(data_device_id), &data_rdev, &data_fd
+    if (spp_diag_resolve_or_wait(
+            ops, ctx, fields.data_partuuid, data_device_id, sizeof(data_device_id), &data_rdev, &data_fd
         ) != 0) {
         return SPP_DIAG_HANDOFF_ERR_PARTUUID_MISSING;
     }
-    if (ops->resolve_partuuid(
-            ctx, fields.hash_partuuid, hash_device_id, sizeof(hash_device_id), &hash_rdev, &hash_fd
+    if (spp_diag_resolve_or_wait(
+            ops, ctx, fields.hash_partuuid, hash_device_id, sizeof(hash_device_id), &hash_rdev, &hash_fd
         ) != 0) {
         ops->close(ctx, data_fd);
         return SPP_DIAG_HANDOFF_ERR_PARTUUID_MISSING;
