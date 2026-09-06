@@ -127,6 +127,7 @@ test:
 	$(PYTHON) test/conf-proc-spp-candidate-launch-selftest.py
 	$(PYTHON) test/conf-proc-spp-candidate-ipc-selftest.py
 	$(PYTHON) test/conf-proc-spp-candidate-messages-selftest.py
+	$(PYTHON) test/conf-proc-spp-attestation-broker-selftest.py
 	$(PYTHON) test/conf-proc-spp-candidate-controller-selftest.py
 	$(PYTHON) test/conf-proc-spp-candidate-session-selftest.py
 	$(PYTHON) test/conf-proc-spp-candidate-workloads-selftest.py
