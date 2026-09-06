@@ -34,8 +34,13 @@ void __init spp_diag_trace_bootstrap_release(void)
 	int pid;
 	int tgid;
 
+	/* The denied canary must finish exiting before the runtime interval opens.
+	 * UMH_WAIT_EXEC completes before do_exit; a late untracked exit would
+	 * correctly invalidate the newly active trace. kernel_wait preserves the
+	 * exec error when the helper exits with status zero.
+	 */
 	if (call_usermodehelper(SPP_DIAG_TRACE_BOOTSTRAP_CANARY_PATH, argv, envp,
-				UMH_WAIT_EXEC) != -EACCES) {
+				UMH_WAIT_PROC) != -EACCES) {
 		fail_stop("spp diag trace canary");
 		return;
 	}

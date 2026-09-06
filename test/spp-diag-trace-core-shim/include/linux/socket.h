@@ -28,8 +28,7 @@ struct socket;
 struct sock;
 
 struct proto_ops {
-	int (*getname)(struct socket *sock, struct sockaddr *addr, int *addr_len,
-		       int peer);
+	int (*getname)(struct socket *sock, struct sockaddr *addr, int peer);
 };
 
 struct socket {

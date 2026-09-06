@@ -6,6 +6,7 @@
 
 #define UMH_NO_WAIT 0x00
 #define UMH_WAIT_EXEC 0x01
+#define UMH_WAIT_PROC 0x02
 
 struct host_kmod_call {
 	const char *path;

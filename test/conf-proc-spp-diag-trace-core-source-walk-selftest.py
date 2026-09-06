@@ -379,7 +379,7 @@ def runtime_source_walk_check(root: Path = ROOT) -> list[str]:
     ):
         if required not in adapter:
             violations.append(f"adapter.c: missing exact adapter invariant {required}")
-    for forbidden in ("file->f_mode & FMODE_EXEC", "sock->ops->getname"):
+    for forbidden in ("file->f_mode & FMODE_EXEC",):
         if forbidden in adapter:
             violations.append(f"adapter.c: forbidden lossy adapter path {forbidden}")
     return violations

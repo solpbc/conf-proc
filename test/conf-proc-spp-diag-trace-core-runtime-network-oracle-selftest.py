@@ -45,8 +45,22 @@ def main() -> int:
     if int.from_bytes(sendmsg[40:44], "big") != 0x55667788 or int.from_bytes(sendmsg[44:48], "big") != 0x11223344:
         print("FAIL IPv6 scope/flow byte order")
         return 1
+    for mode, kind, family, port, address in (
+        ("--tcp4", 1, 2, 443, bytes(12) + bytes((127, 0, 0, 1))),
+        ("--tcp6", 2, 10, 53, bytes.fromhex("20010db8000000000000000000000001")),
+    ):
+        rows = network_payloads(subprocess.check_output([fixture, mode]))
+        assert len(rows) == 1
+        payload = rows[0]
+        assert struct.unpack(">HHHHHHHH", payload[:16]) == (2, 1, kind, 2, 1, 6, family, 0)
+        assert int.from_bytes(payload[20:24], "big") == 0x40
+        assert int.from_bytes(payload[24:28], "big") == 7
+        assert int.from_bytes(payload[28:36], "big") == 1
+        assert int.from_bytes(payload[36:38], "big") == port
+        assert payload[48:64] == address
     for mode in ("--unsupported", "--connect-unsupported", "--connected",
-                 "--oversized", "--bad-family", "--bad-length"):
+                 "--oversized", "--bad-family", "--bad-length",
+                 "--peer-fail", "--peer-short", "--peer-lost-after-check"):
         red = subprocess.run([fixture, mode], check=False)
         if red.returncode != 42:
             print(f"FAIL {mode} red path exit={red.returncode}")

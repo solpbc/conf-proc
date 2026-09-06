@@ -4,6 +4,8 @@
 
 #include <linux/socket.h>
 
+#define IPPROTO_TCP 6
+
 struct in_addr {
 	u8 s_addr[4];
 };

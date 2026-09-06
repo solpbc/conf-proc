@@ -522,22 +522,56 @@ void spp_diag_trace_adapter_connect_return(s64 result)
 					  spp_diag_trace_runtime_connect_active_operation, result);
 }
 
+/* Snapshot the kernel TCP peer at the policy observation point. This is
+ * a policy-time endpoint, not a claim about packet delivery. Unresolved peers
+ * and connected datagrams remain unsupported and invalidate an active trace.
+ */
+static bool spp_diag_trace_adapter_sendmsg_endpoint(
+	const struct socket *sock, const struct msghdr *msg,
+	struct sockaddr_storage *peer, const void **address, int *address_len,
+	u16 *source)
+{
+	if (!msg)
+		return false;
+	*address = msg->msg_name;
+	*address_len = msg->msg_namelen;
+	*source = SPP_DIAG_TRACE_NETWORK_ENDPOINT_SOURCE_EXPLICIT;
+	if (*address)
+		return spp_diag_trace_adapter_endpoint_valid(*address, *address_len);
+	if (*address_len || !sock || !sock->sk ||
+	    sock->type != SOCK_STREAM || sock->sk->sk_protocol != IPPROTO_TCP ||
+	    !sock->ops || !sock->ops->getname)
+		return false;
+	memset(peer, 0, sizeof(*peer));
+	*address_len = sock->ops->getname((struct socket *)sock,
+					(struct sockaddr *)peer, 1);
+	*address = peer;
+	*source = SPP_DIAG_TRACE_NETWORK_ENDPOINT_SOURCE_CONNECTED;
+	return spp_diag_trace_adapter_endpoint_valid(*address, *address_len);
+}
+
 void spp_diag_trace_adapter_sendmsg_policy(const struct socket *sock,
 						  const struct msghdr *msg,
 						  unsigned int flags, s64 result)
 {
 	struct spp_diag_trace_fact_network_policy fact;
-	const void *address = msg ? msg->msg_name : NULL;
-	int address_len = msg ? msg->msg_namelen : 0;
+	struct sockaddr_storage peer;
+	const void *address;
+	int address_len;
+	u16 source;
 	size_t size = msg ? msg_data_left((struct msghdr *)msg) : 0;
 
-	spp_diag_trace_adapter_network_fact(&fact, sock, address, address_len,
-		SPP_DIAG_TRACE_NETWORK_OPERATION_SENDMSG, flags, result);
-	if (!spp_diag_trace_adapter_endpoint_valid(address, address_len) ||
+	if (!spp_diag_trace_adapter_sendmsg_endpoint(sock, msg, &peer,
+						 &address, &address_len, &source) ||
 	    size > INT_MAX) {
 		spp_diag_trace_runtime_network_unsupported(current);
 		return;
 	}
+	spp_diag_trace_adapter_network_fact(&fact, sock, address, address_len,
+		SPP_DIAG_TRACE_NETWORK_OPERATION_SENDMSG, flags, result);
+	fact.source = source;
+	if (source == SPP_DIAG_TRACE_NETWORK_ENDPOINT_SOURCE_CONNECTED)
+		fact.addrlen = 0;
 	fact.size = (u32)size;
 	spp_diag_trace_runtime_network_policy_decision(current, &fact, &(u64){ 0 });
 }
@@ -546,11 +580,13 @@ int spp_diag_trace_adapter_sendmsg_precheck(const struct socket *sock,
 					   const struct msghdr *msg)
 {
 	size_t size = msg ? msg_data_left((struct msghdr *)msg) : 0;
-	int err;
+	struct sockaddr_storage peer;
+	const void *address;
+	int address_len, err;
+	u16 source;
 
-	(void)sock;
-	if (msg && spp_diag_trace_adapter_endpoint_valid(
-			msg->msg_name, msg->msg_namelen) && size <= INT_MAX)
+	if (size <= INT_MAX && spp_diag_trace_adapter_sendmsg_endpoint(
+			sock, msg, &peer, &address, &address_len, &source))
 		return 0;
 	err = spp_diag_trace_runtime_network_unsupported(current);
 	return err == SPP_DIAG_TRACE_ERR_INACTIVE ? 0 : -EIO;

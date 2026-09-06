@@ -97,8 +97,8 @@ static void test_happy_path(void)
 	spp_diag_trace_bootstrap_release();
 	kmod = host_kmod_last_call();
 	ima = host_ima_last_call();
-	CHECK(kmod->calls == 1 && kmod->wait == UMH_WAIT_EXEC,
-	      "canary uses UMH_WAIT_EXEC once");
+	CHECK(kmod->calls == 1 && kmod->wait == UMH_WAIT_PROC,
+	      "canary waits for complete process exit once");
 	CHECK(!strcmp(kmod->path, SPP_DIAG_TRACE_BOOTSTRAP_CANARY_PATH),
 	      "exact canary path");
 	CHECK(ima->calls == 2 && ima->buf_len == 256 && !ima->hash &&

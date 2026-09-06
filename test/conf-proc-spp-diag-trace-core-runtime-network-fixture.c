@@ -13,6 +13,17 @@
 
 #include "conf-proc-spp-diag-trace-core-runtime-adapter-fixture.h"
 
+static int peer_size;
+static struct sockaddr_storage peer_address;
+static int get_peer(struct socket *sock, struct sockaddr *addr, int peer)
+{
+	(void)sock;
+	if (peer != 1 || peer_size < 0)
+		return -EIO;
+	memcpy(addr, &peer_address, sizeof(peer_address));
+	return peer_size;
+}
+
 int main(int argc, char **argv)
 {
 	struct task_struct root;
@@ -34,11 +45,42 @@ int main(int argc, char **argv)
 	bool oversized = argc == 2 && !strcmp(argv[1], "--oversized");
 	bool bad_family = argc == 2 && !strcmp(argv[1], "--bad-family");
 	bool bad_length = argc == 2 && !strcmp(argv[1], "--bad-length");
+	bool tcp4 = argc == 2 && !strcmp(argv[1], "--tcp4");
+	bool tcp6 = argc == 2 && !strcmp(argv[1], "--tcp6");
+	bool peer_fail = argc == 2 && !strcmp(argv[1], "--peer-fail");
+	bool peer_short = argc == 2 && !strcmp(argv[1], "--peer-short");
+	bool peer_changed = argc == 2 && !strcmp(argv[1], "--peer-lost-after-check");
+	const struct proto_ops peer_ops = { .getname = get_peer };
 
 	if (argc > 2 || (argc == 2 && !unsupported && !connected && !oversized &&
-					  !bad_family && !bad_length) ||
+					  !bad_family && !bad_length && !tcp4 && !tcp6 && !peer_fail &&
+					  !peer_short && !peer_changed) ||
 	    spp_adapter_fixture_start(&root))
 		return 64;
+	if (tcp4 || tcp6 || peer_fail || peer_short || peer_changed) {
+		stream.ops = &peer_ops;
+		message.msg_name = NULL;
+		message.msg_namelen = 0;
+		message.msg_iter.count = 7;
+		peer_size = tcp6 ? sizeof(ipv6) : sizeof(ipv4);
+		memcpy(&peer_address, tcp6 ? (void *)&ipv6 : (void *)&ipv4, peer_size);
+		if (peer_fail) peer_size = -1;
+		if (peer_short) peer_size = 3;
+		if (peer_fail || peer_short) {
+			if (spp_diag_trace_adapter_sendmsg_precheck(&stream, &message) != -EIO)
+				return 5;
+			return spp_diag_trace_core_is_green() ? 2 : 42;
+		}
+		if (spp_diag_trace_adapter_sendmsg_precheck(&stream, &message))
+			return 5;
+		if (peer_changed) peer_size = -1;
+		spp_diag_trace_adapter_sendmsg_policy(&stream, &message, 0x40, 0);
+		if (peer_changed)
+			return spp_diag_trace_core_is_green() ? 2 : 42;
+		spp_diag_trace_adapter_sendmsg_return(7);
+		if (!spp_diag_trace_core_is_green()) return 3;
+		return spp_adapter_fixture_stream() ? 4 : 0;
+	}
 	if (unsupported) {
 		/* Cached sendmmsg and the two kernel-only helpers all take this red path. */
 		if (!strcmp(argv[1], "--connect-unsupported"))
