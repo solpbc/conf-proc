@@ -36,7 +36,9 @@ from conf_proc_spp_diag_uart_reasons import (
 )
 
 
-MAGIC: Final = b"SPPUART/1"
+PROFILE_IDENTIFIER: Final = "SPPUART"
+PROFILE_VERSION: Final = 1
+MAGIC: Final = f"{PROFILE_IDENTIFIER}/{PROFILE_VERSION}".encode("ascii")
 MARKER: Final = MAGIC + b"|k="
 MAX_S_PAYLOAD_BYTES: Final = 65_536
 MAX_SNAPSHOT_BYTES: Final = 16 * 1024 * 1024
@@ -228,7 +230,6 @@ class FramedUartWriter:
         self.next_sequence = 0
         self.pending_record: bytes | None = None
         self.pending_offset = 0
-        self.pending_kind: str | None = None
         self.poisoned = False
         self._success: bytes | None = None
         self._success_offset = 0
@@ -270,7 +271,6 @@ class FramedUartWriter:
             payload=payload,
         )
         self.pending_offset = 0
-        self.pending_kind = kind
 
     def _write_pending(
         self,
@@ -319,7 +319,6 @@ class FramedUartWriter:
                 if queued == 0:
                     self.pending_record = None
                     self.pending_offset = 0
-                    self.pending_kind = None
                     return
                 if not wait_writable(deadline) or monotonic() > deadline:
                     self._poison(CP_SPP_DIAG_UART_DEADLINE)

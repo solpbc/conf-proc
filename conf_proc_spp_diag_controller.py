@@ -1171,7 +1171,7 @@ def _fail_stop(
 
 
 def main(argv: list[str] | None = None, ops: ControllerOps | None = None) -> int:
-    """Real entrypoint: returned poweroff is fail-stop and emits no second record."""
+    """Real entrypoint: returned or errored poweroff is invalidated then fail-stopped."""
 
     production = ops is None
     ops = real_controller_ops() if ops is None else ops

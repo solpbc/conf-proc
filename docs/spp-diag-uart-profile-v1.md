@@ -31,9 +31,11 @@ The host accepts at most a 32 MiB supplied raw blob, a 1 MiB preamble, 258
 frames, 22,500,000 wire bytes, and `16 MiB + 1 + 112` decoded bytes. It checks
 all counts, field lengths, identities, sequence, kind, and Base64 length before
 allocating, decoding, or appending a payload. The `SPPDBN1` capacity remains
-16 MiB. At 115200 8N1, the maximal 256-frame success plus `I` and `F` is
-22,430,310 bytes, about 1,947 seconds on the wire, within the 2,400-second
-absolute export deadline.
+16 MiB. The 258-frame cap is total outer records, not an `S`-record cap: a
+valid small-chunk stream may use 258 `S` records, or 257 `S` records followed
+by `I`. The 256 full-64-KiB `S` chunks plus `I` and `F` are only the
+maximum-payload accounting case; their 22,430,310 wire bytes take about 1,947
+seconds at 115200 8N1, within the 2,400-second absolute export deadline.
 
 ## Writer and poweroff state
 
@@ -63,17 +65,25 @@ Arbitrary preamble precedes the first `SPPUART/1|k=` marker. From that marker
 records are contiguous and there is no resynchronization. Only a contiguous
 run of raw `00` bytes *after* a final semantically complete outer result is
 terminal storage fill. It is not an outer invalidator: the `I` record has a
-normal wire extent and a one-byte decoded extent/hash; raw fill has a separate
+normal wire extent and one-byte decoded content/hash; raw fill has a separate
 snapshot-relative padding extent/hash. A partial line followed by zero fill is
 incomplete, never padding.
+
+The immutable observation retains the profile identifier/version and the
+expected challenge/run identity used for validation. Every public
+`SnapshotExtent.offset` is an index in the supplied raw snapshot. A record's
+snapshot-relative wire extent maps to its decoded logical content by decoded
+length and SHA-256; decoded content deliberately has no public offset. The
+aggregate decoded content describes the concatenated authenticated outer
+payloads, while `snapshot` is only the concatenated `S` payloads.
 
 The immutable statuses are `complete_result`, `standalone_failure`,
 `invalidated_result` (with optional late `F`), `invalid`, and `incomplete`.
 Success with only terminal zero fill is `complete_result`. NUL within or
 between records, malformed or nonzero suffixes, a second result, `F` after
 success without `I`, or a later candidate marker are non-success and are never
-resynchronized. The observation records raw, preamble, wire, per-record,
-decoded, and padding offsets, lengths, and SHA-256 values. It invokes
+resynchronized. The observation records raw, preamble, wire, per-record wire,
+decoded-content, and padding lengths and SHA-256 values. It invokes
 `parse_export_stream` and `parse_failure_terminal` with explicit expected
 identities; both outer and inner identity mismatches are invalid. An observation
 is not a `CapturedDiagnostic` and cannot be passed to the mapper.

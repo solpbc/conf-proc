@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import os
 import sys
 from pathlib import Path
 
@@ -20,8 +19,10 @@ from conf_proc_spp_diag_uart import (
     KIND_FAILURE,
     KIND_INVALIDATE,
     KIND_SUCCESS,
+    MAX_FRAMES,
     MAX_NON_PAYLOAD_OVERHEAD,
     MAX_RECORD_WIRE_BYTES,
+    MAX_SNAPSHOT_BYTES,
     MAX_WIRE_BYTES,
     MAX_S_PAYLOAD_BYTES,
     FramedUartWriter,
@@ -58,6 +59,13 @@ def literal_frame(kind: str, sequence: int, payload: bytes, *, challenge: bytes 
 
 def inner_stream(*, challenge: bytes = CHALLENGE, run: bytes = RUN) -> bytes:
     return build_export_stream(members={name: b"" for name in MEMBER_NAMES[:-1]}, challenge=challenge, run_identity=run)
+
+
+def split_success(stream: bytes, count: int) -> tuple[bytes, ...]:
+    """Split a valid inner stream into exactly ``count`` nonempty outer chunks."""
+
+    assert 1 <= count <= len(stream)
+    return tuple(stream[index : index + 1] for index in range(count - 1)) + (stream[count - 1 :],)
 
 
 class Clock:
@@ -258,6 +266,11 @@ def test_observation_statuses_padding_resync_limits_and_identity_binding() -> No
     observed = observe_uart_blob(b"serial noise\n" + success + b"\0" * 3, expected_challenge=CHALLENGE, expected_run_identity=RUN)
     assert observed.status == STATUS_COMPLETE_RESULT and observed.padding is not None and observed.padding.length == 3
     assert observed.records[0].decoded.length == len(stream) and observed.snapshot == stream
+    assert observed.profile_identifier == "SPPUART" and observed.profile_version == 1
+    assert observed.expected_challenge == CHALLENGE and observed.expected_run_identity == RUN
+    assert observed.raw.offset == 0 and observed.preamble is not None and observed.preamble.offset == 0
+    assert observed.wire is not None and observed.wire.offset == len(b"serial noise\n")
+    assert not hasattr(observed.records[0].decoded, "offset")
 
     failure = encode_failure_terminal(SPPFLR1_EXPORT, 15, CHALLENGE, RUN)
     standalone = observe_uart_blob(literal_frame(KIND_FAILURE, 0, failure), expected_challenge=CHALLENGE, expected_run_identity=RUN)
@@ -277,6 +290,8 @@ def test_observation_statuses_padding_resync_limits_and_identity_binding() -> No
         success + b"SPPUART/1|k=S",  # no resynchronization of partial candidate
         success[:-1] + b"\0" * 5,  # partial outer line is not raw padding
         success + b"\0" + literal_frame(KIND_INVALIDATE, 1, b"\0"),
+        success[:20] + b"\0" + success[21:],  # NUL inside a complete outer line
+        success + literal_frame(KIND_SUCCESS, 1, stream),  # sequence-correct second SPPDBN1 result
     )
     for blob in cases:
         assert observe_uart_blob(blob, expected_challenge=CHALLENGE, expected_run_identity=RUN).status != STATUS_COMPLETE_RESULT
@@ -285,17 +300,42 @@ def test_observation_statuses_padding_resync_limits_and_identity_binding() -> No
 
     outer_wrong = literal_frame(KIND_SUCCESS, 0, stream, challenge=b"\x22" * 32)
     assert observe_uart_blob(outer_wrong, expected_challenge=CHALLENGE, expected_run_identity=RUN).status == STATUS_INVALID
+    outer_wrong_run = literal_frame(KIND_SUCCESS, 0, stream, run=b"\x33" * 32)
+    assert observe_uart_blob(outer_wrong_run, expected_challenge=CHALLENGE, expected_run_identity=RUN).status == STATUS_INVALID
     inner_wrong = literal_frame(KIND_SUCCESS, 0, inner_stream(challenge=b"\x22" * 32))
     assert observe_uart_blob(inner_wrong, expected_challenge=CHALLENGE, expected_run_identity=RUN).status == STATUS_INVALID
     assert observe_uart_blob(success + literal_frame(KIND_INVALIDATE, 1, b"\0") + b"x", expected_challenge=CHALLENGE, expected_run_identity=RUN).status == STATUS_INVALID
 
 
 def test_observation_frame_wire_and_raw_one_over_limits() -> None:
-    # 256 one-byte S frames reach the success-frame ceiling; the next frame is
-    # rejected before its Base64 payload is decoded or appended.
-    frames = b"".join(literal_frame(KIND_SUCCESS, index, b"x") for index in range(257))
-    over_frames = observe_uart_blob(frames, expected_challenge=CHALLENGE, expected_run_identity=RUN)
-    assert over_frames.status == STATUS_INVALID and over_frames.reason == "SPPUART/1 success frame limit"
+    stream = inner_stream()
+    success_258 = b"".join(
+        literal_frame(KIND_SUCCESS, index, payload) for index, payload in enumerate(split_success(stream, MAX_FRAMES))
+    )
+    complete = observe_uart_blob(success_258, expected_challenge=CHALLENGE, expected_run_identity=RUN)
+    assert complete.status == STATUS_COMPLETE_RESULT and len(complete.records) == MAX_FRAMES
+
+    success_257_then_i = b"".join(
+        literal_frame(KIND_SUCCESS, index, payload) for index, payload in enumerate(split_success(stream, MAX_FRAMES - 1))
+    ) + literal_frame(KIND_INVALIDATE, MAX_FRAMES - 1, b"\0")
+    invalidated = observe_uart_blob(
+        success_257_then_i, expected_challenge=CHALLENGE, expected_run_identity=RUN
+    )
+    assert invalidated.status == STATUS_INVALIDATED_RESULT and len(invalidated.records) == MAX_FRAMES
+
+    over_frames = observe_uart_blob(
+        success_258 + literal_frame(KIND_SUCCESS, 0, b"x"),
+        expected_challenge=CHALLENGE,
+        expected_run_identity=RUN,
+    )
+    assert over_frames.status == STATUS_INVALID and over_frames.reason == "SPPUART/1 frame limit"
+
+    over_success = bytearray()
+    for index in range(MAX_SNAPSHOT_BYTES // MAX_S_PAYLOAD_BYTES):
+        over_success.extend(literal_frame(KIND_SUCCESS, index, b"x" * MAX_S_PAYLOAD_BYTES))
+    over_success.extend(literal_frame(KIND_SUCCESS, MAX_SNAPSHOT_BYTES // MAX_S_PAYLOAD_BYTES, b"x"))
+    over_decoded = observe_uart_blob(bytes(over_success), expected_challenge=CHALLENGE, expected_run_identity=RUN)
+    assert over_decoded.status == STATUS_INVALID and over_decoded.reason == "SPPUART/1 success decoded limit"
 
     over_wire = b"SPPUART/1|k=" + b"x" * MAX_WIRE_BYTES + b"\n"
     assert observe_uart_blob(over_wire, expected_challenge=CHALLENGE, expected_run_identity=RUN).status == STATUS_INVALID

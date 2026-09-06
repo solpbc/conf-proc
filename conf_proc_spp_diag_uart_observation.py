@@ -27,6 +27,8 @@ from conf_proc_spp_diag_uart import (
     MAX_RECORD_WIRE_BYTES,
     MAX_SNAPSHOT_BYTES,
     MAX_WIRE_BYTES,
+    PROFILE_IDENTIFIER,
+    PROFILE_VERSION,
     UartFrame,
     decode_uart_record,
     inspect_uart_record,
@@ -59,10 +61,13 @@ class SnapshotExtent:
 
 
 @dataclass(frozen=True)
-class DecodedExtent:
-    """A byte range in the logical concatenated outer decoded payload stream."""
+class DecodedContent:
+    """A logical decoded payload identified by its length and immutable hash.
 
-    offset: int
+    It deliberately has no raw-snapshot offset.  Its associated record's
+    ``wire`` extent identifies the raw bytes that carried this content.
+    """
+
     length: int
     sha256: bytes
 
@@ -72,13 +77,17 @@ class UartRecordObservation:
     kind: str
     sequence: int
     wire: SnapshotExtent
-    decoded: DecodedExtent
+    decoded: DecodedContent
 
 
 @dataclass(frozen=True)
 class UartObservation:
     """An immutable description, never a ``CapturedDiagnostic`` or mapper value."""
 
+    profile_identifier: str
+    profile_version: int
+    expected_challenge: bytes
+    expected_run_identity: bytes
     status: str
     reason: str | None
     raw: SnapshotExtent
@@ -86,7 +95,7 @@ class UartObservation:
     wire: SnapshotExtent | None
     padding: SnapshotExtent | None
     records: tuple[UartRecordObservation, ...]
-    decoded: DecodedExtent | None
+    decoded: DecodedContent | None
     snapshot: bytes | None
     exported: ExportedBundle | None
     failure: FailureTerminal | None
@@ -96,8 +105,8 @@ def _extent(data: bytes, offset: int, length: int) -> SnapshotExtent:
     return SnapshotExtent(offset, length, hashlib.sha256(memoryview(data)[offset : offset + length]).digest())
 
 
-def _decoded_extent(offset: int, payload: bytes) -> DecodedExtent:
-    return DecodedExtent(offset, len(payload), hashlib.sha256(payload).digest())
+def _decoded_content(payload: bytes) -> DecodedContent:
+    return DecodedContent(len(payload), hashlib.sha256(payload).digest())
 
 
 def _observation(
@@ -105,6 +114,8 @@ def _observation(
     status: str,
     reason: str | None,
     data: bytes,
+    expected_challenge: bytes,
+    expected_run_identity: bytes,
     marker: int | None,
     wire_end: int | None,
     padding_start: int | None,
@@ -120,11 +131,15 @@ def _observation(
     padding = _extent(data, padding_start, len(data) - padding_start) if padding_start is not None else None
     decoded = None
     if decoded_size:
-        # The logical decoded stream has no snapshot byte address. Offset zero is
-        # explicit; its digest is maintained while validated payloads are read.
+        # The logical decoded stream intentionally has no snapshot byte address.
+        # Per-record wire extents map each raw record to its decoded content.
         assert decoded_sha256 is not None
-        decoded = DecodedExtent(0, decoded_size, decoded_sha256)
+        decoded = DecodedContent(decoded_size, decoded_sha256)
     return UartObservation(
+        PROFILE_IDENTIFIER,
+        PROFILE_VERSION,
+        expected_challenge,
+        expected_run_identity,
         status,
         reason,
         _extent(data, 0, len(data)),
@@ -160,7 +175,7 @@ def observe_uart_blob(
 
     A NUL run is terminal storage fill only once a semantic outer result has
     completed. A decoded invalidator is instead represented by a normal ``I``
-    record with its own wire and decoded extents.
+    record with its own wire extent and decoded-content hash.
     """
 
     if type(data) is not bytes or len(data) > MAX_RAW_SNAPSHOT_BYTES:
@@ -174,6 +189,8 @@ def observe_uart_blob(
             status=STATUS_INCOMPLETE,
             reason="SPPUART/1 marker absent",
             data=data,
+            expected_challenge=expected_challenge,
+            expected_run_identity=expected_run_identity,
             marker=None,
             wire_end=None,
             padding_start=None,
@@ -186,6 +203,8 @@ def observe_uart_blob(
             status=STATUS_INVALID,
             reason="SPPUART/1 preamble exceeds 1048576 bytes",
             data=data,
+            expected_challenge=expected_challenge,
+            expected_run_identity=expected_run_identity,
             marker=marker,
             wire_end=None,
             padding_start=None,
@@ -199,6 +218,7 @@ def observe_uart_blob(
     offset = marker
     wire_end = marker
     decoded_size = 0
+    success_decoded_size = 0
     decoded_hash = hashlib.sha256()
     expected_sequence = 0
     state = "start"
@@ -217,6 +237,8 @@ def observe_uart_blob(
             status=status,
             reason=reason,
             data=data,
+            expected_challenge=expected_challenge,
+            expected_run_identity=expected_run_identity,
             marker=marker,
             wire_end=wire_end,
             padding_start=padding_start,
@@ -263,9 +285,9 @@ def observe_uart_blob(
         line_size = line_end + 1 - offset
         if line_size > MAX_RECORD_WIRE_BYTES or line_end + 1 - marker > MAX_WIRE_BYTES:
             return result(STATUS_INVALID, "SPPUART/1 wire limit")
-        record_wire = data[offset : line_end + 1]
         if len(records) >= MAX_FRAMES:
             return result(STATUS_INVALID, "SPPUART/1 frame limit")
+        record_wire = data[offset : line_end + 1]
         try:
             header = inspect_uart_record(
                 record_wire,
@@ -281,8 +303,8 @@ def observe_uart_blob(
         if header.kind == KIND_SUCCESS:
             if state != "start" and state != "success":
                 return result(STATUS_INVALID, "SPPUART/1 success after terminal record")
-            if len(payloads) >= MAX_SNAPSHOT_BYTES // 65_536:
-                return result(STATUS_INVALID, "SPPUART/1 success frame limit")
+            if success_decoded_size + header.length > MAX_SNAPSHOT_BYTES:
+                return result(STATUS_INVALID, "SPPUART/1 success decoded limit")
         elif header.kind == KIND_INVALIDATE:
             if state != "success":
                 return result(STATUS_INVALID, "SPPUART/1 invalidator without complete success")
@@ -302,7 +324,6 @@ def observe_uart_blob(
             )
         except SppDiagUartError as exc:
             return result(STATUS_INVALID, exc.reason_code)
-        logical_offset = decoded_size
         decoded_size += len(frame.payload)
         decoded_hash.update(frame.payload)
         records.append(
@@ -310,13 +331,14 @@ def observe_uart_blob(
                 frame.kind,
                 frame.sequence,
                 _extent(data, offset, len(record_wire)),
-                _decoded_extent(logical_offset, frame.payload),
+                _decoded_content(frame.payload),
             )
         )
         expected_sequence += 1
         wire_end = line_end + 1
         offset = wire_end
         if frame.kind == KIND_SUCCESS:
+            success_decoded_size += len(frame.payload)
             payloads.append(frame.payload)
             state = "success"
         elif frame.kind == KIND_INVALIDATE:

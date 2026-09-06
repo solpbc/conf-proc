@@ -14,7 +14,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from conf_proc_spp_diag_export import (
     ExportOps,
-    PoweroffInvalidationFailed,
     PoweroffReturned,
     build_export_stream,
     export_and_poweroff,

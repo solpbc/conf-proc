@@ -79,6 +79,8 @@ class Recorder:
         self.serial: list[bytes] = []
         self.serial_write_plan: list[int | None] = []
         self.wait_uart_plan: list[bool] = []
+        self.wait_uart_deadlines: list[tuple[float, float]] = []
+        self.poweroff_plan: list[BaseException | None] = []
         self.poweroffs = 0
 
     def monotonic(self) -> float:
@@ -138,11 +140,15 @@ class Recorder:
             self.serial.append(data[:result])
         return result
 
-    def wait_uart_writable(self, _deadline: float) -> bool:
+    def wait_uart_writable(self, deadline: float) -> bool:
+        self.wait_uart_deadlines.append((self.clock, deadline))
         return self.wait_uart_plan.pop(0) if self.wait_uart_plan else True
 
     def poweroff(self) -> None:
         self.poweroffs += 1
+        error = self.poweroff_plan.pop(0) if self.poweroff_plan else None
+        if error is not None:
+            raise error
 
     def ops(self) -> ControllerOps:
         return ControllerOps(
@@ -482,6 +488,45 @@ def test_main_uses_the_same_injected_production_core_and_framed_late_failure() -
     terminal = decode_uart_record(recorder.serial[-1], expected_challenge=identity.challenge, expected_run_identity=identity.run_identity)
     assert terminal.kind == "F" and parse_failure_terminal(terminal.payload).reason_code == 10  # returned poweroff is EXPORT
     assert recorder.poweroffs == 2
+    assert [round(deadline - current) for current, deadline in recorder.wait_uart_deadlines] == [2400, 1, 5]
+
+
+def test_controller_poweroff_error_and_failure_deadline_seams() -> None:
+    errored = Recorder()
+    argv = _main_fixture(errored)
+    errored.poweroff_plan = [OSError("primary poweroff returned an error"), None]
+    assert controller_main(argv, errored.ops()) == 1
+    boot = parse_boot_inputs(argv, errored.files["/proc/cmdline"])
+    identity = parse_binding_record(errored.files[boot.binding_partuuid], boot)
+    observed = observe_uart_blob(
+        b"".join(errored.serial), expected_challenge=identity.challenge, expected_run_identity=identity.run_identity
+    )
+    assert observed.status == STATUS_INVALIDATED_RESULT
+    assert [record.kind for record in observed.records] == ["S", "I", "F"] and errored.poweroffs == 2
+
+    standalone = Recorder()
+    argv = _main_fixture(standalone)
+    standalone.read_errnos["/sys/kernel/security/tpm0/binary_bios_measurements"] = errno.ENOSPC
+    standalone.wait_uart_plan = [False]
+    assert controller_main(argv, standalone.ops()) == 1
+    assert not standalone.serial and standalone.poweroffs == 1
+    assert len(standalone.wait_uart_deadlines) == 1
+    current, deadline = standalone.wait_uart_deadlines[0]
+    assert 4.9 < deadline - current < 5.0
+
+    late = Recorder()
+    argv = _main_fixture(late)
+    late.wait_uart_plan = [True, True, False]
+    assert controller_main(argv, late.ops()) == 1
+    boot = parse_boot_inputs(argv, late.files["/proc/cmdline"])
+    identity = parse_binding_record(late.files[boot.binding_partuuid], boot)
+    observed = observe_uart_blob(
+        b"".join(late.serial), expected_challenge=identity.challenge, expected_run_identity=identity.run_identity
+    )
+    assert observed.status == STATUS_INVALIDATED_RESULT
+    assert [record.kind for record in observed.records] == ["S", "I"] and late.poweroffs == 2
+    current, deadline = late.wait_uart_deadlines[-1]
+    assert 4.9 < deadline - current < 5.0
 
 
 def test_uart_setup_and_collector_failures_fail_stop_without_second_record() -> None:
@@ -702,6 +747,7 @@ TESTS = (
     test_binding_stream_eof_is_not_a_one_read_check,
     test_direct_network_and_poison_syscalls_pin_the_trace_coordinates,
     test_main_uses_the_same_injected_production_core_and_framed_late_failure,
+    test_controller_poweroff_error_and_failure_deadline_seams,
     test_uart_setup_and_collector_failures_fail_stop_without_second_record,
     test_controller_physical_writes_never_append_after_failed_s_or_i,
     test_fd_uart_and_runner_source_contract,
