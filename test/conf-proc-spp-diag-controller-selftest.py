@@ -10,6 +10,7 @@ They do not claim target-kernel, AppArmor, hardware-UART, or appliance integrati
 from __future__ import annotations
 
 import ast
+import ctypes
 import errno
 import hashlib
 import json
@@ -21,6 +22,7 @@ import shutil
 import socket
 import stat
 import struct
+import subprocess
 import sys
 import sysconfig
 import tempfile
@@ -595,6 +597,26 @@ def test_isolated_staged_controller_import_reaches_real_main() -> None:
         ]
 
 
+def test_statfs_layout_matches_native_abi_before_syscall() -> None:
+    with tempfile.TemporaryDirectory() as work:
+        source = Path(work) / "statfs.c"
+        binary = Path(work) / "statfs"
+        source.write_text(
+            '#include <sys/vfs.h>\n#include <stddef.h>\n#include <stdio.h>\n'
+            'int main(void) { struct statfs value; if (statfs("/", &value)) return 1; '
+            'printf("%zu %zu %zu %ld\\n", sizeof(value), offsetof(struct statfs, f_fsid), '
+            'offsetof(struct statfs, f_flags), (long)value.f_type); return 0; }\n'
+        )
+        subprocess.run(["cc", "-Wall", "-Wextra", "-Werror", str(source), "-o", str(binary)],
+                       check=True, capture_output=True)
+        native = subprocess.run([str(binary)], check=True, capture_output=True, text=True)
+        size, fsid_offset, flags_offset, filesystem_type = map(int, native.stdout.split())
+        # Validate the allocation before allowing libc to write into it.
+        assert (ctypes.sizeof(controller._StatFs), controller._StatFs.f_fsid.offset,
+                controller._StatFs.f_flags.offset) == (size, fsid_offset, flags_offset)
+        assert controller._filesystem_type("/") == filesystem_type
+
+
 def test_uart_configuration_roundtrips_linux_terminal_settings() -> None:
     master, slave = pty.openpty()
     writer = -1
@@ -624,6 +646,7 @@ def test_uart_configuration_roundtrips_linux_terminal_settings() -> None:
 
 
 TESTS = (
+    test_statfs_layout_matches_native_abi_before_syscall,
     test_uart_configuration_roundtrips_linux_terminal_settings,
     test_command_wire,
     test_fixed_choreography_and_seal_before_read,

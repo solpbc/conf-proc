@@ -979,6 +979,9 @@ def _mount_scratch_once() -> None:
 class _StatFs(ctypes.Structure):
     _fields_ = [
         ("f_type", ctypes.c_long), ("f_bsize", ctypes.c_long),
+        ("f_blocks", ctypes.c_ulong), ("f_bfree", ctypes.c_ulong),
+        ("f_bavail", ctypes.c_ulong), ("f_files", ctypes.c_ulong),
+        ("f_ffree", ctypes.c_ulong),
         ("f_fsid", ctypes.c_int * 2), ("f_namelen", ctypes.c_long),
         ("f_frsize", ctypes.c_long), ("f_flags", ctypes.c_long),
         ("f_spare", ctypes.c_long * 4),
