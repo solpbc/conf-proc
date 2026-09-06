@@ -6,6 +6,7 @@
 
 typedef u16 sa_family_t;
 
+#define AF_UNIX 1
 #define AF_INET 2
 #define AF_INET6 10
 

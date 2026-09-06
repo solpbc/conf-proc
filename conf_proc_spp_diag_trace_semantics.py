@@ -1063,6 +1063,12 @@ class _Reducer:
                 _fail(CP_SPP_TRACE_SEMANTICS_OPERATION)
             if signed >= 0 or (kind == "connect" and signed in (-115, -114)):
                 _fail(CP_SPP_TRACE_SEMANTICS_RESULT)
+            row = operation.policy_rows[0]
+            if (kind == "connect" and row["kind"] == 3 and row["family"] == 1
+                    and signed not in (-2, -13, -111)):
+                # Failed Unix discovery only: ENOENT, EACCES, ECONNREFUSED.
+                # EINTR and pending/ambiguous failures are not disconnection proof.
+                _fail(CP_SPP_TRACE_SEMANTICS_RESULT)
             self._policy_result(operation, raw)
             if operation.phase in self.plan.remote_endpoints:
                 self.control_hits[operation.phase] += 1

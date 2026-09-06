@@ -58,6 +58,24 @@ def main() -> int:
         assert int.from_bytes(payload[28:36], "big") == 1
         assert int.from_bytes(payload[36:38], "big") == port
         assert payload[48:64] == address
+    for mode, expected_result in (("--unix-failed", -2), ("--unix-success", 0), ("--unix-pending", -115)):
+        raw = subprocess.check_output([fixture, mode])
+        rows = network_payloads(raw)
+        assert len(rows) == 1
+        payload = rows[0]
+        assert struct.unpack(">HHHHHHHH", payload[:16]) == (1, 1, 3, 1, 1, 0, 1, 26)
+        assert payload[36:64] == bytes(28)
+        returns = []
+        offset = 200
+        while offset < len(raw):
+            size = int.from_bytes(raw[offset:offset + 4], "big")
+            frame = raw[offset + 4:offset + 4 + size]
+            if int.from_bytes(frame[:2], "big") == 0x104:
+                returns.append(int.from_bytes(frame[52:60], "big", signed=True))
+            offset += 4 + size
+        assert returns == [expected_result], (mode, returns)
+    for mode in ("--unix-short", "--unix-long", "--unix-dgram", "--unix-protocol"):
+        assert subprocess.run([fixture, mode], check=False).returncode == 42
     for mode in ("--unsupported", "--connect-unsupported", "--connected",
                  "--oversized", "--bad-family", "--bad-length",
                  "--peer-fail", "--peer-short", "--peer-lost-after-check"):
@@ -65,7 +83,7 @@ def main() -> int:
         if red.returncode != 42:
             print(f"FAIL {mode} red path exit={red.returncode}")
             return 1
-    print("ok   adapter IPv4/IPv6 network facts, INT_MAX, and unsupported bypass")
+    print("ok   adapter IP/Unix connect facts and exact returns; invalid transports remain red")
     return 0
 
 

@@ -7,6 +7,7 @@
 #include <linux/in.h>
 #include <linux/in6.h>
 #include <linux/socket.h>
+#include <linux/un.h>
 #include <linux/spp_diag_trace_adapter.h>
 
 #include <net/sock.h>
@@ -39,6 +40,7 @@ int main(int argc, char **argv)
 			0, 0, 0, 0, 0, 0, 0, 1 } } };
 	struct msghdr message = { .msg_name = &ipv6, .msg_namelen = sizeof(ipv6),
 		.msg_iter = { .count = INT_MAX } };
+	bool unix_probe = argc == 2 && !strncmp(argv[1], "--unix-", 7);
 	bool unsupported = argc == 2 && (!strcmp(argv[1], "--unsupported") ||
 		!strcmp(argv[1], "--connect-unsupported"));
 	bool connected = argc == 2 && !strcmp(argv[1], "--connected");
@@ -54,9 +56,29 @@ int main(int argc, char **argv)
 
 	if (argc > 2 || (argc == 2 && !unsupported && !connected && !oversized &&
 					  !bad_family && !bad_length && !tcp4 && !tcp6 && !peer_fail &&
-					  !peer_short && !peer_changed) ||
+					  !peer_short && !peer_changed && !unix_probe) ||
 	    spp_adapter_fixture_start(&root))
 		return 64;
+	if (unix_probe) {
+		struct sockaddr_un local = { .sun_family = AF_UNIX,
+			.sun_path = "/tmp/nvidia-mps/control" };
+		int length = 26;
+		s64 result = -2;
+		bool red = false;
+		stream_sk.sk_protocol = 0;
+		if (!strcmp(argv[1], "--unix-success")) result = 0;
+		else if (!strcmp(argv[1], "--unix-pending")) result = -115;
+		else if (!strcmp(argv[1], "--unix-short")) { length = 1; red = true; }
+		else if (!strcmp(argv[1], "--unix-long")) { length = sizeof(local) + 1; red = true; }
+		else if (!strcmp(argv[1], "--unix-dgram")) { stream.type = SOCK_DGRAM; red = true; }
+		else if (!strcmp(argv[1], "--unix-protocol")) { stream_sk.sk_protocol = 6; red = true; }
+		else if (strcmp(argv[1], "--unix-failed")) return 64;
+		spp_diag_trace_adapter_connect_policy(&stream, &local, length, 0, 0);
+		if (red) return spp_diag_trace_core_is_green() ? 2 : 42;
+		spp_diag_trace_adapter_connect_return(result);
+		if (!spp_diag_trace_core_is_green()) return 3;
+		return spp_adapter_fixture_stream() ? 4 : 0;
+	}
 	if (tcp4 || tcp6 || peer_fail || peer_short || peer_changed) {
 		stream.ops = &peer_ops;
 		message.msg_name = NULL;

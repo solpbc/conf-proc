@@ -344,6 +344,33 @@ def test_context_and_object_near_misses() -> None:
     expect_red("jit_object_relation", entries)
 
 
+def test_unix_attempts_require_definitive_failure() -> None:
+    from conf_proc_spp_diag_trace_semantics_oracle import _added_operation
+    vector = _added_operation(2, "network")
+    raw = bytearray(vector.stream)
+    offset = len(BASE_HEADER)
+    policy_offset = return_offset = None
+    while offset < len(raw):
+        size = int.from_bytes(raw[offset:offset + 4], "big")
+        event = int.from_bytes(raw[offset + 4:offset + 6], "big")
+        operation = int.from_bytes(raw[offset + 36:offset + 44], "big")
+        if operation == 0x5023:
+            if event == 0x103: policy_offset = offset + 48
+            if event == 0x104: return_offset = offset + 56
+        offset += 4 + size
+    assert policy_offset is not None and return_offset is not None
+    struct.pack_into(">HHHHHHHHIIIQHHII16s", raw, policy_offset,
+                     1, 1, 3, 1, 1, 0, 1, 26, 0, 0, 0, 1, 0, 0, 0, 0, bytes(16))
+    for result in (-2, -13, -111):
+        struct.pack_into(">q", raw, return_offset, result)
+        ledger = json.loads(production.appraise_spp_diag_trace_semantics(PLAN, bytes(raw)))
+        row = next(row for row in ledger["operations"] if row["operation_ordinal"] == "0000000000005023")
+        assert row["kind"] == "connect" and row["policy_count"] == 1
+    for result in (0, 1, -115, -114, -4, -11, -106, -110):
+        struct.pack_into(">q", raw, return_offset, result)
+        expect_reason("unix_connection_not_definitively_failed", CP_SPP_TRACE_SEMANTICS_RESULT, stream=bytes(raw))
+
+
 def test_privacy_translation() -> None:
     secret = "CALLER_SECRET_MUST_NOT_ESCAPE"
     original = production.canonical_dumps
@@ -393,6 +420,7 @@ def main() -> int:
     test_fatal_child_rejections()
     test_reducer_and_control_rejections()
     test_context_and_object_near_misses()
+    test_unix_attempts_require_definitive_failure()
     test_privacy_translation()
     print("spp_diag_trace_semantics_tests=pass")
     print(f"spp_diag_trace_semantics_positive_vectors={1 + len(accepted_vectors())}")

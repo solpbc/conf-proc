@@ -16,6 +16,7 @@
 #include <linux/sock_diag.h>
 #include <linux/socket.h>
 #include <linux/string.h>
+#include <linux/un.h>
 
 #include <linux/spp_diag_trace_adapter.h>
 #include <linux/spp_diag_trace_runtime.h>
@@ -497,7 +498,17 @@ void spp_diag_trace_adapter_connect_policy(const struct socket *sock,
 
 	spp_diag_trace_adapter_network_fact(&fact, sock, address, address_len,
 		SPP_DIAG_TRACE_NETWORK_OPERATION_CONNECT, 0, result);
-	if (!spp_diag_trace_adapter_endpoint_valid(address, address_len)) {
+	/* An AF_UNIX stream attempt is representable by the existing unsupported
+	 * endpoint record: family/length/socket identity plus its paired return.
+	 * No pathname or peer claim is made. The independent appraiser rejects
+	 * success and pending connection results; this is not Unix IPC admission.
+	 */
+	if (!spp_diag_trace_adapter_endpoint_valid(address, address_len) &&
+	    !(address && address_len >= (int)sizeof(sa_family_t) &&
+	      address_len <= (int)sizeof(struct sockaddr_un) &&
+	      ((const struct sockaddr *)address)->sa_family == AF_UNIX &&
+	      sock && sock->sk && sock->type == SOCK_STREAM &&
+	      sock->sk->sk_protocol == 0)) {
 		spp_diag_trace_runtime_network_unsupported(current);
 		return;
 	}
