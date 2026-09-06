@@ -40,6 +40,7 @@
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <sys/syscall.h>
 #include <sys/sysmacros.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -191,6 +192,23 @@ static int spp_diag_copy_value(char *out, size_t out_size, const char *token, co
 }
 
 #ifdef SPP_R1_SYSTEMD_INIT
+/*
+ * R1 minimal sealed image: load a signed kernel module baked into the initrd.
+ * On the stock Canonical azure kernel, dm-bufio and dm-verity are modules
+ * (=m); they must be loaded before the verity table is created. finit_module
+ * checks the module signature under lockdown, so only Canonical-signed modules
+ * from the measured initrd can load on the sealed appliance.
+ */
+static int spp_r1_load_module(const char *path) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        return -1;
+    }
+    long rc = syscall(SYS_finit_module, fd, "", 0);
+    close(fd);
+    return rc == 0 ? 0 : -1;
+}
+
 /*
  * R1 minimal sealed image: a lenient command-line parser. The R1 appliance
  * needs only the verity root: the data-partition PARTUUID, the hash-partition
@@ -417,6 +435,10 @@ int spp_diag_handoff_run(const struct spp_diag_handoff_ops *ops, void *ctx) {
 #ifdef SPP_R1_SYSTEMD_INIT
     if (spp_r1_parse_cmdline(cmdline, &fields) != 0) {
         return SPP_DIAG_HANDOFF_ERR_CMDLINE_MALFORMED;
+    }
+    if (spp_r1_load_module("/modules/dm-bufio.ko") != 0 ||
+        spp_r1_load_module("/modules/dm-verity.ko") != 0) {
+        return SPP_DIAG_HANDOFF_ERR_VERITY;
     }
 #else
     if (spp_diag_parse_cmdline(cmdline, &fields) != 0) {
