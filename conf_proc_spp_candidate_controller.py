@@ -134,7 +134,7 @@ def make_signal_supervisor() -> tuple[Stage2ControllerV3, LinuxStage2KernelOpsV3
 class CandidateController:
     """PID1 event loop: child events and lease expiry share one authority thread."""
 
-    def __init__(self) -> None:
+    def __init__(self, device_monitor=None) -> None:
         if os.getpid() != 1 or os.getuid() != 0:
             raise RuntimeError('candidate controller requires namespace PID1/root')
         import selectors
@@ -148,6 +148,13 @@ class CandidateController:
         self.results: dict[str, tuple[int, int]] = {}
         self.failed = False
         self.cgroups = None
+        self.device_monitor = device_monitor
+        if device_monitor is not None:
+            try:
+                device_monitor.check()
+            except BaseException:
+                self.fail_stop()
+                raise
 
     def install_workload_limits(self) -> None:
         if self.failed or self.cgroups is not None or self.children:
@@ -192,10 +199,14 @@ class CandidateController:
             raise
 
     def _step(self) -> list:
+        if self.device_monitor is not None:
+            self.device_monitor.check()
         if self.cgroups is not None:
             self.cgroups.check()
         self._reap()
         events = self.sessions.wait()
+        if self.device_monitor is not None:
+            self.device_monitor.check()
         other = []
         for key, mask in events:
             if key.data == ('signal', None):
@@ -220,6 +231,10 @@ class CandidateController:
             # Construction requires PID1 in the appliance namespace. Kill all
             # descendants, including a worker that escaped its original group.
             try:
-                os.kill(-1, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+                if self.device_monitor is not None:
+                    self.device_monitor.close()
+            finally:
+                try:
+                    os.kill(-1, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass

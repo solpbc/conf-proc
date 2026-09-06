@@ -53,6 +53,7 @@ from conf_proc_spp_candidate_session import CandidateSessionOwner
 from conf_proc_spp_boot_v3_resource import ServingResourceReducerV3
 controller = CandidateController.__new__(CandidateController)
 controller.cgroups = None
+controller.device_monitor = None
 controller.failed = False
 controller.ledger = ServingResourceReducerV3()
 controller.sessions = CandidateSessionOwner(controller.ledger)
@@ -82,3 +83,34 @@ finally:
     for n, handler in old_handlers.items():
         signal.signal(n, handler)
     signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+
+# A wrong-object device descriptor must use the same physical revocation path.
+from conf_proc_spp_candidate_device import DeviceMonitor
+controller = CandidateController.__new__(CandidateController)
+controller.cgroups = None
+controller.failed = False
+controller.ledger = ServingResourceReducerV3()
+controller.sessions = CandidateSessionOwner(controller.ledger)
+monitor = DeviceMonitor.__new__(DeviceMonitor)
+monitor.socket, event_peer = socket.socketpair()
+controller.device_monitor = monitor
+client, peer = socket.socketpair()
+try:
+    token = controller.ledger.session_acquire()
+    controller.sessions.adopt(token, client, time.monotonic_ns()+1_000_000_000)
+    with patch('conf_proc_spp_candidate_controller.os.kill') as kill:
+        try:
+            controller.step()
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError('non-kernel device subscription accepted')
+        assert controller.failed and controller.ledger.revoked
+        assert monitor.socket.fileno() == -1
+        kill.assert_called_once_with(-1, signal.SIGKILL)
+    peer.settimeout(1)
+    assert peer.recv(1) == b''
+    print('ok wrong-object device monitor revokes actual sockets and grants')
+finally:
+    client.close();peer.close();event_peer.close();monitor.close()
+    controller.sessions.close()
