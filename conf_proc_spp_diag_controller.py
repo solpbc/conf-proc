@@ -842,7 +842,7 @@ def _prepare_nvidia_device_links() -> None:
 
 def _run_fixed_child(name: str, argv: tuple[str, ...], deadline: float, cap: int) -> ChildResult:
     if name == "nvidia-crypto":
-        valid = argv == (_MODPROBE, "--all", "ecdh_generic", "ecdsa_generic")
+        valid = argv == (_MODPROBE, "--all", "ecdh_generic", "ecdsa_generic", "aesni_intel")
     elif name == "nvidia-device":
         valid = argv == (_NVIDIA_MODPROBE, "-c", "0")
     elif name == "nvidia-uvm":
@@ -1141,7 +1141,7 @@ def _preflight(ops: ControllerOps, boot: BootInputs) -> tuple[ControllerIdentity
     # algorithms must exist before NVIDIA's first certificate verification;
     # late kernel autoloading is not part of this appliance's bootstrap.
     _child(
-        ops, "nvidia-crypto", (_MODPROBE, "--all", "ecdh_generic", "ecdsa_generic"),
+        ops, "nvidia-crypto", (_MODPROBE, "--all", "ecdh_generic", "ecdsa_generic", "aesni_intel"),
         ops.monotonic() + 30.0, _CHILD_CAPTURE_BYTES, 1,
     )
     _child(

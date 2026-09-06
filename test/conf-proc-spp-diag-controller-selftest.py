@@ -446,10 +446,10 @@ def test_crypto_bootstrap_is_fixed_and_dominates_driver_startup() -> None:
     recorder.fail_child = "nvidia-crypto"
     assert controller_main(argv, recorder.ops()) == 1
     assert recorder.children == [("nvidia-crypto", (
-        "/usr/sbin/modprobe", "--all", "ecdh_generic", "ecdsa_generic"))]
+        "/usr/sbin/modprobe", "--all", "ecdh_generic", "ecdsa_generic", "aesni_intel"))]
     assert recorder.poweroffs == 1 and not recorder.writes
     for changed in (("/usr/sbin/modprobe", "--all", "ecdsa_generic"),
-                    ("/usr/sbin/modprobe", "--all", "ecdh_generic", "ecdsa_generic", "extra")):
+                    ("/usr/sbin/modprobe", "--all", "ecdh_generic", "ecdsa_generic", "aesni_intel", "extra")):
         with patch.object(controller.os, 'fork', side_effect=AssertionError('unexpected launch')):
             try:
                 controller._run_fixed_child("nvidia-crypto", changed, 1.0, 4096)
