@@ -493,6 +493,26 @@ int spp_diag_handoff_run(const struct spp_diag_handoff_ops *ops, void *ctx) {
         return SPP_DIAG_HANDOFF_ERR_SWITCH_ROOT;
     }
 
+#ifdef SPP_R1_SYSTEMD_INIT
+    /*
+     * R1 minimal sealed image (founder decision 2026-09-06). The verity root
+     * is mounted read-only and is measured through the signed UKI at PCR 4; no
+     * trace plane and no diagnostic controller run. Close everything above the
+     * inherited console (0/1/2) and hand PID 1 to the baked systemd, which
+     * brings up the sealed serving cohort from the immutable rootfs. The
+     * deferred trace/controller handoff is the #else branch below and is
+     * unchanged for the default diagnostic build.
+     */
+    if (ops->close_range(ctx, 3, UINT_MAX) != 0) {
+        return SPP_DIAG_HANDOFF_ERR_FD_SETUP;
+    }
+    {
+        char *r1_argv[] = {(char *)"/sbin/init", NULL};
+        char *r1_envp[] = {NULL};
+        ops->execve(ctx, "/sbin/init", r1_argv, r1_envp);
+    }
+    return SPP_DIAG_HANDOFF_ERR_EXEC;
+#else
     if (ops->mount(ctx, "securityfs", SPP_DIAG_SECURITYFS_MOUNTPOINT, "securityfs", 0, NULL) != 0) {
         return SPP_DIAG_HANDOFF_ERR_SECURITYFS;
     }
@@ -570,6 +590,7 @@ int spp_diag_handoff_run(const struct spp_diag_handoff_ops *ops, void *ctx) {
     };
     ops->execve(ctx, SPP_DIAG_CONTROLLER_INTERP, argv, envp);
     return SPP_DIAG_HANDOFF_ERR_EXEC;
+#endif
 }
 
 /* ------------------------------------------------------------------ */
