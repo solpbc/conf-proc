@@ -25,7 +25,7 @@ def test_parser_only_when_available() -> None:
         print("skip apparmor_parser unavailable: parser compilation was not performed")
         return
     # -Q prevents policy load.  Runtime loading is separately pinned in controller
-    # source to -r -K --abort-on-error and never uses -Q.
+    # source to -B -r -K --abort-on-error and never uses -Q.
     result = subprocess.run([parser, "-Q", "-K", POLICY], capture_output=True, text=True, check=False)
     assert result.returncode == 0, f"apparmor_parser parser-only check failed:\n{result.stdout}\n{result.stderr}"
 
@@ -46,6 +46,7 @@ def test_attachment_children_and_closed_files() -> None:
     assert not any(" px," in line or " ux," in line for line in lines)
     assert {line for line in lines if line.startswith("capability ")} == {"capability sys_boot,"}
     assert "/proc/1/task/1/children r," in lines
+    assert "/proc/1/attr/current r," in lines
     assert "/usr/lib/spp/spp-diag-gpu-evidence.py r," in lines
     assert "/usr/lib/python3.10/conf_proc_spp_diag_uart.py r," in lines
     assert "/usr/lib/python3.10/conf_proc_spp_diag_uart_reasons.py r," in lines

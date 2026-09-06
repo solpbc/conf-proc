@@ -3,7 +3,7 @@
 #
 # Parser-checked only: this source is compiled by the focused selftest and is not a
 # claim that a live kernel enforces it.  The controller loads this
-# exact profile with: apparmor_parser -r -K --abort-on-error <this file>.
+# precompiled profile with: apparmor_parser -B -r -K --abort-on-error <binary>.
 #
 # The executable attachment is the shipped extensionless PID-1 controller.  There
 # are no includes, unconfined transitions, filesystem-wide grants, or administrative caps.
@@ -43,6 +43,7 @@ profile /usr/lib/spp/spp-diag-controller {
   /dev/nvidia-uvm-tools rw,
   /dev/nvidia-caps/* rw,
   /proc/1/task/1/children r,
+  /proc/1/attr/current r,
   /proc/driver/nvidia/** r,
   /sys/kernel/security/sol_spp_diag_trace/control w,
   /sys/kernel/security/sol_spp_diag_trace/stream r,

@@ -107,7 +107,7 @@ _EXEC_DENIALS: Final = (
 )
 _PARSER: Final = "/usr/sbin/apparmor_parser"
 _NVIDIA_MODPROBE: Final = "/usr/bin/nvidia-modprobe"
-_PROFILE_FILE: Final = "/etc/apparmor.d/usr.local.libexec.solstone.spp-diag-controller"
+_PROFILE_FILE: Final = "/etc/apparmor.d/spp-diag-controller.bin"
 _PROFILE_NAME: Final = "/usr/lib/spp/spp-diag-controller"
 _GPU_HELPER: Final = "/usr/lib/spp/spp-diag-gpu-evidence.py"
 _PYTHON: Final = "/usr/bin/python3.10"
@@ -845,7 +845,7 @@ def _run_fixed_child(name: str, argv: tuple[str, ...], deadline: float, cap: int
     elif name == "nvidia-uvm":
         valid = argv == (_NVIDIA_MODPROBE, "-u")
     elif name == "apparmor":
-        valid = argv == (_PARSER, "-r", "-K", "--abort-on-error", _PROFILE_FILE)
+        valid = argv == (_PARSER, "-B", "-r", "-K", "--abort-on-error", _PROFILE_FILE)
     elif name == "cuda-cold":
         valid = argv == (_CUDA, "cold")
     elif name == "cuda-infer":
@@ -1145,11 +1145,13 @@ def _preflight(ops: ControllerOps, boot: BootInputs) -> tuple[ControllerIdentity
         ops.monotonic() + 30.0, _CHILD_CAPTURE_BYTES, 1,
     )
     _child(
-        ops, "apparmor", (_PARSER, "-r", "-K", "--abort-on-error", _PROFILE_FILE),
+        ops, "apparmor", (_PARSER, "-B", "-r", "-K", "--abort-on-error", _PROFILE_FILE),
         ops.monotonic() + 10.0, _CHILD_CAPTURE_BYTES, 1,
     )
     try:
         ops.write_file("/proc/self/attr/current", ("changeprofile " + _PROFILE_NAME).encode())
+        if ops.read_file("/proc/self/attr/current", 256) != (_PROFILE_NAME + " (enforce)\n").encode():
+            raise RuntimeError("AppArmor enforcement readback differs")
     except Exception:
         _fail(SPPFLR1_POLICY, 1)
     return identity, model, plan

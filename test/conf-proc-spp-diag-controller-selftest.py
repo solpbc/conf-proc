@@ -409,6 +409,7 @@ def _main_fixture(recorder: Recorder) -> list[str]:
     binding += b"\0" * (4096 - len(binding))
     recorder.files = {
         "/proc/cmdline": command_line,
+        "/proc/self/attr/current": b"/usr/lib/spp/spp-diag-controller (enforce)\n",
         binding_uuid: binding,
         "/usr/lib/spp/control-plan.json": plan,
         _MODEL: MODEL,
@@ -422,6 +423,21 @@ def _main_fixture(recorder: Recorder) -> list[str]:
         "/run/spp-diag/quote.pcrs": b"PCRS",
     }
     return [CONTROLLER_PATH, f"sol_spp_diag.target_profile={TARGET_PROFILE}", f"sol_spp_diag.binding_partuuid={binding_uuid}"]
+
+
+def test_policy_loader_and_enforcement_readback() -> None:
+    for readback in (b"unconfined\n", b"/usr/lib/spp/spp-diag-controller (complain)\n", b"", b"other (enforce)\n", None):
+        recorder = Recorder()
+        argv = _main_fixture(recorder)
+        if readback is None:
+            recorder.fail_reads.add("/proc/self/attr/current")
+        else:
+            recorder.files["/proc/self/attr/current"] = readback
+        assert controller_main(argv, recorder.ops()) == 1
+        assert recorder.children[-1] == ("apparmor", (
+            "/usr/sbin/apparmor_parser", "-B", "-r", "-K", "--abort-on-error",
+            "/etc/apparmor.d/spp-diag-controller.bin"))
+        assert not recorder.writes and recorder.poweroffs == 1
 
 
 def test_main_uses_the_same_injected_production_core_and_framed_late_failure() -> None:
@@ -735,6 +751,7 @@ def test_uart_configuration_roundtrips_linux_terminal_settings() -> None:
 
 
 TESTS = (
+    test_policy_loader_and_enforcement_readback,
     test_statfs_layout_matches_native_abi_before_syscall,
     test_uart_configuration_roundtrips_linux_terminal_settings,
     test_command_wire,
