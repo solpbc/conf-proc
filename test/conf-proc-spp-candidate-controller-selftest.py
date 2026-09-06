@@ -52,6 +52,7 @@ from conf_proc_spp_candidate_controller import CandidateController
 from conf_proc_spp_candidate_session import CandidateSessionOwner
 from conf_proc_spp_boot_v3_resource import ServingResourceReducerV3
 controller = CandidateController.__new__(CandidateController)
+controller.cgroups = None
 controller.failed = False
 controller.ledger = ServingResourceReducerV3()
 controller.sessions = CandidateSessionOwner(controller.ledger)

@@ -122,6 +122,36 @@ class SessionTests(unittest.TestCase):
             self.assertEqual(peer.recv(1),b'')
         self.assertIn(self.token,self.ledger.sessions)
 
+    def test_handshake_owned_without_request_authority_then_one_lease(self):
+        client,peer=self.pair()
+        self.owner.begin_handshake(self.token,client)
+        for generation in CollectorGenerationV3:
+            permit=self.ledger.collector_acquire(self.token,generation)
+            self.ledger.collector_finish(self.token,generation,permit)
+        with self.assertRaises(RuntimeError):
+            self.owner.request_acquire(self.token,RouteV3.INFERENCE)
+        self.owner.authorize(self.token,time.monotonic_ns()+100_000_000)
+        with self.assertRaises(ValueError):
+            self.owner.authorize(self.token,time.monotonic_ns()+500_000_000)
+        grants=self.owner.request_acquire(self.token,RouteV3.INFERENCE)
+        self.assertEqual(len(grants),4)
+        self.ledger.work_begin(self.token,grants[1])
+        self.expire();self.assertEqual(peer.recv(1),b'')
+
+    def test_handshake_expiry_closes_socket_without_authorizing(self):
+        from unittest.mock import patch
+        client,peer=self.pair()
+        self.owner.begin_handshake(self.token,client)
+        with patch('conf_proc_spp_candidate_session.time.monotonic_ns',return_value=time.monotonic_ns()+121_000_000_000):
+            with self.assertRaises(TimeoutError):self.owner.authorize(self.token,1)
+        self.assertNotIn(self.token,self.ledger.sessions)
+        self.assertEqual(peer.recv(1),b'')
+
+    def test_failed_initial_socket_pin_releases_ledger_session(self):
+        unopened=socket.socket();self.sockets.append(unopened)
+        with self.assertRaises(OSError):self.owner.begin_handshake(self.token,unopened)
+        self.assertNotIn(self.token,self.ledger.sessions)
+
     def test_invalid_and_replayed_adoption_denied(self):
         client, peer = self.pair()
         for bad in (True, time.monotonic_ns()-1, time.monotonic_ns()+61_000_000_000):

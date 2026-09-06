@@ -147,6 +147,17 @@ class CandidateController:
         self.children: dict[int, str] = {}
         self.results: dict[str, tuple[int, int]] = {}
         self.failed = False
+        self.cgroups = None
+
+    def install_workload_limits(self) -> None:
+        if self.failed or self.cgroups is not None or self.children:
+            raise RuntimeError('candidate resource setup is out of order')
+        from conf_proc_spp_candidate_cgroups import CandidateCgroups
+        try:
+            self.cgroups = CandidateCgroups()
+        except BaseException:
+            self.fail_stop()
+            raise
 
     def register_child(self, pid: int, role: str) -> None:
         if (type(pid) is not int or pid <= 1 or pid in self.children
@@ -163,6 +174,8 @@ class CandidateController:
             if role is None:
                 self.fail_stop()
                 raise RuntimeError('unregistered adopted child exit')
+            if self.cgroups is not None:
+                self.cgroups.require_empty(role)
             self.results[role] = result
             if role in ('inference', 'asr', 'gateway') or result != (os.CLD_EXITED, 0):
                 self.fail_stop()
@@ -179,6 +192,8 @@ class CandidateController:
             raise
 
     def _step(self) -> list:
+        if self.cgroups is not None:
+            self.cgroups.check()
         self._reap()
         events = self.sessions.wait()
         other = []

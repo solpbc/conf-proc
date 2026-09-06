@@ -114,6 +114,7 @@ check: test-spp-diag-handoff test-spp-diag-controller test-spp-diag-uart test-sp
 	bash -n run-collector.sh
 
 test:
+	$(PYTHON) test/conf-proc-spp-candidate-cgroups-selftest.py
 	$(PYTHON) test/conf-proc-spp-candidate-attestation-selftest.py
 	$(PYTHON) test/conf-proc-spp-candidate-resume-selftest.py
 	$(PYTHON) test/conf-proc-spp-candidate-tpm-selftest.py

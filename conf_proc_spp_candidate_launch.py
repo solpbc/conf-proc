@@ -9,6 +9,8 @@ import fcntl
 import os
 from pathlib import Path
 import resource
+import select
+import time
 import signal
 import stat
 
@@ -57,12 +59,27 @@ def _install_fds(null_fd: int, result_or_listener: int, readiness: int | None) -
         raise
 
 
+def _drop_bounding_set() -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.prctl.restype = ctypes.c_int
+    # Drop the bounding set while CAP_SETPCAP is still available. NNP alone
+    # would prevent gaining privilege but leave a falsely nonempty census.
+    if Path('/proc/sys/kernel/cap_last_cap').read_text().strip() != '40':
+        raise RuntimeError('candidate capability ABI differs')
+    for capability in range(41):
+        if libc.prctl(24, capability, 0, 0, 0) != 0:
+            raise OSError(ctypes.get_errno(), 'candidate capability bounding drop')
+        if libc.prctl(23, capability, 0, 0, 0) != 0:
+            raise RuntimeError('candidate capability bounding readback differs')
+
+
 def _drop_credentials(uid: int) -> None:
     libc = ctypes.CDLL(None, use_errno=True)
     libc.prctl.restype = ctypes.c_int
     # No-new-privileges survives exec and prohibits setuid/file-cap transitions.
     if libc.prctl(38, 1, 0, 0, 0) != 0 or libc.prctl(39, 0, 0, 0, 0) != 1:
         raise OSError(ctypes.get_errno(), 'candidate no-new-privileges')
+    _drop_bounding_set()
     os.setgroups([])
     os.setresgid(uid, uid, uid)
     os.setresuid(uid, uid, uid)
@@ -70,11 +87,24 @@ def _drop_credentials(uid: int) -> None:
         raise RuntimeError('candidate credential readback differs')
     status = Path('/proc/self/status').read_text()
     values = dict(line.split(':', 1) for line in status.splitlines() if ':' in line)
-    for key in ('CapInh', 'CapPrm', 'CapEff', 'CapAmb'):
+    for key in ('CapInh', 'CapPrm', 'CapEff', 'CapBnd', 'CapAmb'):
         if int(values[key].strip(), 16) != 0:
             raise RuntimeError('candidate retained process capabilities')
     if values['NoNewPrivs'].strip() != '1':
         raise RuntimeError('candidate privilege lock absent')
+
+
+def _await_parent_release(fd: int) -> None:
+    """No workload instruction executes before PID1's physical placement check."""
+    deadline = time.monotonic() + 5.0
+    try:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not select.select([fd], [], [], remaining)[0]:
+            raise RuntimeError('candidate parent placement deadline expired')
+        if os.read(fd, 2) != b'R':
+            raise RuntimeError('candidate parent placement absent or malformed')
+    finally:
+        os.close(fd)
 
 
 def _child_entry(role: str, mode: str, root_fd: int, null_fd: int,
@@ -107,12 +137,15 @@ def launch_workload(controller, role: str, mode: str, result_or_listener: int,
     """
     if os.getpid() != 1 or os.getuid() != 0 or controller.failed:
         raise RuntimeError('candidate workload launch requires active PID1')
+    if controller.cgroups is None:
+        raise RuntimeError('candidate resource controls must precede launch')
     argv = launch_argv(role, mode)
     if (mode == 'serve') != (readiness is not None):
         raise ValueError('candidate readiness FD shape differs')
     spec = runtime(role)
     root_fd = os.open(spec.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
     null_fd = None
+    gate_read = gate_write = None
     try:
         st = os.fstat(root_fd)
         if not stat.S_ISDIR(st.st_mode) or st.st_uid != 0 or not os.fstatvfs(root_fd).f_flag & os.ST_RDONLY:
@@ -121,15 +154,30 @@ def launch_workload(controller, role: str, mode: str, result_or_listener: int,
         if not exe.is_file() or not os.access(exe, os.X_OK):
             raise RuntimeError('candidate fixed interpreter absent')
         null_fd = os.open('/dev/null', os.O_RDWR | os.O_CLOEXEC)
+        gate_read, gate_write = os.pipe2(os.O_CLOEXEC)
         pid = controller.signals.run_event('launch_child')
         if pid == 0:
             try:
+                os.close(gate_write)
+                _await_parent_release(gate_read)
                 _child_entry(role, mode, root_fd, null_fd, result_or_listener, readiness)
             except BaseException:
                 os._exit(127)
-        controller.register_child(pid, ('cold-' if mode == 'cold' else '') + role)
+        os.close(gate_read)
+        gate_read = None
+        child_role = ('cold-' if mode == 'cold' else '') + role
+        controller.register_child(pid, child_role)
+        controller.cgroups.place(child_role, pid)
+        if os.write(gate_write, b'R') != 1:
+            raise RuntimeError('candidate parent release write was partial')
         return pid
+    except BaseException:
+        controller.fail_stop()
+        raise
     finally:
+        for gate in (gate_read, gate_write):
+            if gate is not None:
+                os.close(gate)
         os.close(root_fd)
         if null_fd is not None:
             os.close(null_fd)

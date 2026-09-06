@@ -21,12 +21,14 @@ from dataclasses import dataclass, field
 from conf_proc_spp_boot_v3_resource import ServingResourceReducerV3
 
 MAX_LEASE_NS = 60_000_000_000
+MAX_HANDSHAKE_NS = 120_000_000_000
 MAX_SESSION_SOCKETS = 3  # client, one upstream, one private verifier channel
 
 
 @dataclass
 class _OwnedSession:
     deadline_ns: int
+    authorized: bool = False
     sockets: dict[tuple[int, int], socket.socket] = field(default_factory=dict)
 
 
@@ -44,19 +46,53 @@ class CandidateSessionOwner:
         if self._thread != threading.get_ident() or self._closed:
             raise RuntimeError("candidate session owner unavailable")
 
+    def begin_handshake(self, token: bytes, client: socket.socket) -> None:
+        """Own and bound the pre-attestation channel without granting requests."""
+        self._adopt(token, client, time.monotonic_ns() + MAX_HANDSHAKE_NS, False)
+
     def adopt(self, token: bytes, client: socket.socket, deadline_ns: int) -> None:
         """Retain a duplicate only after the controller has appraised this lease."""
+        self._adopt(token, client, deadline_ns, True)
+
+    def _adopt(self, token: bytes, client: socket.socket, deadline_ns: int, authorized: bool) -> None:
         self._check_owner()
         now = time.monotonic_ns()
-        if (type(deadline_ns) is not int or not now < deadline_ns <= now + MAX_LEASE_NS
+        bound = MAX_LEASE_NS if authorized else MAX_HANDSHAKE_NS
+        if (type(deadline_ns) is not int or not now < deadline_ns <= now + bound
                 or token not in self.ledger.sessions or token in self._sessions):
             raise ValueError("invalid candidate lease or session")
-        self._sessions[token] = _OwnedSession(deadline_ns)
+        self._sessions[token] = _OwnedSession(deadline_ns, authorized)
         try:
             self.attach(token, client)
         except BaseException:
-            self._sessions.pop(token, None)
+            if token in self._sessions:
+                self.release(token)
             raise
+
+    def authorize(self, token: bytes, deadline_ns: int) -> None:
+        """Consume the controller's independently verified private lease once."""
+        self._check_owner()
+        session = self._sessions[token]
+        now = time.monotonic_ns()
+        if now >= session.deadline_ns:
+            self.release(token)
+            raise TimeoutError("candidate handshake expired")
+        if (session.authorized or type(deadline_ns) is not int
+                or not now < deadline_ns <= now + MAX_LEASE_NS):
+            raise ValueError("candidate lease is invalid or already consumed")
+        session.deadline_ns = deadline_ns
+        session.authorized = True
+
+    def request_acquire(self, token: bytes, route):
+        """The candidate controller's only path to post-handshake request grants."""
+        self._check_owner()
+        session = self._sessions[token]
+        if time.monotonic_ns() >= session.deadline_ns:
+            self.release(token)
+            raise TimeoutError("candidate session expired")
+        if not session.authorized:
+            raise RuntimeError("candidate channel has no appraised lease")
+        return self.ledger.request_acquire(token, route)
 
     def attach(self, token: bytes, connected: socket.socket) -> None:
         """Pin a connected socket before passing its descriptor to the gateway."""
