@@ -1515,6 +1515,7 @@ static int real_dm_table_load(void *ctx, int fd, const char *name, uint64_t leng
     io->data_size = (uint32_t)total;
     io->data_start = sizeof(struct dm_ioctl);
     io->target_count = 1;
+    io->flags = DM_READONLY_FLAG;
     strncpy(io->name, name, sizeof(io->name) - 1);
     spec->sector_start = 0;
     spec->length = length_sectors;

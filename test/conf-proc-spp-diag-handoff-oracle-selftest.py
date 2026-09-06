@@ -144,6 +144,7 @@ def run_production_ops_oracle(build_dir: str) -> None:
                 return 0;
             }}
             if (request == DM_TABLE_LOAD) {{
+                require_true(io->flags == DM_READONLY_FLAG);
                 struct dm_target_spec *spec = (struct dm_target_spec *)((unsigned char *)arg + io->data_start);
                 const char *params = (const char *)spec + sizeof(*spec);
                 require_true(io->target_count == 1 && spec->sector_start == 0);
