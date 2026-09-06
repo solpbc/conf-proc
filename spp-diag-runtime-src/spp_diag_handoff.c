@@ -157,6 +157,7 @@ static int spp_diag_is_partuuid(const char *value) {
     return 1;
 }
 
+#ifndef SPP_R1_SYSTEMD_INIT
 static int spp_diag_is_profile(const char *value) {
     size_t length = strlen(value);
     if (length == 0 || length > 128 ||
@@ -173,6 +174,7 @@ static int spp_diag_is_profile(const char *value) {
     }
     return 1;
 }
+#endif
 
 static int spp_diag_copy_value(char *out, size_t out_size, const char *token, const char *prefix) {
     size_t prefix_length = strlen(prefix);
@@ -188,6 +190,44 @@ static int spp_diag_copy_value(char *out, size_t out_size, const char *token, co
     return 0;
 }
 
+#ifdef SPP_R1_SYSTEMD_INIT
+/*
+ * R1 minimal sealed image: a lenient command-line parser. The R1 appliance
+ * needs only the verity root: the data-partition PARTUUID, the hash-partition
+ * PARTUUID, and the verity root hash. It carries no trace/diagnostic tokens,
+ * and it tolerates ordinary kernel tokens (ro, root=, rootfstype=, console=,
+ * ip=off, ...) that the strict diagnostic parser rejected. Values are validated
+ * exactly as the diagnostic parser validates its own.
+ */
+static int spp_r1_parse_cmdline(char *cmdline, struct spp_diag_cmdline_fields *fields) {
+    memset(fields, 0, sizeof(*fields));
+    int have_data = 0;
+    int have_hash = 0;
+    int have_roothash = 0;
+    char *save = NULL;
+    for (char *tok = strtok_r(cmdline, " \t", &save); tok != NULL; tok = strtok_r(NULL, " \t", &save)) {
+        if (spp_diag_copy_value(fields->data_partuuid, sizeof(fields->data_partuuid), tok,
+                                "spp_diag.root_data=PARTUUID=") == 0) {
+            have_data = 1;
+        } else if (spp_diag_copy_value(fields->hash_partuuid, sizeof(fields->hash_partuuid), tok,
+                                       "spp_diag.root_hash=PARTUUID=") == 0) {
+            have_hash = 1;
+        } else if (spp_diag_copy_value(fields->root_hash, sizeof(fields->root_hash), tok,
+                                       "spp_diag.roothash=") == 0) {
+            have_roothash = 1;
+        }
+    }
+    if (!have_data || !have_hash || !have_roothash) {
+        return -1;
+    }
+    if (!spp_diag_is_partuuid(fields->data_partuuid) || !spp_diag_is_partuuid(fields->hash_partuuid) ||
+        !spp_diag_is_lower_hex(fields->root_hash, 64) ||
+        strcmp(fields->data_partuuid, fields->hash_partuuid) == 0) {
+        return -1;
+    }
+    return 0;
+}
+#else
 static int spp_diag_parse_cmdline(char *cmdline, struct spp_diag_cmdline_fields *fields) {
     char original[4096];
     if (strlen(cmdline) >= sizeof(original)) {
@@ -246,6 +286,7 @@ static int spp_diag_parse_cmdline(char *cmdline, struct spp_diag_cmdline_fields 
     );
     return written >= 0 && (size_t)written < sizeof(expected) && strcmp(original, expected) == 0 ? 0 : -1;
 }
+#endif
 
 static int spp_diag_read_cmdline(const struct spp_diag_handoff_ops *ops, void *ctx, char *out, size_t out_size) {
     int fd = ops->open(ctx, "/proc/cmdline", O_RDONLY, 0);
@@ -373,9 +414,15 @@ int spp_diag_handoff_run(const struct spp_diag_handoff_ops *ops, void *ctx) {
     }
 
     struct spp_diag_cmdline_fields fields;
+#ifdef SPP_R1_SYSTEMD_INIT
+    if (spp_r1_parse_cmdline(cmdline, &fields) != 0) {
+        return SPP_DIAG_HANDOFF_ERR_CMDLINE_MALFORMED;
+    }
+#else
     if (spp_diag_parse_cmdline(cmdline, &fields) != 0) {
         return SPP_DIAG_HANDOFF_ERR_CMDLINE_MALFORMED;
     }
+#endif
 
     char data_device_id[64];
     char hash_device_id[64];
