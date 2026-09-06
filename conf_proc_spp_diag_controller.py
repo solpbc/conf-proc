@@ -110,6 +110,7 @@ _NVIDIA_MODPROBE: Final = "/usr/bin/nvidia-modprobe"
 _MODPROBE: Final = "/usr/sbin/modprobe"
 _PROFILE_FILE: Final = "/etc/apparmor.d/spp-diag-controller.bin"
 _PROFILE_NAME: Final = "/usr/lib/spp/spp-diag-controller"
+_GPU_BOOTSTRAP: Final = "/usr/lib/spp/spp-diag-gpu-bootstrap.py"
 _GPU_HELPER: Final = "/usr/lib/spp/spp-diag-gpu-evidence.py"
 _PYTHON: Final = "/usr/bin/python3.10"
 _GPU_OUTPUT: Final = "/run/spp-diag/gpu-evidence.tlv"
@@ -847,6 +848,8 @@ def _run_fixed_child(name: str, argv: tuple[str, ...], deadline: float, cap: int
         valid = argv == (_NVIDIA_MODPROBE, "-c", "0")
     elif name == "nvidia-uvm":
         valid = argv == (_NVIDIA_MODPROBE, "-u")
+    elif name == "gpu-bootstrap":
+        valid = argv == (_PYTHON, "-I", "-B", "-S", _GPU_BOOTSTRAP)
     elif name == "apparmor":
         valid = argv == (_PARSER, "-B", "-r", "-K", "--abort-on-error", _PROFILE_FILE)
     elif name == "cuda-cold":
@@ -1150,6 +1153,10 @@ def _preflight(ops: ControllerOps, boot: BootInputs) -> tuple[ControllerIdentity
     )
     _child(
         ops, "nvidia-uvm", (_NVIDIA_MODPROBE, "-u"),
+        ops.monotonic() + 30.0, _CHILD_CAPTURE_BYTES, 1,
+    )
+    _child(
+        ops, "gpu-bootstrap", (_PYTHON, "-I", "-B", "-S", _GPU_BOOTSTRAP),
         ops.monotonic() + 30.0, _CHILD_CAPTURE_BYTES, 1,
     )
     _child(
