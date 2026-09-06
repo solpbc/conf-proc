@@ -34,7 +34,7 @@ from conf_proc_spp_diag_export import (
     PoweroffInvalidationFailed,
     PoweroffReturned,
     build_export_stream,
-    export_and_poweroff,
+    framed_export_and_poweroff,
 )
 from conf_proc_spp_diag_failure_terminal_reasons import (
     SPPFLR1_BINDING, SPPFLR1_CHILD, SPPFLR1_EXPORT, SPPFLR1_GPU, SPPFLR1_IMA,
@@ -630,7 +630,7 @@ def _collect_and_export(
         writer.load_success(stream)
     except Exception:
         _fail(SPPFLR1_EXPORT, 15)
-    export_and_poweroff(ExportOps(
+    framed_export_and_poweroff(ExportOps(
         write_serial=ops.write_serial, wait_writable=ops.wait_uart_writable,
         serial_queue_bytes=ops.serial_queue_bytes, monotonic=ops.monotonic,
         request_poweroff_hardware=ops.request_poweroff,

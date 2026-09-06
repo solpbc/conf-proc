@@ -13,7 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from conf_proc_spp_diag_export import ExportOps, PoweroffInvalidationFailed, PoweroffReturned, export_and_poweroff
+from conf_proc_spp_diag_export import ExportOps, PoweroffInvalidationFailed, PoweroffReturned, framed_export_and_poweroff
 from conf_proc_spp_diag_failure_terminal_reasons import SPPFLR1_EXPORT, encode_failure_terminal
 from conf_proc_spp_diag_uart import (
     KIND_FAILURE,
@@ -217,7 +217,7 @@ def test_export_state_deadlines_and_terminal_order() -> None:
         request_poweroff_hardware=lambda: None,
     )
     try:
-        export_and_poweroff(ops, writer)
+        framed_export_and_poweroff(ops, writer)
     except PoweroffReturned as exc:
         assert exc.writer is writer
     else:
@@ -233,7 +233,7 @@ def test_export_state_deadlines_and_terminal_order() -> None:
 
     writer = _writer(b"Q")
     try:
-        export_and_poweroff(
+        framed_export_and_poweroff(
             ExportOps(lambda _data: 0, lambda _deadline: True, lambda: 0, Clock(), lambda: None), writer
         )
     except PoweroffReturned:
@@ -250,7 +250,7 @@ def test_export_state_deadlines_and_terminal_order() -> None:
         return len(data) if calls[0] == 1 else 0
 
     try:
-        export_and_poweroff(
+        framed_export_and_poweroff(
             ExportOps(invalidator_short, lambda _deadline: True, lambda: 0, Clock(), lambda: None), writer
         )
     except PoweroffInvalidationFailed:
