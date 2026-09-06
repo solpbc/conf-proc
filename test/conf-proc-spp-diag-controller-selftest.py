@@ -74,6 +74,8 @@ class Recorder:
         self.file_reads: list[tuple[str, int]] = []
         self.binding_reads: list[str] = []
         self.fail_reads: set[str] = set()
+        self.fail_file_write = False
+        self.autoload_readback = b"\n"
         self.read_errnos: dict[str, int] = {}
         self.bootstrap: list[str] = []
         self.serial: list[bytes] = []
@@ -98,6 +100,9 @@ class Recorder:
         return b"sealed trace"
 
     def run_child(self, name: str, argv: tuple[str, ...], _deadline: float, _cap: int) -> ChildResult:
+        if name == "gpu-bootstrap":
+            assert self.files["/proc/sys/kernel/modprobe"] == b"\n"
+            assert ("/proc/sys/kernel/modprobe", 256) in self.file_reads
         self.children.append((name, argv))
         if name == self.fail_child:
             return ChildResult(1)
@@ -131,6 +136,19 @@ class Recorder:
         self.binding_reads.append(path)
         return self.read_file(path, 4096)
 
+    def write_file(self, path: str, data: bytes) -> None:
+        if path == "/proc/sys/kernel/modprobe":
+            assert [name for name, _ in self.children] == [
+                "nvidia-crypto", "nvidia-device", "nvidia-uvm"]
+            assert data == b"\n"
+            if self.fail_file_write:
+                raise OSError("forced module autoload write failure")
+            self.files[path] = self.autoload_readback
+            self.bootstrap.append("disable-autoload")
+        else:
+            assert path == "/proc/self/attr/current"
+            self.bootstrap.append("changeprofile")
+
     def write_serial(self, data: bytes) -> int:
         result = self.serial_write_plan.pop(0) if self.serial_write_plan else None
         if result is None:
@@ -155,7 +173,7 @@ class Recorder:
             write_control=self.write_control, read_stream=self.read_stream, monotonic=self.monotonic,
             run_child=self.run_child, direct_operation=self.direct_operation,
             read_file=self.read_file, read_binding=self.read_binding,
-            write_file=lambda _path, _data: self.bootstrap.append("changeprofile"),
+            write_file=self.write_file,
             write_serial=self.write_serial,
             wait_uart_writable=self.wait_uart_writable, serial_queue_bytes=lambda: 0,
             request_poweroff=self.poweroff,
@@ -478,11 +496,27 @@ def test_gpu_bootstrap_failure_stops_before_confinement_and_cuda() -> None:
                 raise AssertionError('altered GPU bootstrap command accepted')
 
 
+def test_autoload_disable_failure_stops_before_gpu_bootstrap() -> None:
+    for fault in ("write", "read", "retained-path", "empty-read"):
+        recorder = Recorder()
+        argv = _main_fixture(recorder)
+        if fault == "write":
+            recorder.fail_file_write = True
+        elif fault == "read":
+            recorder.fail_reads.add("/proc/sys/kernel/modprobe")
+        else:
+            recorder.autoload_readback = b"/sbin/modprobe\n" if fault == "retained-path" else b""
+        assert controller_main(argv, recorder.ops()) == 1
+        assert [name for name, _ in recorder.children] == [
+            "nvidia-crypto", "nvidia-device", "nvidia-uvm"]
+        assert recorder.poweroffs == 1 and not recorder.writes
+
+
 def test_main_uses_the_same_injected_production_core_and_framed_late_failure() -> None:
     recorder = Recorder()
     argv = _main_fixture(recorder)
     assert controller_main(argv, recorder.ops()) == 1
-    assert recorder.bootstrap == ["uart", "fds", "fixtures", "scratch", "changeprofile"]
+    assert recorder.bootstrap == ["uart", "fds", "fixtures", "scratch", "disable-autoload", "changeprofile"]
     assert [name for name, _argv in recorder.children] == [
         "nvidia-crypto", "nvidia-device", "nvidia-uvm", "gpu-bootstrap", "apparmor", "cuda-cold", "cuda-infer", "gpu-helper",
         "tpm-readpublic-pem", "tpm-readpublic-tpmt", "tpm-nvread", "tpm-quote",
@@ -734,7 +768,7 @@ def test_isolated_staged_controller_import_reaches_real_main() -> None:
         recorder = Recorder()
         argv = _main_fixture(recorder)
         assert namespace["main"](argv, recorder.ops()) == 1
-        assert recorder.bootstrap == ["uart", "fds", "fixtures", "scratch", "changeprofile"]
+        assert recorder.bootstrap == ["uart", "fds", "fixtures", "scratch", "disable-autoload", "changeprofile"]
         assert [name for name, _argv in recorder.children[:5]] == [
             "nvidia-crypto", "nvidia-device", "nvidia-uvm", "gpu-bootstrap", "apparmor",
         ]
@@ -789,6 +823,7 @@ def test_uart_configuration_roundtrips_linux_terminal_settings() -> None:
 
 
 TESTS = (
+    test_autoload_disable_failure_stops_before_gpu_bootstrap,
     test_crypto_bootstrap_is_fixed_and_dominates_driver_startup,
     test_gpu_bootstrap_failure_stops_before_confinement_and_cuda,
     test_policy_loader_and_enforcement_readback,

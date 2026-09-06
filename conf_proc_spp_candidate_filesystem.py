@@ -224,3 +224,42 @@ def prepare_filesystems() -> PreparedFilesystems:
         _tmpfs(root+'/run',16777216,4096,0o700,uid)
         devices.append((role,_device_nodes(root,uid,controller=False)))
     return PreparedFilesystems(outer,controller,tuple(roots),tuple(devices))
+
+
+def retire_controller_tpm_device(fd: int) -> None:
+    """After S2, remove PID1's TPM path before final capability/namespace lock.
+
+    The inherited fd5 remains available for its one transfer to the fixed
+    attestation broker. No child or session may exist during this operation.
+    The caller must close PID1's fd after that transfer and verify its census.
+    """
+    from conf_proc_spp_candidate_isolation import _require_singleton_pid1
+    _require_singleton_pid1()
+    if fd != 5 or os.get_inheritable(fd):
+        raise RuntimeError('candidate TPM retirement descriptor differs')
+    actual = os.fstat(fd)
+    path = '/dev/tpmrm0'
+    node = os.stat(path, follow_symlinks=False)
+    if (not stat.S_ISCHR(node.st_mode) or not stat.S_ISCHR(actual.st_mode)
+            or (node.st_dev,node.st_ino)==(actual.st_dev,actual.st_ino)
+            or node.st_rdev != actual.st_rdev or (node.st_uid,node.st_gid)!=(0,0)
+            or stat.S_IMODE(node.st_mode)!=0o600):
+        raise RuntimeError('candidate TPM retirement device differs')
+    flags = MS_NOSUID | MS_NOEXEC
+    identity = _observe('/dev', TMPFS_MAGIC, flags | MS_RDONLY)
+    try:
+        _mount(None, '/dev', None, MS_REMOUNT | flags)
+        check = _directory('/dev')
+        try:
+            fs = _filesystem(check)
+            if fs.flags & MS_RDONLY:
+                raise RuntimeError('candidate TPM retirement remount did not apply')
+        finally:
+            os.close(check)
+        os.unlink(path)
+    finally:
+        _mount(None, '/dev', None, MS_REMOUNT | flags | MS_RDONLY)
+        if _observe('/dev', TMPFS_MAGIC, flags | MS_RDONLY) != identity:
+            raise RuntimeError('candidate retired device mount identity differs')
+    if os.path.lexists(path) or os.fstat(fd).st_rdev != actual.st_rdev:
+        raise RuntimeError('candidate TPM retirement did not preserve sole transport')

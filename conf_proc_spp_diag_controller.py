@@ -1155,6 +1155,15 @@ def _preflight(ops: ControllerOps, boot: BootInputs) -> tuple[ControllerIdentity
         ops, "nvidia-uvm", (_NVIDIA_MODPROBE, "-u"),
         ops.monotonic() + 30.0, _CHILD_CAPTURE_BYTES, 1,
     )
+    # Built-in crypto templates can request an optional module before creating
+    # their instance. Keep those lookups in-kernel after the fixed preload;
+    # an automatic userspace helper would escape the controller's child set.
+    try:
+        ops.write_file("/proc/sys/kernel/modprobe", b"\n")
+        if ops.read_file("/proc/sys/kernel/modprobe", 256) != b"\n":
+            raise RuntimeError("kernel module autoload disable readback differs")
+    except Exception:
+        _fail(SPPFLR1_POLICY, 1)
     _child(
         ops, "gpu-bootstrap", (_PYTHON, "-I", "-B", "-S", _GPU_BOOTSTRAP),
         ops.monotonic() + 30.0, _CHILD_CAPTURE_BYTES, 1,
