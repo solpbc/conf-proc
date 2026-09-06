@@ -29,11 +29,18 @@ from dataclasses import dataclass
 from typing import Callable, Final
 
 from conf_proc_json import canonical_dumps, canonical_loads
-from conf_proc_spp_diag_export import ExportOps, build_export_stream, export_and_poweroff
+from conf_proc_spp_diag_export import (
+    ExportOps,
+    PoweroffInvalidationFailed,
+    PoweroffReturned,
+    build_export_stream,
+    export_and_poweroff,
+)
 from conf_proc_spp_diag_failure_terminal_reasons import (
     SPPFLR1_BINDING, SPPFLR1_CHILD, SPPFLR1_EXPORT, SPPFLR1_GPU, SPPFLR1_IMA,
-    SPPFLR1_INPUT, SPPFLR1_POLICY, SPPFLR1_TPM, SPPFLR1_TRACE, encode_failure_terminal,
+    SPPFLR1_INPUT, SPPFLR1_POLICY, SPPFLR1_TPM, SPPFLR1_TRACE,
 )
+from conf_proc_spp_diag_uart import FramedUartWriter
 from conf_proc_spp_diag_quote import build_quote_invocation
 from conf_proc_spp_diag_gpt import close_selected, read_selected_exact, resolve_partuuid
 from conf_proc_spp_diagbundle_protocol import DOMAIN_CONTROL_PLAN, inner_receipt_digest
@@ -166,7 +173,6 @@ class ControllerOps:
     read_file: Callable[[str, int], bytes]
     read_binding: Callable[[str], bytes]
     write_file: Callable[[str, bytes], None]
-    write_uart: Callable[[bytes, float], None]
     write_serial: Callable[[bytes], int]
     wait_uart_writable: Callable[[float], bool]
     serial_queue_bytes: Callable[[], int]
@@ -514,6 +520,7 @@ def _collect_and_export(
     plan: dict,
     trace: bytes,
     output: bytes,
+    writer: FramedUartWriter,
 ) -> None:
     """Post-seal order is fixed; no raw child stdout is evidence except helper TLV."""
 
@@ -620,13 +627,14 @@ def _collect_and_export(
     }
     try:
         stream = build_export_stream(members=members, challenge=identity.challenge, run_identity=identity.run_identity)
-        export_and_poweroff(ExportOps(
-            write_serial=ops.write_serial, wait_writable=ops.wait_uart_writable,
-            serial_queue_bytes=ops.serial_queue_bytes, monotonic=ops.monotonic,
-            request_poweroff_hardware=ops.request_poweroff,
-        ), stream)
+        writer.load_success(stream)
     except Exception:
         _fail(SPPFLR1_EXPORT, 15)
+    export_and_poweroff(ExportOps(
+        write_serial=ops.write_serial, wait_writable=ops.wait_uart_writable,
+        serial_queue_bytes=ops.serial_queue_bytes, monotonic=ops.monotonic,
+        request_poweroff_hardware=ops.request_poweroff,
+    ), writer)
 
 def _inherited_fd_listing_is_exact(names: list[str], readlink: Callable[[str], str]) -> bool:
     """Allow only listdir's already-closed directory descriptor beyond FDs 0--5."""
@@ -1071,23 +1079,11 @@ def real_controller_ops() -> ControllerOps:
         packed = fcntl.ioctl(UART_FD, termios.TIOCOUTQ, struct.pack("I", 0))
         return int(struct.unpack("I", packed)[0])
 
-    def uart(data: bytes, deadline: float) -> None:
-        offset = 0
-        while offset < len(data):
-            if not wait_uart(deadline):
-                raise OSError("UART deadline")
-            count = os.write(UART_FD, data[offset:])
-            if count <= 0:
-                raise OSError("UART write")
-            offset += count
-        while serial_queue() != 0:
-            if not wait_uart(deadline):
-                raise OSError("UART drain deadline")
     return ControllerOps(
         write_control=lambda data: _write_all(CONTROL_FD, data), read_stream=lambda cap: _read_fd(STREAM_FD, cap),
         monotonic=time.monotonic, run_child=_run_fixed_child, direct_operation=_real_direct, read_file=_read_regular,
         read_binding=_read_binding_device,
-        write_file=_write_path, write_uart=uart, write_serial=lambda data: os.write(UART_FD, data),
+        write_file=_write_path, write_serial=lambda data: os.write(UART_FD, data),
         wait_uart_writable=wait_uart, serial_queue_bytes=serial_queue, request_poweroff=_poweroff,
         verify_pid_fds=_verify_pid_fds, configure_uart=_configure_uart, mount_scratch=_mount_scratch_once,
         preflight_fixture=_preflight_fixture_contract,
@@ -1142,13 +1138,27 @@ def _preflight(ops: ControllerOps, boot: BootInputs) -> tuple[ControllerIdentity
     return identity, model, plan
 
 
-def _fail_stop(ops: ControllerOps, fault: ControllerFault, identity: ControllerIdentity | None, uart_usable: bool, production: bool) -> int:
-    """Emit at most one identity-bound terminal, then request non-returning poweroff."""
+def _fail_stop(
+    ops: ControllerOps,
+    fault: ControllerFault,
+    identity: ControllerIdentity | None,
+    uart_usable: bool,
+    production: bool,
+    writer: FramedUartWriter | None,
+) -> int:
+    """Emit only a permitted framed terminal, then request non-returning poweroff."""
 
-    if identity is not None and uart_usable:
+    if identity is not None and uart_usable and writer is not None:
         try:
-            record = encode_failure_terminal(fault.reason_code, fault.phase, identity.challenge, identity.run_identity)
-            ops.write_uart(record, ops.monotonic() + _FAILURE_UART_SECONDS)
+            writer.emit_failure(
+                fault.reason_code,
+                fault.phase,
+                write_serial=ops.write_serial,
+                wait_writable=ops.wait_uart_writable,
+                serial_queue_bytes=ops.serial_queue_bytes,
+                monotonic=ops.monotonic,
+                deadline=ops.monotonic() + _FAILURE_UART_SECONDS,
+            )
         except Exception:
             pass
     try:
@@ -1166,22 +1176,26 @@ def main(argv: list[str] | None = None, ops: ControllerOps | None = None) -> int
     production = ops is None
     ops = real_controller_ops() if ops is None else ops
     identity: ControllerIdentity | None = None
+    writer: FramedUartWriter | None = None
     uart_usable = False
     try:
         boot = parse_boot_inputs(list(os.sys.argv if argv is None else argv), ops.read_file("/proc/cmdline", 4096))
         identity = boot.identity
         ops.configure_uart()  # setup failure is poweroff-only: UART is not usable yet.
         uart_usable = True
+        writer = FramedUartWriter(identity.challenge, identity.run_identity)
         ops.verify_pid_fds()
         identity, model, plan = _preflight(ops, boot)
         trace, output = run_controller(ops, identity, model_bytes=model)
-        _collect_and_export(ops, identity, plan, trace, output)
+        _collect_and_export(ops, identity, plan, trace, output, writer)
         _fail(SPPFLR1_EXPORT, 15)
+    except (PoweroffReturned, PoweroffInvalidationFailed):
+        return _fail_stop(ops, ControllerFault(SPPFLR1_EXPORT, 15), identity, uart_usable, production, writer)
     except ControllerFault as fault:
-        return _fail_stop(ops, fault, identity, uart_usable, production)
+        return _fail_stop(ops, fault, identity, uart_usable, production, writer)
     except Exception:
         reason = SPPFLR1_INPUT if identity is None else SPPFLR1_EXPORT
-        return _fail_stop(ops, ControllerFault(reason, 1), identity, uart_usable, production)
+        return _fail_stop(ops, ControllerFault(reason, 1), identity, uart_usable, production, writer)
 
 
 if __name__ == "__main__":

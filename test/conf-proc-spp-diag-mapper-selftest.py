@@ -20,12 +20,14 @@ from conf_proc_json import canonical_dumps, canonical_loads
 from conf_proc_spp_diag_attest import SppDiagTcbFloor
 from conf_proc_spp_diag_capture import capture_diagnostic_uart
 from conf_proc_spp_diag_export import build_export_stream
+from conf_proc_spp_diag_uart_observation import observe_uart_blob
 from conf_proc_spp_diag_ima import SppDiagImaCheckpoint, SppDiagImaReplay
 from conf_proc_spp_diag_mapper_reasons import (
     CP_SPP_DIAG_MAPPER_OUTPUT,
     CP_SPP_DIAG_MAPPER_PCR,
     CP_SPP_DIAG_MAPPER_PUBLISH,
     CP_SPP_DIAG_MAPPER_SEAM,
+    CP_SPP_DIAG_MAPPER_TYPE,
     SppDiagMapperError,
 )
 from conf_proc_spp_diag_pcr import QUOTE_PCR_BITMAP, SPP_DIAG_PCR_SELECTION
@@ -521,11 +523,23 @@ def test_failure_capture_and_appraiser_failure_never_publish() -> None:
         assert not list(Path(work).glob(".appraiser.sppdbn.staging.*"))
 
 
+def test_uart_observation_is_not_a_mapper_capture_input() -> None:
+    with tempfile.TemporaryDirectory() as work:
+        fixture = _Fixture(Path(work))
+        observation = observe_uart_blob(
+            b"", expected_challenge=fixture.challenge, expected_run_identity=fixture.run_identity
+        )
+        destination = Path(work) / "observation.sppdbn"
+        _expect_reason(CP_SPP_DIAG_MAPPER_TYPE, lambda: fixture.run(destination, capture=observation))
+        assert not destination.exists()
+
+
 TESTS = (
     test_closed_fanout_and_appraiser_inputs,
     test_both_splice_directions_reject_for_all_raw_seams,
     test_output_oracle_quote_pcr_and_publication_fail_closed,
     test_failure_capture_and_appraiser_failure_never_publish,
+    test_uart_observation_is_not_a_mapper_capture_input,
 )
 
 

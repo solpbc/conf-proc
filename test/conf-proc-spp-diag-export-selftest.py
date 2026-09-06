@@ -21,6 +21,7 @@ from conf_proc_spp_diag_export import (
     parse_export_stream,
 )
 from conf_proc_spp_diag_export_reasons import SppDiagExportError
+from conf_proc_spp_diag_uart import FramedUartWriter, decode_uart_record
 
 
 LITERAL_MEMBER_NAMES = (
@@ -182,115 +183,43 @@ def test_exact_member_and_stream_cap_boundaries() -> None:
         raise AssertionError("stream cap +1 accepted")
 
 
-class PoweroffInitiated(Exception):
-    pass
-
-
-def test_deadline_drain_and_returned_poweroff_invalidation() -> None:
+def test_framed_poweroff_boundary_uses_one_absolute_2400_second_deadline() -> None:
     writes: list[bytes] = []
-    poweroffs: list[bool] = []
-    queue = [3, 0]
     clock = [0.0]
+    writer = FramedUartWriter(CHALLENGE, RUN)
+    writer.load_success(b"valid-stream")
 
     def write(data: bytes) -> int:
         writes.append(data)
         return len(data)
 
-    def poweroff() -> None:
-        poweroffs.append(True)
-        raise PoweroffInitiated
-
-    ops = ExportOps(write, lambda _deadline: True, lambda: queue.pop(0), lambda: clock[0], poweroff)
+    ops = ExportOps(write, lambda _deadline: True, lambda: 0, lambda: clock[0], lambda: None)
     try:
-        export_and_poweroff(ops, b"valid-stream")
-    except PoweroffInitiated:
-        pass
+        export_and_poweroff(ops, writer)
+    except PoweroffReturned as exc:
+        assert exc.writer is writer
     else:
-        raise AssertionError("nonreturning poweroff simulation returned")
-    assert writes == [b"valid-stream"] and poweroffs == [True] and queue == []
+        raise AssertionError("returned poweroff did not fail-stop")
+    assert len(writes) == 2
+    assert decode_uart_record(writes[0], expected_challenge=CHALLENGE, expected_run_identity=RUN).payload == b"valid-stream"
+    invalidator = decode_uart_record(writes[1], expected_challenge=CHALLENGE, expected_run_identity=RUN)
+    assert invalidator.kind == "I" and invalidator.payload == b"\0" and invalidator.sequence == 1
 
-    writes.clear()
-    poweroffs.clear()
+    writer = FramedUartWriter(CHALLENGE, RUN)
+    writer.load_success(b"deadline")
 
     def late_write(data: bytes) -> int:
-        writes.append(data)
-        clock[0] = 1800.000001
+        clock[0] = 2400.000001
         return len(data)
 
     clock[0] = 0.0
-    late_ops = ExportOps(late_write, lambda _deadline: True, lambda: 0, lambda: clock[0], poweroff)
     try:
-        export_and_poweroff(late_ops, b"valid-stream")
-    except PoweroffInitiated:
-        pass
-    else:
-        raise AssertionError("late write reported success")
-    assert writes == [b"valid-stream"] and poweroffs == [True]
-
-    writes.clear()
-    poweroffs.clear()
-    returning_ops = ExportOps(write, lambda _deadline: True, lambda: 0, lambda: 0.0, lambda: poweroffs.append(True))
-    try:
-        export_and_poweroff(returning_ops, b"valid-stream")
+        export_and_poweroff(ExportOps(late_write, lambda _deadline: True, lambda: 0, lambda: clock[0], lambda: None), writer)
     except PoweroffReturned:
         pass
     else:
-        raise AssertionError("returned poweroff did not fail-stop")
-    assert writes == [b"valid-stream", b"\0"] and poweroffs == [True]
-
-
-def test_poweroff_oserror_and_invalidator_failures() -> None:
-    writes: list[bytes] = []
-
-    def poweroff_error() -> None:
-        raise OSError("simulated poweroff failure")
-
-    def write(data: bytes) -> int:
-        writes.append(data)
-        return len(data)
-
-    ops = ExportOps(write, lambda _deadline: True, lambda: 0, lambda: 0.0, poweroff_error)
-    try:
-        export_and_poweroff(ops, b"valid-stream")
-    except PoweroffReturned as exc:
-        assert isinstance(exc.__cause__, OSError)
-    else:
-        raise AssertionError("poweroff OSError did not fail-stop")
-    assert writes == [b"valid-stream", b"\0"]
-
-    for invalidator_result in (0, 2):
-        calls = [0]
-
-        def short_invalidator(data: bytes) -> int:
-            calls[0] += 1
-            return len(data) if calls[0] == 1 else invalidator_result
-
-        failing_ops = ExportOps(short_invalidator, lambda _deadline: True, lambda: 0, lambda: 0.0, lambda: None)
-        try:
-            export_and_poweroff(failing_ops, b"valid-stream")
-        except PoweroffInvalidationFailed:
-            pass
-        else:
-            raise AssertionError("short invalidator write accepted")
-
-    calls = [0]
-    writes.clear()
-
-    def eagain_once(data: bytes) -> int:
-        calls[0] += 1
-        if calls[0] == 2:
-            raise BlockingIOError
-        writes.append(data)
-        return len(data)
-
-    retry_ops = ExportOps(eagain_once, lambda _deadline: True, lambda: 0, lambda: 0.0, lambda: None)
-    try:
-        export_and_poweroff(retry_ops, b"valid-stream")
-    except PoweroffReturned:
-        pass
-    else:
-        raise AssertionError("returned poweroff did not fail-stop")
-    assert writes == [b"valid-stream", b"\0"] and calls[0] == 3
+        raise AssertionError("expired export deadline did not fail-stop")
+    assert writer.poisoned
 
 
 TESTS = (
@@ -298,8 +227,7 @@ TESTS = (
     test_every_truncation_trailing_and_identity_mismatch_reject,
     test_duplicate_unknown_and_rehashed_prefix_mutation_reject,
     test_exact_member_and_stream_cap_boundaries,
-    test_deadline_drain_and_returned_poweroff_invalidation,
-    test_poweroff_oserror_and_invalidator_failures,
+    test_framed_poweroff_boundary_uses_one_absolute_2400_second_deadline,
 )
 
 

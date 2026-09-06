@@ -85,6 +85,8 @@ SPP_DIAG_RUNTIME_STAGED_PYTHON: Final = (
     "usr/lib/python3.10/conf_proc_spp_diag_gpt.py",
     "usr/lib/python3.10/conf_proc_spp_diag_export.py",
     "usr/lib/python3.10/conf_proc_spp_diag_export_reasons.py",
+    "usr/lib/python3.10/conf_proc_spp_diag_uart.py",
+    "usr/lib/python3.10/conf_proc_spp_diag_uart_reasons.py",
     "usr/lib/python3.10/conf_proc_spp_diag_quote.py",
     "usr/lib/python3.10/conf_proc_spp_diag_pcr.py",
     "usr/lib/python3.10/conf_proc_spp_diagbundle_protocol.py",

@@ -47,6 +47,9 @@ def test_attachment_children_and_closed_files() -> None:
     assert {line for line in lines if line.startswith("capability ")} == {"capability sys_boot,"}
     assert "/proc/1/task/1/children r," in lines
     assert "/usr/lib/spp/spp-diag-gpu-evidence.py r," in lines
+    assert "/usr/lib/python3.10/conf_proc_spp_diag_uart.py r," in lines
+    assert "/usr/lib/python3.10/conf_proc_spp_diag_uart_reasons.py r," in lines
+    assert not any("uart_observation" in line for line in lines)
     assert "/sys/kernel/security/ima/binary_runtime_measurements r," in lines
     assert "/sys/kernel/security/sol_spp_diag_trace/control w," in lines
     assert "/sys/kernel/security/sol_spp_diag_trace/stream r," in lines

@@ -16,6 +16,8 @@ profile /usr/lib/spp/spp-diag-controller {
   /usr/lib/python3.10/conf_proc_spp_diag_failure_terminal_reasons.py r,
   /usr/lib/python3.10/conf_proc_spp_diag_export.py r,
   /usr/lib/python3.10/conf_proc_spp_diag_export_reasons.py r,
+  /usr/lib/python3.10/conf_proc_spp_diag_uart.py r,
+  /usr/lib/python3.10/conf_proc_spp_diag_uart_reasons.py r,
   /usr/lib/python3.10/conf_proc_spp_diag_quote.py r,
   /usr/lib/python3.10/conf_proc_spp_diag_pcr.py r,
   /usr/lib/python3.10/conf_proc_spp_diagbundle_protocol.py r,

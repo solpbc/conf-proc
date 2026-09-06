@@ -24,6 +24,8 @@ from conf_proc_spp_diag_export_reasons import (
     CP_SPP_DIAG_EXPORT_TRUNCATED,
     SppDiagExportError,
 )
+from conf_proc_spp_diag_uart import FramedUartWriter
+from conf_proc_spp_diag_uart_reasons import SppDiagUartError
 
 
 MAGIC: Final = b"SPPDBN1\0"
@@ -215,95 +217,67 @@ class ExportOps:
     request_poweroff_hardware: Callable[[], None]
 
 
-EXPORT_DEADLINE_SECONDS: Final = 1800.0
+EXPORT_DEADLINE_SECONDS: Final = 2400.0
 
 
 class PoweroffReturned(RuntimeError):
     """The poweroff request returned instead of stopping the appliance."""
 
+    def __init__(self, writer: FramedUartWriter) -> None:
+        self.writer = writer
+        super().__init__("hardware poweroff returned")
+
 
 class PoweroffInvalidationFailed(RuntimeError):
     """The appliance could not invalidate a completed stream after poweroff failed."""
+
+    def __init__(self, writer: FramedUartWriter) -> None:
+        self.writer = writer
+        super().__init__("could not write framed stream invalidator")
 
 
 _INVALIDATION_DEADLINE_SECONDS: Final = 1.0
 
 
-def _invalidate_completed_stream(ops: ExportOps) -> None:
-    deadline = ops.monotonic() + _INVALIDATION_DEADLINE_SECONDS
-    while True:
-        try:
-            if ops.monotonic() > deadline or not ops.wait_writable(deadline):
-                raise PoweroffInvalidationFailed("could not write stream invalidator")
-            if ops.monotonic() > deadline:
-                raise PoweroffInvalidationFailed("could not write stream invalidator")
-            written = ops.write_serial(b"\0")
-        except BlockingIOError:
-            continue
-        except OSError as exc:
-            raise PoweroffInvalidationFailed("could not write stream invalidator") from exc
-        if written != 1:
-            raise PoweroffInvalidationFailed("could not write stream invalidator")
-        break
-    while True:
-        try:
-            if ops.monotonic() > deadline:
-                raise PoweroffInvalidationFailed("could not drain stream invalidator")
-            queued = ops.serial_queue_bytes()
-            if queued < 0:
-                raise PoweroffInvalidationFailed("could not drain stream invalidator")
-            if queued == 0:
-                return
-            if not ops.wait_writable(deadline):
-                raise PoweroffInvalidationFailed("could not drain stream invalidator")
-        except OSError as exc:
-            raise PoweroffInvalidationFailed("could not drain stream invalidator") from exc
+def export_and_poweroff(ops: ExportOps, writer: FramedUartWriter) -> None:
+    """Frame, write, and drain success under one 2,400-second deadline.
 
-
-def export_and_poweroff(ops: ExportOps, stream: bytes) -> None:
-    """Write and drain under one deadline, then power off or fail-stop.
-
-    A successful poweroff does not return. If it does return after a complete
-    stream, append one byte so no off-box reader can accept the valid prefix.
+    The primary poweroff is attempted only after every success frame is fully
+    drained. A returning (or errored) primary poweroff gets exactly one framed
+    invalidator; the controller decides whether the now-valid late-failure path
+    should follow. Any attempted record failure poisons ``writer``.
     """
 
     deadline = ops.monotonic() + EXPORT_DEADLINE_SECONDS
-    offset = 0
-    complete = False
-    while offset < len(stream):
+    try:
+        writer.write_success(
+            write_serial=ops.write_serial,
+            wait_writable=ops.wait_writable,
+            serial_queue_bytes=ops.serial_queue_bytes,
+            monotonic=ops.monotonic,
+            deadline=deadline,
+        )
+    except SppDiagUartError as exc:
         try:
-            if ops.monotonic() > deadline or not ops.wait_writable(deadline):
-                break
-            if ops.monotonic() > deadline:
-                break
-            written = ops.write_serial(stream[offset:])
-        except OSError:
-            break
-        if written <= 0 or written > len(stream) - offset:
-            break
-        offset += written
-        if ops.monotonic() > deadline:
-            break
-    if offset == len(stream):
-        while True:
-            try:
-                if ops.monotonic() > deadline:
-                    break
-                queued = ops.serial_queue_bytes()
-                if queued < 0:
-                    break
-                if queued == 0:
-                    complete = ops.monotonic() <= deadline
-                    break
-                if not ops.wait_writable(deadline) or ops.monotonic() > deadline:
-                    break
-            except OSError:
-                break
-    poweroff_error: OSError | None = None
+            ops.request_poweroff_hardware()
+        except Exception:
+            pass
+        raise PoweroffReturned(writer) from exc
+    if not writer.success_complete:
+        raise AssertionError("framed writer returned without a drained success stream")
+    poweroff_error: BaseException | None = None
     try:
         ops.request_poweroff_hardware()
-    except OSError as exc:
+    except BaseException as exc:
         poweroff_error = exc
-    if complete:
-        _invalidate_completed_stream(ops)
-    raise PoweroffReturned("hardware poweroff returned") from poweroff_error
+    try:
+        writer.emit_invalidator(
+            write_serial=ops.write_serial,
+            wait_writable=ops.wait_writable,
+            serial_queue_bytes=ops.serial_queue_bytes,
+            monotonic=ops.monotonic,
+            deadline=ops.monotonic() + _INVALIDATION_DEADLINE_SECONDS,
+        )
+    except SppDiagUartError as exc:
+        raise PoweroffInvalidationFailed(writer) from exc
+    raise PoweroffReturned(writer) from poweroff_error

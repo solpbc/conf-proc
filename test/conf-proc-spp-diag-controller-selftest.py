@@ -43,6 +43,12 @@ from conf_proc_spp_diag_controller import (  # noqa: E402
 )
 from conf_proc_json import canonical_dumps, canonical_loads  # noqa: E402
 from conf_proc_spp_diag_export import parse_export_stream  # noqa: E402
+from conf_proc_spp_diag_uart import decode_uart_record  # noqa: E402
+from conf_proc_spp_diag_uart_observation import (  # noqa: E402
+    STATUS_INVALIDATED_RESULT,
+    STATUS_STANDALONE_FAILURE,
+    observe_uart_blob,
+)
 from conf_proc_spp_diagbundle_protocol import DOMAIN_CONTROL_PLAN  # noqa: E402
 from conf_proc_spp_diag_failure_terminal_reasons import (  # noqa: E402
     SPPFLR1_BINDING, SPPFLR1_CHILD, SPPFLR1_GPU, SPPFLR1_IMA, SPPFLR1_INPUT, SPPFLR1_POLICY, SPPFLR1_TRACE,
@@ -70,8 +76,9 @@ class Recorder:
         self.fail_reads: set[str] = set()
         self.read_errnos: dict[str, int] = {}
         self.bootstrap: list[str] = []
-        self.uart: list[bytes] = []
         self.serial: list[bytes] = []
+        self.serial_write_plan: list[int | None] = []
+        self.wait_uart_plan: list[bool] = []
         self.poweroffs = 0
 
     def monotonic(self) -> float:
@@ -122,12 +129,17 @@ class Recorder:
         self.binding_reads.append(path)
         return self.read_file(path, 4096)
 
-    def write_uart(self, data: bytes, _deadline: float) -> None:
-        self.uart.append(data)
-
     def write_serial(self, data: bytes) -> int:
-        self.serial.append(data)
-        return len(data)
+        result = self.serial_write_plan.pop(0) if self.serial_write_plan else None
+        if result is None:
+            self.serial.append(data)
+            return len(data)
+        if result > 0:
+            self.serial.append(data[:result])
+        return result
+
+    def wait_uart_writable(self, _deadline: float) -> bool:
+        return self.wait_uart_plan.pop(0) if self.wait_uart_plan else True
 
     def poweroff(self) -> None:
         self.poweroffs += 1
@@ -138,8 +150,8 @@ class Recorder:
             run_child=self.run_child, direct_operation=self.direct_operation,
             read_file=self.read_file, read_binding=self.read_binding,
             write_file=lambda _path, _data: self.bootstrap.append("changeprofile"),
-            write_uart=self.write_uart, write_serial=self.write_serial,
-            wait_uart_writable=lambda _deadline: True, serial_queue_bytes=lambda: 0,
+            write_serial=self.write_serial,
+            wait_uart_writable=self.wait_uart_writable, serial_queue_bytes=lambda: 0,
             request_poweroff=self.poweroff,
             verify_pid_fds=lambda: self.bootstrap.append("fds"),
             configure_uart=lambda: self.bootstrap.append("uart"),
@@ -264,9 +276,13 @@ def test_binding_device_seam_is_used_and_binding_failure_is_terminal() -> None:
     broken = Recorder()
     broken_ops = broken.ops()
     broken_ops.read_binding = lambda _path: (_ for _ in ()).throw(OSError("not a block device"))
-    assert controller_main(_main_fixture(broken), broken_ops) == 1
-    terminals = [data for data in broken.uart if len(data) == 112 and data.startswith(b"SPPFLR1\0")]
-    assert len(terminals) == 1 and parse_failure_terminal(terminals[0]).reason_code == 3
+    broken_argv = _main_fixture(broken)
+    assert controller_main(broken_argv, broken_ops) == 1
+    boot = parse_boot_inputs(broken_argv, broken.files["/proc/cmdline"])
+    terminal = decode_uart_record(
+        b"".join(broken.serial), expected_challenge=boot.identity.challenge, expected_run_identity=boot.identity.run_identity
+    )
+    assert terminal.kind == "F" and parse_failure_terminal(terminal.payload).reason_code == 3
 
 
 def test_fd_listing_and_exec_target_rejecting_twins() -> None:
@@ -402,7 +418,7 @@ def _main_fixture(recorder: Recorder) -> list[str]:
     return [CONTROLLER_PATH, f"sol_spp_diag.target_profile={TARGET_PROFILE}", f"sol_spp_diag.binding_partuuid={binding_uuid}"]
 
 
-def test_main_uses_the_same_injected_production_core_and_one_failure_record() -> None:
+def test_main_uses_the_same_injected_production_core_and_framed_late_failure() -> None:
     recorder = Recorder()
     argv = _main_fixture(recorder)
     assert controller_main(argv, recorder.ops()) == 1
@@ -411,8 +427,16 @@ def test_main_uses_the_same_injected_production_core_and_one_failure_record() ->
         "nvidia-device", "nvidia-uvm", "apparmor", "cuda-cold", "cuda-infer", "gpu-helper",
         "tpm-readpublic-pem", "tpm-readpublic-tpmt", "tpm-nvread", "tpm-quote",
     ]
-    assert len(recorder.serial) == 2 and recorder.serial[1] == b"\0"
-    exported = parse_export_stream(recorder.serial[0])
+    boot = parse_boot_inputs(argv, recorder.files["/proc/cmdline"])
+    identity = parse_binding_record(recorder.files[boot.binding_partuuid], boot)
+    observation = observe_uart_blob(
+        b"".join(recorder.serial), expected_challenge=identity.challenge, expected_run_identity=identity.run_identity
+    )
+    assert observation.status == STATUS_INVALIDATED_RESULT and observation.failure is not None
+    assert [record.kind for record in observation.records] == ["S", "I", "F"]
+    assert all(write.startswith(b"SPPUART/1|") for write in recorder.serial)
+    assert not any(write == b"\0" or write.startswith(b"SPPFLR1\0") for write in recorder.serial)
+    exported = parse_export_stream(observation.snapshot, expected_challenge=identity.challenge, expected_run_identity=identity.run_identity)
     members = {member.name: member.payload for member in exported.members}
     receipt = canonical_loads(members["inner-receipt/manifest.json"])
     assert receipt["schema"] == "sol-spp-diagbundle-inner-receipt/v1"
@@ -425,8 +449,6 @@ def test_main_uses_the_same_injected_production_core_and_one_failure_record() ->
     assert members["inner-receipt/terminal-frame.bin"] == (
         b"SPPDIAG\0\x01\x01\x00\x40" + bytes.fromhex("11" * 32) + bytes.fromhex("22" * 32)
     )
-    boot = parse_boot_inputs(argv, recorder.files["/proc/cmdline"])
-    identity = parse_binding_record(recorder.files[boot.binding_partuuid], boot)
     plan = parse_control_plan(recorder.files["/usr/lib/spp/control-plan.json"], identity.control_plan_address)
     expected_nonce = hashlib.sha256(
         b"sol-spp-diag-gpu-evidence-nonce-v1\0" + identity.challenge + identity.run_identity
@@ -457,9 +479,8 @@ def test_main_uses_the_same_injected_production_core_and_one_failure_record() ->
     assert ("/sys/kernel/security/ima/binary_runtime_measurements", 8_388_608) in read_caps
     assert ("/run/spp-diag/quote.msg", 65_536) in read_caps
     assert ("/run/spp-diag/quote.sig", 16_384) in read_caps
-    terminals = [data for data in recorder.uart if len(data) == 112 and data.startswith(b"SPPFLR1\0")]
-    assert len(terminals) == 1
-    assert parse_failure_terminal(terminals[0]).reason_code == 10  # returned poweroff is EXPORT
+    terminal = decode_uart_record(recorder.serial[-1], expected_challenge=identity.challenge, expected_run_identity=identity.run_identity)
+    assert terminal.kind == "F" and parse_failure_terminal(terminal.payload).reason_code == 10  # returned poweroff is EXPORT
     assert recorder.poweroffs == 2
 
 
@@ -469,15 +490,36 @@ def test_uart_setup_and_collector_failures_fail_stop_without_second_record() -> 
     broken_ops = uart.ops()
     broken_ops.configure_uart = lambda: (_ for _ in ()).throw(ControllerFault(SPPFLR1_INPUT, 1))
     assert controller_main(argv, broken_ops) == 1
-    assert not uart.uart and uart.poweroffs == 1
+    assert not uart.serial and uart.poweroffs == 1
 
     collector = Recorder()
     argv = _main_fixture(collector)
     collector.read_errnos["/sys/kernel/security/tpm0/binary_bios_measurements"] = errno.ENOSPC
     assert controller_main(argv, collector.ops()) == 1
-    terminals = [data for data in collector.uart if len(data) == 112 and data.startswith(b"SPPFLR1\0")]
-    assert len(terminals) == 1
-    assert parse_failure_terminal(terminals[0]).reason_code == 8  # TPM/firmware evidence
+    boot = parse_boot_inputs(argv, collector.files["/proc/cmdline"])
+    identity = parse_binding_record(collector.files[boot.binding_partuuid], boot)
+    observation = observe_uart_blob(
+        b"".join(collector.serial), expected_challenge=identity.challenge, expected_run_identity=identity.run_identity
+    )
+    assert observation.status == STATUS_STANDALONE_FAILURE and observation.failure is not None
+    assert observation.failure.reason_code == 8  # TPM/firmware evidence
+
+
+def test_controller_physical_writes_never_append_after_failed_s_or_i() -> None:
+    for plan, expected_prefix in (([7, 0], b"SPPUART"), ([None, 7, 0], b"SPPUART/1|k=S")):
+        recorder = Recorder()
+        argv = _main_fixture(recorder)
+        recorder.serial_write_plan = list(plan)
+        assert controller_main(argv, recorder.ops()) == 1
+        physical = b"".join(recorder.serial)
+        assert physical.startswith(expected_prefix)
+        assert b"|k=F|" not in physical
+        if plan[0] is not None:
+            assert b"|k=I|" not in physical and b"\n" not in physical
+        else:
+            # A partial I is an observable line prefix, never followed by F.
+            assert physical.endswith(b"SPPUART") and physical.count(b"\n") == 1
+        assert recorder.poweroffs == 2
 
 
 def test_fd_uart_and_runner_source_contract() -> None:
@@ -524,14 +566,15 @@ def test_source_has_a_real_entrypoint_and_no_appraiser_import() -> None:
         assert required in source
 
 
-def test_shipped_entrypoint_exact_nine_module_import_graph() -> None:
+def test_shipped_entrypoint_exact_guest_module_import_graph() -> None:
     """Source/reachability assertion for the extensionless installed controller."""
 
     expected = {
         "conf_proc_reasons.py", "conf_proc_json.py", "conf_proc_spp_diag_failure_terminal_reasons.py",
         "conf_proc_spp_diag_gpt.py",
         "conf_proc_spp_diag_export.py", "conf_proc_spp_diag_export_reasons.py", "conf_proc_spp_diag_quote.py",
-        "conf_proc_spp_diag_pcr.py", "conf_proc_spp_diagbundle_protocol.py",
+        "conf_proc_spp_diag_pcr.py", "conf_proc_spp_diag_uart.py", "conf_proc_spp_diag_uart_reasons.py",
+        "conf_proc_spp_diagbundle_protocol.py",
     }
     pending = ["conf_proc_spp_diag_controller.py"]
     seen: set[str] = set()
@@ -556,7 +599,8 @@ def test_isolated_staged_controller_import_reaches_real_main() -> None:
         "conf_proc_reasons.py", "conf_proc_json.py", "conf_proc_spp_diag_failure_terminal_reasons.py",
         "conf_proc_spp_diag_gpt.py",
         "conf_proc_spp_diag_export.py", "conf_proc_spp_diag_export_reasons.py", "conf_proc_spp_diag_quote.py",
-        "conf_proc_spp_diag_pcr.py", "conf_proc_spp_diagbundle_protocol.py",
+        "conf_proc_spp_diag_pcr.py", "conf_proc_spp_diag_uart.py", "conf_proc_spp_diag_uart_reasons.py",
+        "conf_proc_spp_diagbundle_protocol.py",
     )
     module_names = tuple(path.removesuffix(".py") for path in support)
     with tempfile.TemporaryDirectory(dir="/var/tmp") as work_dir:
@@ -657,11 +701,12 @@ TESTS = (
     test_adopted_descendant_census_rejects_malformed_output,
     test_binding_stream_eof_is_not_a_one_read_check,
     test_direct_network_and_poison_syscalls_pin_the_trace_coordinates,
-    test_main_uses_the_same_injected_production_core_and_one_failure_record,
+    test_main_uses_the_same_injected_production_core_and_framed_late_failure,
     test_uart_setup_and_collector_failures_fail_stop_without_second_record,
+    test_controller_physical_writes_never_append_after_failed_s_or_i,
     test_fd_uart_and_runner_source_contract,
     test_source_has_a_real_entrypoint_and_no_appraiser_import,
-    test_shipped_entrypoint_exact_nine_module_import_graph,
+    test_shipped_entrypoint_exact_guest_module_import_graph,
     test_isolated_staged_controller_import_reaches_real_main,
 )
 
