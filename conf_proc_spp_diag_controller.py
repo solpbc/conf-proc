@@ -824,6 +824,21 @@ def _drain_child_pipes(open_fds: set[int], captures: dict[int, bytearray], cap: 
     return True
 
 
+def _prepare_nvidia_device_links() -> None:
+    """Supply the devtmpfs directory normally created by distribution init."""
+    try:
+        os.mkdir('/dev/char', 0o755)
+    except FileExistsError:
+        pass
+    descriptor = os.open('/dev/char', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        node = os.fstat(descriptor)
+        if not stat.S_ISDIR(node.st_mode) or node.st_uid != 0 or node.st_gid != 0:
+            raise OSError('NVIDIA device-link directory identity differs')
+    finally:
+        os.close(descriptor)
+
+
 def _run_fixed_child(name: str, argv: tuple[str, ...], deadline: float, cap: int) -> ChildResult:
     if name == "nvidia-device":
         valid = argv == (_NVIDIA_MODPROBE, "-c", "0")
@@ -863,6 +878,8 @@ def _run_fixed_child(name: str, argv: tuple[str, ...], deadline: float, cap: int
         valid = False
     if not valid:
         raise OSError("undeclared child")
+    if name == 'nvidia-device':
+        _prepare_nvidia_device_links()
     out_r, out_w = os.pipe2(os.O_CLOEXEC); err_r, err_w = os.pipe2(os.O_CLOEXEC)
     pid = os.fork()
     if pid == 0:
