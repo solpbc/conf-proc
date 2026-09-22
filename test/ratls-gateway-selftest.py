@@ -1028,6 +1028,28 @@ class ChannelLifetimeTest(unittest.TestCase):
         finally:
             gateway.close()
 
+    def test_stalled_handshake_force_closed_at_t_max_plus_grace(self) -> None:
+        gateway = GatewayProcess(
+            self.upstream.port,
+            channel_lifetime=0.2,
+            channel_force_close_grace=0.2,
+            socket_timeout=30,
+        )
+        try:
+            raw = socket.create_connection(("127.0.0.1", gateway.port), timeout=10)
+            try:
+                raw.sendall(PREFACE_MAGIC + b"s" * OWNER_NONCE_BYTES)
+                started = time.monotonic()
+                # never start the TLS handshake; the gateway must still let go
+                while raw.recv(4096):
+                    pass
+                self.assertLess(time.monotonic() - started, 5)
+            finally:
+                raw.close()
+        finally:
+            gateway.close()
+        self.assertEqual(self.upstream.requests, [])
+
 
 if __name__ == "__main__":
     unittest.main()

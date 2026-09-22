@@ -21,12 +21,12 @@ a relay-level 413 without the upstream ever being opened, and the attested
 channel survives.  The Phase-1/2 admission contract is unchanged — this is
 post-admission behavior, invisible to ``ratls-contract.json``.
 
-An admitted channel also carries an absolute lifetime, independent of read
-activity: ``--channel-lifetime-seconds`` (T_max) is checked at the top of the
+Every connection also carries an absolute lifetime from accept, independent
+of read activity: ``--channel-lifetime-seconds`` (T_max) is checked in the
 relay loop, so a channel still open past it is refused a new request; and
 ``--channel-force-close-grace-seconds`` (G) backstops that with a hard socket
-deadline at T_max + G that force-closes the channel even mid-request, closing
-the trickle-under-the-idle-timeout hole that T_max alone leaves open.
+deadline at T_max + G that force-closes the connection at any stage, even
+mid-request or mid-handshake.
 
 The external collector command reads one JSON object on stdin and writes one
 JSON object on stdout.  It owns hardware-specific evidence collection; this
@@ -840,7 +840,16 @@ class GatewayHandler(socketserver.BaseRequestHandler):
         raw: socket.socket = self.request
         raw.settimeout(self.server.socket_timeout)
         connection: SSL.Connection | None = None
-        force_close_timer: threading.Timer | None = None
+        # Armed at accept, not admission: setblocking(1) below drops the socket
+        # timeout, so a stalled handshake or proof request is otherwise unbounded.
+        channel_started = time.monotonic()
+        force_close_timer = threading.Timer(
+            self.server.channel_lifetime + self.server.channel_force_close_grace,
+            _force_close_channel,
+            args=(raw,),
+        )
+        force_close_timer.daemon = True
+        force_close_timer.start()
         try:
             preface = _recv_exact(raw, len(PREFACE_MAGIC) + OWNER_NONCE_BYTES)
             if preface[: len(PREFACE_MAGIC)] != PREFACE_MAGIC:
@@ -870,14 +879,6 @@ class GatewayHandler(socketserver.BaseRequestHandler):
             _send_proof(connection, proof.to_der())
 
             LOG.info("event=attested_channel_admitted")
-            channel_started = time.monotonic()
-            force_close_timer = threading.Timer(
-                self.server.channel_lifetime + self.server.channel_force_close_grace,
-                _force_close_channel,
-                args=(raw,),
-            )
-            force_close_timer.daemon = True
-            force_close_timer.start()
             _http_relay(
                 connection,
                 self.server.upstream,
@@ -907,8 +908,7 @@ class GatewayHandler(socketserver.BaseRequestHandler):
             # is the complete persistent-log surface.
             LOG.warning("event=attested_channel_rejected reason=%s", reason)
         finally:
-            if force_close_timer is not None:
-                force_close_timer.cancel()
+            force_close_timer.cancel()
             if connection is not None:
                 try:
                     connection.shutdown()
