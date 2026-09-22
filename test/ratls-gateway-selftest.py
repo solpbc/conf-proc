@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 from pathlib import Path
@@ -181,6 +182,9 @@ class GatewayProcess:
         upstream_port: int,
         audio_upstream_port: int | None = None,
         authority: EntitlementAuthority | None = None,
+        channel_lifetime: float | None = None,
+        channel_force_close_grace: float | None = None,
+        socket_timeout: float | None = None,
     ) -> None:
         self.authority = authority or EntitlementAuthority()
         self.owns_authority = authority is None
@@ -206,6 +210,15 @@ class GatewayProcess:
         ]
         if audio_upstream_port is not None:
             command += ["--audio-upstream-port", str(audio_upstream_port)]
+        if channel_lifetime is not None:
+            command += ["--channel-lifetime-seconds", str(channel_lifetime)]
+        if channel_force_close_grace is not None:
+            command += [
+                "--channel-force-close-grace-seconds",
+                str(channel_force_close_grace),
+            ]
+        if socket_timeout is not None:
+            command += ["--socket-timeout", str(socket_timeout)]
         self.process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
@@ -927,6 +940,93 @@ class RoutedRelayTest(unittest.TestCase):
         finally:
             connection.close()
             raw.close()
+
+
+class ChannelLifetimeTest(unittest.TestCase):
+    """A revoked entitlement must stop being served on an already-admitted
+    channel: T_max refuses new requests, and the hard deadline at T_max + G
+    closes a request trickled under the idle timeout."""
+
+    def setUp(self) -> None:
+        self.upstream = RecordingUpstream(b'{"upstream":"sglang"}')
+
+    def tearDown(self) -> None:
+        self.upstream.close()
+
+    def test_channel_past_t_max_refuses_a_new_admission(self) -> None:
+        gateway = GatewayProcess(
+            self.upstream.port,
+            channel_lifetime=0.2,
+            channel_force_close_grace=30,
+            socket_timeout=30,
+        )
+        try:
+            connection, raw = admitted_connection(gateway.port, b"m" * 32)
+            try:
+                body = b'{"messages":[]}'
+                connection.sendall(
+                    b"POST /v1/chat/completions HTTP/1.1\r\nHost: spp-engine\r\n"
+                    + AUTHORIZATION_LINE
+                    + f"Content-Length: {len(body)}\r\n\r\n".encode()
+                    + body
+                )
+                head, resp_body = recv_http(connection)
+                self.assertIn(b"200 OK", head)
+                self.assertEqual(resp_body, b'{"upstream":"sglang"}')
+
+                time.sleep(0.4)  # elapse past T_max, well short of the grace
+
+                connection.sendall(
+                    b"GET /v1/models HTTP/1.1\r\nHost: spp-engine\r\n"
+                    + AUTHORIZATION_LINE
+                    + b"\r\n"
+                )
+                with self.assertRaises(
+                    (SSL.SysCallError, SSL.ZeroReturnError, ConnectionError)
+                ):
+                    if connection.recv(1) == b"":
+                        raise ConnectionError("closed")
+            finally:
+                connection.close()
+                raw.close()
+        finally:
+            gateway.close()
+        # the second request never reached the loopback upstream
+        self.assertEqual(len(self.upstream.requests), 1)
+
+    def test_channel_force_closed_mid_request_at_t_max_plus_grace(self) -> None:
+        gateway = GatewayProcess(
+            self.upstream.port,
+            channel_lifetime=0.2,
+            channel_force_close_grace=0.2,
+            socket_timeout=30,  # idle-read timeout must not be what fires here
+        )
+        try:
+            connection, raw = admitted_connection(gateway.port, b"n" * 32)
+            try:
+                body = b"x" * 4096
+                connection.sendall(
+                    b"POST /v1/chat/completions HTTP/1.1\r\nHost: spp-engine\r\n"
+                    + AUTHORIZATION_LINE
+                    + f"Content-Length: {len(body)}\r\n\r\n".encode()
+                    + body[:16]  # trickle: declare 4096, send 16, then stall
+                )
+                started = time.monotonic()
+                with self.assertRaises(
+                    (SSL.SysCallError, SSL.ZeroReturnError, ConnectionError)
+                ):
+                    if connection.recv(1) == b"":
+                        raise ConnectionError("closed")
+                elapsed = time.monotonic() - started
+                # force-closed near T_max+G (0.4s) -- not left open until the
+                # 30s idle timeout, which proves the hard deadline fired
+                # rather than the per-read idle check.
+                self.assertLess(elapsed, 5)
+            finally:
+                connection.close()
+                raw.close()
+        finally:
+            gateway.close()
 
 
 if __name__ == "__main__":

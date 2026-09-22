@@ -21,6 +21,13 @@ a relay-level 413 without the upstream ever being opened, and the attested
 channel survives.  The Phase-1/2 admission contract is unchanged — this is
 post-admission behavior, invisible to ``ratls-contract.json``.
 
+An admitted channel also carries an absolute lifetime, independent of read
+activity: ``--channel-lifetime-seconds`` (T_max) is checked at the top of the
+relay loop, so a channel still open past it is refused a new request; and
+``--channel-force-close-grace-seconds`` (G) backstops that with a hard socket
+deadline at T_max + G that force-closes the channel even mid-request, closing
+the trickle-under-the-idle-timeout hole that T_max alone leaves open.
+
 The external collector command reads one JSON object on stdin and writes one
 JSON object on stdout.  It owns hardware-specific evidence collection; this
 gateway owns the TLS key, framing, binding values, admission gate, and proxy.
@@ -43,6 +50,7 @@ import socketserver
 import ssl
 import subprocess
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -88,6 +96,10 @@ MAX_AUDIO_BODY_BYTES = 11 * 1024 * 1024
 # Keep-alive drain ceiling: a mildly oversized body is drained so the channel
 # survives its own 413; a declared length beyond this closes the channel.
 MAX_AUDIO_DRAIN_BYTES = 64 * 1024 * 1024
+# Ceilings, not preferences: a revoked entitlement stops being served within
+# T_max + G + one portal read (<=41 min at these defaults).
+DEFAULT_CHANNEL_LIFETIME_SECONDS = 1800.0
+DEFAULT_CHANNEL_FORCE_CLOSE_GRACE_SECONDS = 600.0
 _HEADER_NAME_RE = re.compile(rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
 
 
@@ -654,6 +666,8 @@ def _http_relay(
     audio_upstream: tuple[str, int] | None,
     timeout: int,
     authorizer: PortalEntitlementAuthorizer,
+    channel_lifetime: float,
+    channel_started: float,
 ) -> None:
     """Serial per-request HTTP/1.1 relay over the one admitted channel.
 
@@ -661,13 +675,30 @@ def _http_relay(
     fresh per-request connection (loopback connects are ~free; no stale
     keep-alive replay hazard).  Forwards heads verbatim and streams bodies by
     framing only — bodies are never interpreted or logged.
+
+    ``channel_lifetime`` (T_max) is checked at the top of every iteration, so
+    no path (the 413-drain ``continue`` included) can skip it, and again once
+    a new head arrives.  A request already in flight is the caller's hard
+    deadline at T_max + G to stop.
     """
     reader = _RelayReader(client, idle_timeout=timeout)
     admitted_credential: str | None = None
     device_id: str | None = None
+
+    def lifetime_expired() -> bool:
+        if time.monotonic() - channel_started < channel_lifetime:
+            return False
+        LOG.info("event=channel_lifetime_expired")
+        return True
+
     while True:
+        if lifetime_expired():
+            return
         head = reader.read_head()
         if head is None:
+            return
+        # A head wait that began before T_max can complete after it.
+        if lifetime_expired():
             return
         lines = head[:-4].split(b"\r\n")
         request_parts = lines[0].split(b" ")
@@ -765,6 +796,18 @@ def _http_relay(
             return
 
 
+def _force_close_channel(raw: socket.socket) -> None:
+    """Hard deadline at T_max + G, even mid-request: a client trickling bytes
+    under the per-read idle timeout would otherwise hold the channel forever.
+    shutdown() (not close()) is what reliably wakes a recv blocked on
+    another thread."""
+    LOG.warning("event=channel_force_closed")
+    try:
+        raw.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+
+
 class GatewayServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
@@ -777,12 +820,16 @@ class GatewayServer(socketserver.ThreadingTCPServer):
         upstream: tuple[str, int],
         socket_timeout: int,
         audio_upstream: tuple[str, int] | None = None,
+        channel_lifetime: float = DEFAULT_CHANNEL_LIFETIME_SECONDS,
+        channel_force_close_grace: float = DEFAULT_CHANNEL_FORCE_CLOSE_GRACE_SECONDS,
     ) -> None:
         self.collector = collector
         self.authorizer = authorizer
         self.upstream = upstream
         self.socket_timeout = socket_timeout
         self.audio_upstream = audio_upstream
+        self.channel_lifetime = channel_lifetime
+        self.channel_force_close_grace = channel_force_close_grace
         super().__init__(address, GatewayHandler)
 
 
@@ -793,6 +840,7 @@ class GatewayHandler(socketserver.BaseRequestHandler):
         raw: socket.socket = self.request
         raw.settimeout(self.server.socket_timeout)
         connection: SSL.Connection | None = None
+        force_close_timer: threading.Timer | None = None
         try:
             preface = _recv_exact(raw, len(PREFACE_MAGIC) + OWNER_NONCE_BYTES)
             if preface[: len(PREFACE_MAGIC)] != PREFACE_MAGIC:
@@ -822,12 +870,22 @@ class GatewayHandler(socketserver.BaseRequestHandler):
             _send_proof(connection, proof.to_der())
 
             LOG.info("event=attested_channel_admitted")
+            channel_started = time.monotonic()
+            force_close_timer = threading.Timer(
+                self.server.channel_lifetime + self.server.channel_force_close_grace,
+                _force_close_channel,
+                args=(raw,),
+            )
+            force_close_timer.daemon = True
+            force_close_timer.start()
             _http_relay(
                 connection,
                 self.server.upstream,
                 self.server.audio_upstream,
                 self.server.socket_timeout,
                 self.server.authorizer,
+                self.server.channel_lifetime,
+                channel_started,
             )
         except Exception as exc:
             if isinstance(exc, CollectorError):
@@ -849,12 +907,17 @@ class GatewayHandler(socketserver.BaseRequestHandler):
             # is the complete persistent-log surface.
             LOG.warning("event=attested_channel_rejected reason=%s", reason)
         finally:
+            if force_close_timer is not None:
+                force_close_timer.cancel()
             if connection is not None:
                 try:
                     connection.shutdown()
                 except Exception:
                     pass
-                connection.close()
+                try:
+                    connection.close()
+                except Exception:
+                    pass
 
 
 COLLECTOR_CONTRACT = {
@@ -910,6 +973,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="root/operator-provisioned file containing the portal service credential",
     )
     parser.add_argument("--entitlement-timeout", type=int, default=5)
+    parser.add_argument(
+        "--channel-lifetime-seconds",
+        type=float,
+        default=DEFAULT_CHANNEL_LIFETIME_SECONDS,
+        help="absolute lifetime (T_max) of an admitted channel; a channel "
+        "still open past this is refused a new request at the top of the "
+        "relay loop",
+    )
+    parser.add_argument(
+        "--channel-force-close-grace-seconds",
+        type=float,
+        default=DEFAULT_CHANNEL_FORCE_CLOSE_GRACE_SECONDS,
+        help="grace (G) beyond --channel-lifetime-seconds before a hard "
+        "socket deadline force-closes the channel even mid-request",
+    )
     parser.add_argument("--print-collector-contract", action="store_true")
     return parser
 
@@ -947,6 +1025,8 @@ def main() -> int:
         (args.upstream_host, args.upstream_port),
         args.socket_timeout,
         audio_upstream=audio_upstream,
+        channel_lifetime=args.channel_lifetime_seconds,
+        channel_force_close_grace=args.channel_force_close_grace_seconds,
     ) as server:
         host, port = server.server_address
         print(json.dumps({"event": "listening", "host": host, "port": port}), flush=True)
