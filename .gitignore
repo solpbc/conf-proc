@@ -44,4 +44,9 @@ nonce*
 tmp/
 
 # C build output
-build/
+build/*
+!build/spp_disk.py
+!build/spp_appliance.py
+!build/spp_image_sbom.py
+!build/spp_image_sbom_check.py
+!build/input-manifest.json

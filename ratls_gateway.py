@@ -602,6 +602,18 @@ def _send_relay_413(client: Any, close: bool) -> None:
     )
 
 
+def _send_relay_404(client: Any, close: bool) -> None:
+    body = b'{"error":"not found"}'
+    client.sendall(
+        b"HTTP/1.1 404 Not Found\r\n"
+        b"Content-Type: application/json\r\n"
+        + f"Content-Length: {len(body)}\r\n".encode("ascii")
+        + (b"Connection: close\r\n" if close else b"")
+        + b"\r\n"
+        + body
+    )
+
+
 def _send_entitlement_error(client: Any, status: int) -> None:
     if status == 401:
         reason = b"Unauthorized"
@@ -738,8 +750,20 @@ def _http_relay(
         client_wants_close = b"close" in [
             value.lower() for value in headers.get(b"connection", [])
         ]
-        is_audio = audio_upstream is not None and path.startswith(AUDIO_PATH_PREFIX)
-        target = audio_upstream if is_audio else default_upstream
+        if (method, path) == (b"POST", b"/v1/chat/completions"):
+            target = default_upstream
+            is_audio = False
+        elif (method, path) == (b"POST", b"/v1/audio/transcriptions") and audio_upstream is not None:
+            target = audio_upstream
+            is_audio = True
+        else:
+            if client_wants_close or body_length > MAX_AUDIO_DRAIN_BYTES:
+                _send_relay_404(client, close=True)
+                return
+            _send_relay_404(client, close=False)
+            if not _drain_exact(reader, body_length):
+                return
+            continue
         if is_audio and body_length > MAX_AUDIO_BODY_BYTES:
             # Relay-level reject-before-read (see MAX_AUDIO_BODY_BYTES): the
             # upstream is never opened, and the body is never forwarded.

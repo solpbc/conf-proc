@@ -546,8 +546,9 @@ class RatlsGatewayTest(unittest.TestCase):
             self.assertEqual(proof.tls_exporter, client_exporter)
 
             connection.sendall(
-                b"GET /health HTTP/1.1\r\nHost: spp-engine\r\n"
+                b"POST /v1/chat/completions HTTP/1.1\r\nHost: spp-engine\r\n"
                 + AUTHORIZATION_LINE
+                + b"Content-Length: 0\r\n"
                 + b"Connection: close\r\n\r\n"
             )
             response_head, response_body = recv_http(connection)
@@ -556,7 +557,7 @@ class RatlsGatewayTest(unittest.TestCase):
             connection.close()
             raw.close()
             upstream.thread.join(timeout=5)
-            self.assertTrue(upstream.request.startswith(b"GET /health HTTP/1.1"))
+            self.assertTrue(upstream.request.startswith(b"POST /v1/chat/completions HTTP/1.1"))
         finally:
             gateway.close()
 
@@ -661,14 +662,6 @@ class RoutedRelayTest(unittest.TestCase):
             )
             head, body = recv_http(connection)
             self.assertEqual(body, b'{"upstream":"sglang"}')
-
-            connection.sendall(
-                b"GET /v1/models HTTP/1.1\r\nHost: spp-engine\r\n"
-                + AUTHORIZATION_LINE
-                + b"\r\n"
-            )
-            head, body = recv_http(connection)
-            self.assertEqual(body, b'{"upstream":"sglang"}')
         finally:
             connection.close()
             raw.close()
@@ -681,11 +674,10 @@ class RoutedRelayTest(unittest.TestCase):
         self.assertNotIn(b"client-spoof", audio_head)
         self.assertNotIn(b"authorization:", audio_head.lower())
         self.assertEqual(recorded_audio_body, audio_body)
-        self.assertEqual(len(self.default_upstream.requests), 2)
+        self.assertEqual(len(self.default_upstream.requests), 1)
         self.assertTrue(
             self.default_upstream.requests[0][0].startswith(b"POST /v1/chat/completions")
         )
-        self.assertTrue(self.default_upstream.requests[1][0].startswith(b"GET /v1/models"))
         self.assertEqual(len(self.gateway.authority.requests), 1)
         self.assertEqual(
             self.gateway.authority.requests[0].get("User-Agent"),
@@ -746,9 +738,9 @@ class RoutedRelayTest(unittest.TestCase):
         connection, raw = admitted_connection(self.gateway.port, b"l" * 32)
         try:
             connection.sendall(
-                b"GET /v1/models HTTP/1.1\r\nHost: spp-engine\r\n"
+                b"POST /v1/chat/completions HTTP/1.1\r\nHost: spp-engine\r\n"
                 + AUTHORIZATION_LINE
-                + b"\r\n"
+                + b"Content-Length: 0\r\n\r\n"
             )
             head, _body = recv_http(connection)
             self.assertIn(b"200 OK", head)
@@ -802,9 +794,9 @@ class RoutedRelayTest(unittest.TestCase):
             connection, raw = admitted_connection(gateway.port, b"c" * 32)
             try:
                 connection.sendall(
-                    b"GET /v1/models HTTP/1.1\r\nHost: spp-engine\r\n"
+                    b"POST /v1/chat/completions HTTP/1.1\r\nHost: spp-engine\r\n"
                     + AUTHORIZATION_LINE
-                    + b"\r\n"
+                    + b"Content-Length: 0\r\n\r\n"
                 )
                 data = bytearray()
                 while b"0\r\n\r\n" not in data:
@@ -815,9 +807,9 @@ class RoutedRelayTest(unittest.TestCase):
 
                 # the channel remains usable after a chunked exchange
                 connection.sendall(
-                    b"GET /health HTTP/1.1\r\nHost: spp-engine\r\n"
+                    b"POST /v1/chat/completions HTTP/1.1\r\nHost: spp-engine\r\n"
                     + AUTHORIZATION_LINE
-                    + b"\r\n"
+                    + b"Content-Length: 0\r\n\r\n"
                 )
                 data = bytearray()
                 while b"0\r\n\r\n" not in data:
@@ -828,6 +820,30 @@ class RoutedRelayTest(unittest.TestCase):
         finally:
             gateway.close()
             chunked_upstream.close()
+
+    def test_unallowlisted_paths_rejected_404_no_upstream_bytes(self) -> None:
+        denied_requests = [
+            b"GET /health HTTP/1.1\r\nHost: spp-engine\r\n" + AUTHORIZATION_LINE + b"\r\n",
+            b"GET /v1/models HTTP/1.1\r\nHost: spp-engine\r\n" + AUTHORIZATION_LINE + b"\r\n",
+            b"GET /get_server_info HTTP/1.1\r\nHost: spp-engine\r\n" + AUTHORIZATION_LINE + b"\r\n",
+            b"POST /v1/responses HTTP/1.1\r\nHost: spp-engine\r\n" + AUTHORIZATION_LINE + b"Content-Length: 0\r\n\r\n",
+            b"GET /v1/chat/completions HTTP/1.1\r\nHost: spp-engine\r\n" + AUTHORIZATION_LINE + b"\r\n",
+            b"POST /v1/chat/completions?x=1 HTTP/1.1\r\nHost: spp-engine\r\n" + AUTHORIZATION_LINE + b"Content-Length: 0\r\n\r\n",
+            b"POST /v1/audio/speech HTTP/1.1\r\nHost: spp-engine\r\n" + AUTHORIZATION_LINE + b"Content-Length: 0\r\n\r\n",
+        ]
+        connection, raw = admitted_connection(self.gateway.port, b"z" * 32)
+        try:
+            for req in denied_requests:
+                connection.sendall(req)
+                head, body = recv_http(connection)
+                self.assertIn(b"404 Not Found", head)
+                self.assertEqual(body, b'{"error":"not found"}')
+        finally:
+            connection.close()
+            raw.close()
+        self.assertEqual(self.audio_upstream.requests, [])
+        self.assertEqual(self.default_upstream.requests, [])
+
 
     def test_premature_inference_rejected_zero_bytes_both_upstreams(self) -> None:
         raw = socket.create_connection(("127.0.0.1", self.gateway.port), timeout=5)

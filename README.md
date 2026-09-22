@@ -65,6 +65,8 @@ the human-maintained direct-dependency intent. Refresh a lock only from an A–H
 qualified candidate and commit it with the source revision that advances the
 deployment recipe.
 
+The public sealed-appliance recipe lives at `build/spp_appliance.py` (`python3 build/spp_appliance.py --help`). It builds sealed appliance images across stages `1a`, `1b`, `2h`, and `prod`. Running a build requires a staged workspace and a populated `build/input-manifest.json`. The recipe fails closed when the manifest is unpopulated or any input check fails.
+
 ## Deployment
 
 The checked-in systemd units under `deploy/systemd/` describe the live service
