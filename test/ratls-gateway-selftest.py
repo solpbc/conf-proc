@@ -9,12 +9,10 @@ import io
 import json
 import hashlib
 import http.server
-import os
 import socket
 import ssl
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import unittest
@@ -96,8 +94,12 @@ from spp_health import HEALTH_PROBE_ENTITLEMENT, admit_gateway, probe_gateway  #
 
 
 TEST_ENTITLEMENT = "test-entitlement-token"
-TEST_ENGINE_SECRET = "test-engine-authorizer-secret"
 AUTHORIZATION_LINE = f"Authorization: Bearer {TEST_ENTITLEMENT}\r\n".encode()
+
+
+def _assert_no_authorization_header(test_case: unittest.TestCase, headers: dict[str, str]) -> None:
+    for key in headers:
+        test_case.assertNotEqual(key.lower(), "authorization")
 
 
 class EntitlementAuthority:
@@ -112,9 +114,7 @@ class EntitlementAuthority:
             def do_POST(self) -> None:
                 authority.requests.append(dict(self.headers.items()))
                 authorized = (
-                    self.path == "/internal/spp/authorize"
-                    and self.headers.get("Authorization")
-                    == f"Bearer {TEST_ENGINE_SECRET}"
+                    self.path == "/spp/authorize"
                     and self.headers.get("X-Sol-Entitlement") == accepted_token
                 )
                 self.send_response(response_status or (204 if authorized else 401))
@@ -189,10 +189,6 @@ class GatewayProcess:
     ) -> None:
         self.authority = authority or EntitlementAuthority()
         self.owns_authority = authority is None
-        secret_file = tempfile.NamedTemporaryFile(mode="w", delete=False)
-        secret_file.write(TEST_ENGINE_SECRET)
-        secret_file.close()
-        self.secret_path = secret_file.name
         command = [
             sys.executable,
             str(ROOT / "ratls_gateway.py"),
@@ -205,9 +201,7 @@ class GatewayProcess:
             "--collector-command",
             f"{sys.executable} {ROOT / 'test/fake-ratls-collector.py'}",
             "--entitlement-url",
-            f"http://127.0.0.1:{self.authority.port}/internal/spp/authorize",
-            "--entitlement-secret-file",
-            self.secret_path,
+            f"http://127.0.0.1:{self.authority.port}/spp/authorize",
         ]
         if audio_upstream_port is not None:
             command += ["--audio-upstream-port", str(audio_upstream_port)]
@@ -235,7 +229,6 @@ class GatewayProcess:
     def close(self) -> None:
         self.process.terminate()
         self.process.communicate(timeout=5)
-        os.unlink(self.secret_path)
         if self.owns_authority:
             self.authority.close()
 
@@ -341,8 +334,12 @@ class _FakeAuthorizeResponse:
     """A context-manager stand-in for `http.client.HTTPResponse` carrying only
     the one field `authorize()` reads."""
 
-    def __init__(self, status: int) -> None:
+    def __init__(self, status: int, body: bytes = b"") -> None:
         self.status = status
+        self.body = body
+
+    def read(self, *_args: object, **_kwargs: object) -> bytes:
+        return self.body
 
     def __enter__(self) -> "_FakeAuthorizeResponse":
         return self
@@ -357,12 +354,8 @@ class PortalEntitlementAuthorizerDetailTest(unittest.TestCase):
     collapse into one reason must tag a distinct, fixed `.detail` token."""
 
     def setUp(self) -> None:
-        secret_dir = tempfile.TemporaryDirectory()
-        self.addCleanup(secret_dir.cleanup)
-        secret_file = Path(secret_dir.name) / "secret"
-        secret_file.write_text("test-engine-secret\n", encoding="utf-8")
         self.authorizer = PortalEntitlementAuthorizer(
-            "https://portal.example/internal/spp/authorize", secret_file, timeout=5
+            "https://portal.example/spp/authorize", timeout=5
         )
 
     def _stub_open(self, effect) -> None:
@@ -376,6 +369,10 @@ class PortalEntitlementAuthorizerDetailTest(unittest.TestCase):
         with self.assertRaises(EntitlementUnavailableError) as ctx:
             self.authorizer.authorize("cred")
         self.assertEqual(ctx.exception.detail, expected_detail)
+
+    def test_204_success_admits(self) -> None:
+        self._stub_open(lambda: _FakeAuthorizeResponse(204))
+        self.assertIsNone(self.authorizer.authorize("cred"))
 
     def test_bare_timeout_classifies_as_timeout(self) -> None:
         self._assert_detail(TimeoutError("timed out"), "timeout")
@@ -396,10 +393,35 @@ class PortalEntitlementAuthorizerDetailTest(unittest.TestCase):
         self._assert_detail(urllib.error.URLError(ConnectionRefusedError("refused")), "connect")
 
     def test_unexpected_success_status_classifies_as_status(self) -> None:
-        self._stub_open(lambda: _FakeAuthorizeResponse(200))
+        def _raising_read(*_args: object, **_kwargs: object) -> bytes:
+            raise AssertionError("response body must not be read")
+
+        fake_resp = _FakeAuthorizeResponse(200, body=b'{"not":"empty"}')
+        fake_resp.read = _raising_read  # type: ignore[method-assign]
+        self._stub_open(lambda: fake_resp)
         with self.assertRaises(EntitlementUnavailableError) as ctx:
             self.authorizer.authorize("cred")
         self.assertEqual(ctx.exception.detail, "status")
+
+    def test_302_redirect_raises_status_without_following(self) -> None:
+        call_count = 0
+
+        def _raise_redirect(*_a: object, **_k: object) -> _FakeAuthorizeResponse:
+            nonlocal call_count
+            call_count += 1
+            raise urllib.error.HTTPError(
+                "https://portal.example/spp/authorize",
+                302,
+                "Found",
+                {"Location": "https://portal.example/login"},
+                io.BytesIO(b""),
+            )
+
+        self.authorizer.opener.open = _raise_redirect  # type: ignore[method-assign]
+        with self.assertRaises(EntitlementUnavailableError) as ctx:
+            self.authorizer.authorize("cred")
+        self.assertEqual(ctx.exception.detail, "status")
+        self.assertEqual(call_count, 1)
 
     def test_http_error_outside_401_403_classifies_as_status(self) -> None:
         self._assert_detail(
@@ -410,6 +432,14 @@ class PortalEntitlementAuthorizerDetailTest(unittest.TestCase):
     def test_401_still_raises_rejected_not_unavailable(self) -> None:
         def _raise() -> None:
             raise urllib.error.HTTPError("https://portal.example", 401, "err", {}, io.BytesIO(b""))
+
+        self._stub_open(_raise)
+        with self.assertRaises(EntitlementRejectedError):
+            self.authorizer.authorize("cred")
+
+    def test_403_raises_rejected_not_unavailable(self) -> None:
+        def _raise() -> None:
+            raise urllib.error.HTTPError("https://portal.example", 403, "err", {}, io.BytesIO(b""))
 
         self._stub_open(_raise)
         with self.assertRaises(EntitlementRejectedError):
@@ -431,6 +461,7 @@ class RatlsGatewayTest(unittest.TestCase):
                 gateway.authority.requests[0].get("X-Sol-Entitlement"),
                 HEALTH_PROBE_ENTITLEMENT,
             )
+            _assert_no_authorization_header(self, gateway.authority.requests[0])
         finally:
             gateway.close()
             upstream.listener.close()
@@ -683,9 +714,14 @@ class RoutedRelayTest(unittest.TestCase):
         )
         self.assertEqual(len(self.gateway.authority.requests), 1)
         self.assertEqual(
+            self.gateway.authority.requests[0].get("X-Sol-Entitlement"),
+            TEST_ENTITLEMENT,
+        )
+        self.assertEqual(
             self.gateway.authority.requests[0].get("User-Agent"),
             "spp-engine-authorizer/1",
         )
+        _assert_no_authorization_header(self, self.gateway.authority.requests[0])
 
     def test_invalid_entitlement_is_rejected_before_any_upstream_byte(self) -> None:
         connection, raw = admitted_connection(self.gateway.port, b"i" * 32)
@@ -960,6 +996,40 @@ class RoutedRelayTest(unittest.TestCase):
             connection.close()
             raw.close()
 
+    def test_two_channels_with_the_same_credential_each_authorize_once(self) -> None:
+        conn1, raw1 = admitted_connection(self.gateway.port, b"1" * 32)
+        try:
+            conn1.sendall(
+                b"GET /v1/models HTTP/1.1\r\nHost: spp-engine\r\n"
+                + AUTHORIZATION_LINE
+                + b"\r\n"
+            )
+            head1, body1 = recv_http(conn1)
+            self.assertIn(b"200 OK", head1)
+            self.assertEqual(body1, b'{"upstream":"sglang"}')
+        finally:
+            conn1.close()
+            raw1.close()
+
+        conn2, raw2 = admitted_connection(self.gateway.port, b"2" * 32)
+        try:
+            conn2.sendall(
+                b"GET /v1/models HTTP/1.1\r\nHost: spp-engine\r\n"
+                + AUTHORIZATION_LINE
+                + b"\r\n"
+            )
+            head2, body2 = recv_http(conn2)
+            self.assertIn(b"200 OK", head2)
+            self.assertEqual(body2, b'{"upstream":"sglang"}')
+        finally:
+            conn2.close()
+            raw2.close()
+
+        self.assertEqual(len(self.gateway.authority.requests), 2)
+        for req in self.gateway.authority.requests:
+            self.assertEqual(req.get("X-Sol-Entitlement"), TEST_ENTITLEMENT)
+            _assert_no_authorization_header(self, req)
+
 
 class ChannelLifetimeTest(unittest.TestCase):
     """A revoked entitlement must stop being served on an already-admitted
@@ -1117,6 +1187,53 @@ class ChannelLifetimeTest(unittest.TestCase):
                 raw.close()
         finally:
             gateway.close()
+
+
+class RetiredPortalCredentialScanTest(unittest.TestCase):
+    def test_retired_portal_credentials_absent_from_tree(self) -> None:
+        fixture_path = ROOT / "test" / "fixtures" / "shape-c-retired-portal-credential.txt"
+        self.assertTrue(fixture_path.is_file(), "retired portal credential fixture must exist")
+        fixture_text = fixture_path.read_text(encoding="utf-8")
+        needles = [line.strip() for line in fixture_text.splitlines() if line.strip()]
+        self.assertEqual(len(needles), 3, "fixture must contain exactly 3 needles")
+
+        positive_result = subprocess.run(
+            ["grep", "-nI", "-F", "-f", str(fixture_path), str(fixture_path)],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        positive_hits = [
+            line.strip()
+            for line in positive_result.stdout.splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(len(positive_hits), len(needles))
+
+        negative_result = subprocess.run(
+            ["grep", "-rnI", "-F", "-f", str(fixture_path), "."],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+        )
+        hits = [
+            line.strip()
+            for line in negative_result.stdout.splitlines()
+            if line.strip()
+        ]
+        fixture_relative = "test/fixtures/shape-c-retired-portal-credential.txt"
+        unexpected_hits = [
+            hit
+            for hit in hits
+            if not hit.startswith(f"./{fixture_relative}:")
+            and not hit.startswith(f"{fixture_relative}:")
+        ]
+        self.assertEqual(
+            unexpected_hits,
+            [],
+            f"Found retired portal credential references in worktree: {unexpected_hits}",
+        )
 
 
 if __name__ == "__main__":

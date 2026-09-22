@@ -56,7 +56,6 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any
 
 from cryptography import x509
@@ -99,6 +98,8 @@ MAX_AUDIO_BODY_BYTES = 11 * 1024 * 1024
 MAX_AUDIO_DRAIN_BYTES = 64 * 1024 * 1024
 # Ceilings, not preferences: a revoked entitlement stops being served within
 # T_max + G + one portal read (<=41 min at these defaults).
+# Shape C / G3: there is no engine bearer. _http_relay bounds revocation by
+# this T_max + G turnover, not by a portal credential held by the engine.
 DEFAULT_CHANNEL_LIFETIME_SECONDS = 1800.0
 DEFAULT_CHANNEL_FORCE_CLOSE_GRACE_SECONDS = 600.0
 # Accept-to-admission ceiling. Covers collector queueing too (TPM access is
@@ -168,9 +169,14 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 class PortalEntitlementAuthorizer:
-    """Validate one journal credential against the portal's live entitlement state."""
+    """Validate one journal credential against the portal's live entitlement state.
 
-    def __init__(self, url: str, secret_file: Path, timeout: int) -> None:
+    Shape C / G3: the engine carries no portal credential. The owner's
+    X-Sol-Entitlement is the only authorizing factor. Revocation is bounded
+    by channel turnover (T_max + G), not by an engine bearer.
+    """
+
+    def __init__(self, url: str, timeout: int) -> None:
         parsed = urllib.parse.urlsplit(url)
         loopback_http = parsed.scheme == "http" and parsed.hostname in {
             "127.0.0.1",
@@ -183,11 +189,7 @@ class PortalEntitlementAuthorizer:
             raise ValueError("entitlement URL must not contain credentials or a fragment")
         if timeout <= 0:
             raise ValueError("entitlement timeout must be positive")
-        secret = secret_file.read_text(encoding="utf-8").strip()
-        if not secret:
-            raise ValueError("entitlement secret file is empty")
         self.url = url
-        self.secret = secret
         self.timeout = timeout
         self.opener = urllib.request.build_opener(
             urllib.request.ProxyHandler({}),
@@ -200,7 +202,6 @@ class PortalEntitlementAuthorizer:
             data=b"",
             method="POST",
             headers={
-                "Authorization": f"Bearer {self.secret}",
                 "X-Sol-Entitlement": credential,
                 "Cache-Control": "no-store",
                 "User-Agent": "spp-engine-authorizer/1",
@@ -1024,11 +1025,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--entitlement-url",
         help="portal endpoint that authorizes the first post-attestation bearer credential",
     )
-    parser.add_argument(
-        "--entitlement-secret-file",
-        type=Path,
-        help="root/operator-provisioned file containing the portal service credential",
-    )
     parser.add_argument("--entitlement-timeout", type=int, default=5)
     parser.add_argument(
         "--channel-lifetime-seconds",
@@ -1065,8 +1061,6 @@ def main() -> int:
         raise SystemExit("--collector-command is required")
     if not args.entitlement_url:
         raise SystemExit("--entitlement-url is required")
-    if not args.entitlement_secret_file:
-        raise SystemExit("--entitlement-secret-file is required")
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
@@ -1074,7 +1068,6 @@ def main() -> int:
     collector = CommandCollector(shlex.split(args.collector_command), args.collector_timeout)
     authorizer = PortalEntitlementAuthorizer(
         args.entitlement_url,
-        args.entitlement_secret_file,
         args.entitlement_timeout,
     )
     audio_upstream = (
