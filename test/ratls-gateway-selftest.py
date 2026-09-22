@@ -185,6 +185,7 @@ class GatewayProcess:
         channel_lifetime: float | None = None,
         channel_force_close_grace: float | None = None,
         socket_timeout: float | None = None,
+        admission_timeout: float | None = None,
     ) -> None:
         self.authority = authority or EntitlementAuthority()
         self.owns_authority = authority is None
@@ -219,6 +220,8 @@ class GatewayProcess:
             ]
         if socket_timeout is not None:
             command += ["--socket-timeout", str(socket_timeout)]
+        if admission_timeout is not None:
+            command += ["--admission-timeout-seconds", str(admission_timeout)]
         self.process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
@@ -1065,6 +1068,55 @@ class ChannelLifetimeTest(unittest.TestCase):
         finally:
             gateway.close()
         self.assertEqual(self.upstream.requests, [])
+
+    def test_stalled_handshake_closed_at_admission_timeout(self) -> None:
+        gateway = GatewayProcess(
+            self.upstream.port,
+            channel_lifetime=30,
+            channel_force_close_grace=30,
+            socket_timeout=30,
+            admission_timeout=0.3,
+        )
+        try:
+            raw = socket.create_connection(("127.0.0.1", gateway.port), timeout=10)
+            try:
+                raw.sendall(PREFACE_MAGIC + b"t" * OWNER_NONCE_BYTES)
+                started = time.monotonic()
+                while raw.recv(4096):
+                    pass
+                self.assertLess(time.monotonic() - started, 5)
+            finally:
+                raw.close()
+        finally:
+            gateway.close()
+
+    def test_admitted_channel_outlives_admission_timeout(self) -> None:
+        gateway = GatewayProcess(
+            self.upstream.port,
+            channel_lifetime=30,
+            channel_force_close_grace=30,
+            socket_timeout=30,
+            admission_timeout=0.5,
+        )
+        try:
+            connection, raw = admitted_connection(gateway.port, b"u" * 32)
+            try:
+                time.sleep(1.0)  # well past the admission timeout
+                body = b'{"messages":[]}'
+                connection.sendall(
+                    b"POST /v1/chat/completions HTTP/1.1\r\nHost: spp-engine\r\n"
+                    + AUTHORIZATION_LINE
+                    + f"Content-Length: {len(body)}\r\n\r\n".encode()
+                    + body
+                )
+                head, response_body = recv_http(connection)
+                self.assertIn(b"200 OK", head)
+                self.assertEqual(response_body, b'{"upstream":"sglang"}')
+            finally:
+                connection.close()
+                raw.close()
+        finally:
+            gateway.close()
 
 
 if __name__ == "__main__":

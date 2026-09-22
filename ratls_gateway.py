@@ -26,7 +26,8 @@ of read activity: ``--channel-lifetime-seconds`` (T_max) is checked in the
 relay loop, so a channel still open past it is refused a new request; and
 ``--channel-force-close-grace-seconds`` (G) backstops that with a hard socket
 deadline at T_max + G that force-closes the connection at any stage, even
-mid-request or mid-handshake.
+mid-request.  Before admission, ``--admission-timeout-seconds`` bounds the
+preface, handshake and exporter proof far tighter.
 
 The external collector command reads one JSON object on stdin and writes one
 JSON object on stdout.  It owns hardware-specific evidence collection; this
@@ -100,6 +101,9 @@ MAX_AUDIO_DRAIN_BYTES = 64 * 1024 * 1024
 # T_max + G + one portal read (<=41 min at these defaults).
 DEFAULT_CHANNEL_LIFETIME_SECONDS = 1800.0
 DEFAULT_CHANNEL_FORCE_CLOSE_GRACE_SECONDS = 600.0
+# Accept-to-admission ceiling. Covers collector queueing too (TPM access is
+# serialized); a measured worst minute of live load needed well under this.
+DEFAULT_ADMISSION_TIMEOUT_SECONDS = 60.0
 _HEADER_NAME_RE = re.compile(rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
 
 
@@ -820,16 +824,40 @@ def _http_relay(
             return
 
 
-def _force_close_channel(raw: socket.socket) -> None:
-    """Hard deadline at T_max + G, even mid-request: a client trickling bytes
-    under the per-read idle timeout would otherwise hold the channel forever.
-    shutdown() (not close()) is what reliably wakes a recv blocked on
-    another thread."""
-    LOG.warning("event=channel_force_closed")
-    try:
-        raw.shutdown(socket.SHUT_RDWR)
-    except OSError:
-        pass
+class _ConnectionDeadline:
+    """Force-closes a connection at a re-armable deadline, whatever it is
+    blocked on. shutdown() (not close()) is what reliably wakes a recv blocked
+    on another thread. The lock keeps a superseded timer from firing after a
+    re-arm, so admission can never race the admission deadline."""
+
+    def __init__(self, raw: socket.socket) -> None:
+        self._raw = raw
+        self._lock = threading.Lock()
+        self._timer: threading.Timer | None = None
+
+    def arm(self, seconds: float, event: str) -> None:
+        with self._lock:
+            if self._timer is not None:
+                self._timer.cancel()
+            self._timer = threading.Timer(max(seconds, 0.0), self._fire, args=(event,))
+            self._timer.daemon = True
+            self._timer.start()
+
+    def cancel(self) -> None:
+        with self._lock:
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+
+    def _fire(self, event: str) -> None:
+        with self._lock:
+            if threading.current_thread() is not self._timer:
+                return
+            LOG.warning("event=%s", event)
+            try:
+                self._raw.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
 
 
 class GatewayServer(socketserver.ThreadingTCPServer):
@@ -846,6 +874,7 @@ class GatewayServer(socketserver.ThreadingTCPServer):
         audio_upstream: tuple[str, int] | None = None,
         channel_lifetime: float = DEFAULT_CHANNEL_LIFETIME_SECONDS,
         channel_force_close_grace: float = DEFAULT_CHANNEL_FORCE_CLOSE_GRACE_SECONDS,
+        admission_timeout: float = DEFAULT_ADMISSION_TIMEOUT_SECONDS,
     ) -> None:
         self.collector = collector
         self.authorizer = authorizer
@@ -854,6 +883,7 @@ class GatewayServer(socketserver.ThreadingTCPServer):
         self.audio_upstream = audio_upstream
         self.channel_lifetime = channel_lifetime
         self.channel_force_close_grace = channel_force_close_grace
+        self.admission_timeout = admission_timeout
         super().__init__(address, GatewayHandler)
 
 
@@ -867,13 +897,12 @@ class GatewayHandler(socketserver.BaseRequestHandler):
         # Armed at accept, not admission: setblocking(1) below drops the socket
         # timeout, so a stalled handshake or proof request is otherwise unbounded.
         channel_started = time.monotonic()
-        force_close_timer = threading.Timer(
-            self.server.channel_lifetime + self.server.channel_force_close_grace,
-            _force_close_channel,
-            args=(raw,),
+        hard_deadline = self.server.channel_lifetime + self.server.channel_force_close_grace
+        deadline = _ConnectionDeadline(raw)
+        deadline.arm(
+            min(self.server.admission_timeout, hard_deadline),
+            "admission_deadline_expired",
         )
-        force_close_timer.daemon = True
-        force_close_timer.start()
         try:
             preface = _recv_exact(raw, len(PREFACE_MAGIC) + OWNER_NONCE_BYTES)
             if preface[: len(PREFACE_MAGIC)] != PREFACE_MAGIC:
@@ -902,6 +931,10 @@ class GatewayHandler(socketserver.BaseRequestHandler):
             )
             _send_proof(connection, proof.to_der())
 
+            deadline.arm(
+                channel_started + hard_deadline - time.monotonic(),
+                "channel_force_closed",
+            )
             LOG.info("event=attested_channel_admitted")
             _http_relay(
                 connection,
@@ -932,7 +965,7 @@ class GatewayHandler(socketserver.BaseRequestHandler):
             # is the complete persistent-log surface.
             LOG.warning("event=attested_channel_rejected reason=%s", reason)
         finally:
-            force_close_timer.cancel()
+            deadline.cancel()
             if connection is not None:
                 try:
                     connection.shutdown()
@@ -1012,6 +1045,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="grace (G) beyond --channel-lifetime-seconds before a hard "
         "socket deadline force-closes the channel even mid-request",
     )
+    parser.add_argument(
+        "--admission-timeout-seconds",
+        type=float,
+        default=DEFAULT_ADMISSION_TIMEOUT_SECONDS,
+        help="a connection not admitted (preface, handshake, exporter proof) "
+        "within this many seconds of accept is force-closed",
+    )
     parser.add_argument("--print-collector-contract", action="store_true")
     return parser
 
@@ -1051,6 +1091,7 @@ def main() -> int:
         audio_upstream=audio_upstream,
         channel_lifetime=args.channel_lifetime_seconds,
         channel_force_close_grace=args.channel_force_close_grace_seconds,
+        admission_timeout=args.admission_timeout_seconds,
     ) as server:
         host, port = server.server_address
         print(json.dumps({"event": "listening", "host": host, "port": port}), flush=True)
