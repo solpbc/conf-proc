@@ -22,6 +22,7 @@ venv/
 !.env.example
 *.pem
 !test/spp-boot-module-signer-fixture.pem
+!test/fixtures/spp-attest-azure/vcek.pem
 *.key
 *.cert
 *.crt
