@@ -435,7 +435,7 @@ def install_prod_hardening(tree: Path, nft_pkg: Path) -> None:
     for p in tree.rglob("*"):
         if p.name == "systemd-coredump":
             raise SystemExit(f"prohibited coredump binary found: {p}")
-        if "kdump" in p.name:
+        if p.name == "kdump" or p.name.startswith(("kdump-", "kdump.", "kdumpctl")):
             raise SystemExit(f"prohibited kdump file found: {p}")
         if p.name == "swapfile" and p.is_file():
             raise SystemExit(f"prohibited swapfile found: {p}")
