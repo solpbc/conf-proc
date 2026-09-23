@@ -73,7 +73,7 @@ After=network.target
 Environment=PYTHONPATH=/opt/conf-proc:/opt/spp/pydeps
 RuntimeDirectory=gw
 Environment=TMPDIR=/run/gw
-ExecStart=/usr/bin/python3 /opt/conf-proc/ratls_gateway.py --listen-host 0.0.0.0 --listen-port 9443 --upstream-host 127.0.0.1 --upstream-port 8000 --audio-upstream-host 127.0.0.1 --audio-upstream-port 8100 --collector-command /opt/conf-proc/run-collector.sh --entitlement-url https://services.solstone.app/internal/spp/authorize --entitlement-secret-file /etc/spp/entitlement-authorizer --entitlement-timeout 10
+ExecStart=/usr/bin/python3 /opt/conf-proc/ratls_gateway.py --listen-host 0.0.0.0 --listen-port 9443 --upstream-host 127.0.0.1 --upstream-port 8000 --audio-upstream-host 127.0.0.1 --audio-upstream-port 8100 --collector-command /opt/conf-proc/run-collector.sh --entitlement-url https://services.solstone.app/spp/authorize --entitlement-timeout 10
 Restart=no
 [Install]
 WantedBy=multi-user.target
@@ -370,11 +370,6 @@ def write_historical_report(tree: Path) -> None:
     if not symlink.exists():
         symlink.symlink_to("/etc/systemd/system/spp-r1-report.service")
 
-
-def write_synthetic_authorizer(tree: Path) -> None:
-    auth_file = tree / "etc/spp/entitlement-authorizer"
-    auth_file.parent.mkdir(parents=True, exist_ok=True)
-    auth_file.write_text("spp-r1-1b-synthetic-authorizer\n")
 
 
 def install_prod_hardening(tree: Path) -> None:
@@ -835,7 +830,6 @@ def assemble_serving_rootfs(
 
     # Stage-specific artifacts
     if stage in ("1b", "2h"):
-        write_synthetic_authorizer(tree)
         write_historical_report(tree)
 
     return tree, origins
@@ -1262,7 +1256,7 @@ def main(argv: list[str] | None = None) -> int:
         "--manifest",
         type=Path,
         default=None,
-        help="Path to input manifest JSON (defaults to build/input-manifest.json)",
+        help="Path to input manifest JSON (defaults to appliance/input-manifest.json)",
     )
     parser.add_argument(
         "--resume",
@@ -1282,7 +1276,7 @@ def main(argv: list[str] | None = None) -> int:
         or (Path(os.environ["SPP_APPLIANCE_WORKSPACE"]) if "SPP_APPLIANCE_WORKSPACE" in os.environ else None)
         or (Path.cwd() / "spp-appliance-workspace")
     )
-    manifest_path = args.manifest or (REPO / "build/input-manifest.json")
+    manifest_path = args.manifest or (REPO / "appliance/input-manifest.json")
     work = ws / "r1-build" / f"work-{stage}"
     work.mkdir(parents=True, exist_ok=True)
     (work / "generated").mkdir(parents=True, exist_ok=True)

@@ -15,7 +15,7 @@ import tempfile
 import unittest
 
 REPO = Path(__file__).resolve().parents[1]
-BUILD_DIR = REPO / "build"
+BUILD_DIR = REPO / "appliance"
 if str(BUILD_DIR) not in sys.path:
     sys.path.insert(0, str(BUILD_DIR))
 
@@ -169,7 +169,7 @@ class ApplianceUnitsTest(unittest.TestCase):
 
 class ApplianceManifestTest(unittest.TestCase):
     def test_template_manifest_structure(self) -> None:
-        repo_manifest = Path(__file__).resolve().parents[1] / "build/input-manifest.json"
+        repo_manifest = Path(__file__).resolve().parents[1] / "appliance/input-manifest.json"
         self.assertTrue(repo_manifest.exists())
         data = json.loads(repo_manifest.read_text())
         self.assertEqual(data.get("status"), "unpopulated")
@@ -355,7 +355,7 @@ class ApplianceSBOMTest(unittest.TestCase):
     def test_sbom_generation_and_check(self) -> None:
         # Assert checker does not import or contain spp_image_sbom
         checker_path = (
-            Path(__file__).resolve().parents[1] / "build/spp_image_sbom_check.py"
+            Path(__file__).resolve().parents[1] / "appliance/spp_image_sbom_check.py"
         )
         self.assertNotIn("spp_image_sbom", checker_path.read_text())
 

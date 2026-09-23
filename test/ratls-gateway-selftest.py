@@ -1000,9 +1000,10 @@ class RoutedRelayTest(unittest.TestCase):
         conn1, raw1 = admitted_connection(self.gateway.port, b"1" * 32)
         try:
             conn1.sendall(
-                b"GET /v1/models HTTP/1.1\r\nHost: spp-engine\r\n"
+                b"POST /v1/chat/completions HTTP/1.1\r\nHost: spp-engine\r\n"
+                b"Content-Type: application/json\r\nContent-Length: 2\r\n"
                 + AUTHORIZATION_LINE
-                + b"\r\n"
+                + b"\r\n{}"
             )
             head1, body1 = recv_http(conn1)
             self.assertIn(b"200 OK", head1)
@@ -1014,9 +1015,10 @@ class RoutedRelayTest(unittest.TestCase):
         conn2, raw2 = admitted_connection(self.gateway.port, b"2" * 32)
         try:
             conn2.sendall(
-                b"GET /v1/models HTTP/1.1\r\nHost: spp-engine\r\n"
+                b"POST /v1/chat/completions HTTP/1.1\r\nHost: spp-engine\r\n"
+                b"Content-Type: application/json\r\nContent-Length: 2\r\n"
                 + AUTHORIZATION_LINE
-                + b"\r\n"
+                + b"\r\n{}"
             )
             head2, body2 = recv_http(conn2)
             self.assertIn(b"200 OK", head2)
