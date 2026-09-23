@@ -32,22 +32,26 @@ PARAKEET_SHA: Final = "3cbdc85877e668ca7b82d0d56770eb1fac76691f55d6b97545e8d61ca
 NFT_RULESET: Final = """table inet spp_filter {
     chain output {
         type filter hook output priority 0; policy drop;
+        oif "lo" accept
         ct state established,related accept
-        socket cgroupv2 level 2 "sglang.service" drop
-        socket cgroupv2 level 2 "spp-asr.service" drop
-        tcp dport 443 ip daddr services.solstone.app accept
-        tcp dport 443 ip daddr kdsintf.amd.com accept
-        udp dport 53 ip daddr 168.63.129.16 accept
-        tcp dport 53 ip daddr 168.63.129.16 accept
+        socket cgroupv2 level 1 "sppcontent.slice" drop
+        udp sport 68 udp dport 67 accept
+        ip daddr 168.63.129.16 udp dport 53 accept
+        ip daddr 168.63.129.16 tcp dport 53 accept
+        socket cgroupv2 level 1 "sppgateway.slice" tcp dport 443 accept
     }
 }
 """
 
 UNIT_EGRESS: Final = """[Unit]
 Description=SPP egress nftables filter
-Before=spp-gateway.service spp-asr.service sglang.service
 DefaultDependencies=no
-After=local-fs.target
+# The rules match these slices by cgroup, which nft resolves at load: start them first so their
+# (empty) cgroups exist. SGLang and ASR run in sppcontent.slice; the gateway in sppgateway.slice.
+Requires=sppcontent.slice sppgateway.slice
+After=local-fs.target systemd-modules-load.service sppcontent.slice sppgateway.slice
+Wants=network-pre.target
+Before=network-pre.target spp-gateway.service spp-asr.service sglang.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
@@ -184,22 +188,41 @@ WantedBy=multi-user.target
 """ % PARAKEET_SHA
 
 
+def _require(unit: str, deps: str, slice_name: str) -> str:
+    unit = unit.replace("[Unit]\n", f"[Unit]\nRequires={deps}\nAfter={deps}\n", 1)
+    return unit.replace("[Service]\n", f"[Service]\nSlice={slice_name}\n", 1)
+
+
+SLICE_UNITS: Final = {
+    "sppcontent.slice": "[Unit]\nDescription=SPP content-handling services (no egress beyond loopback)\n",
+    "sppgateway.slice": "[Unit]\nDescription=SPP RA-TLS gateway (the only service allowed out on 443)\n",
+}
+
+
 def unit_sglang(stage: str) -> str:
     if stage == "prod":
-        return UNIT_SGLANG.replace("[Service]\n", "[Service]\nEnvironment=PYTHONNOUSERSITE=1\n", 1)
+        unit = UNIT_SGLANG.replace("[Service]\n", "[Service]\nEnvironment=PYTHONNOUSERSITE=1\n", 1)
+        return _require(unit, "spp-egress.service spp-gpu-bringup.service", "sppcontent.slice")
     return UNIT_SGLANG
 
 
 def unit_asr(stage: str) -> str:
     if stage == "prod":
-        return UNIT_ASR.replace("[Service]\n", "[Service]\nEnvironment=PYTHONNOUSERSITE=1\n", 1)
+        unit = UNIT_ASR.replace("[Service]\n", "[Service]\nEnvironment=PYTHONNOUSERSITE=1\n", 1)
+        return _require(unit, "spp-egress.service spp-gpu-bringup.service", "sppcontent.slice")
     return UNIT_ASR
 
 
+def unit_gateway(stage: str) -> str:
+    return _require(UNIT_GATEWAY, "spp-egress.service", "sppgateway.slice") if stage == "prod" else UNIT_GATEWAY
+
+
 def offline(argv: list[str]) -> list[str]:
-    # Live no-route proof is a real-build integration check;
-    # this execution sandbox may lack CAP_NET_ADMIN.
-    return ["unshare", "--net", "--", *argv]
+    # Every build step after input verification runs with no network: its own empty network
+    # namespace, same filesystem. bwrap does this unprivileged where `unshare --net` cannot
+    # (Ubuntu 24.04 restricts unprivileged user namespaces).
+    return ["bwrap", "--bind", "/", "/", "--dev", "/dev", "--proc", "/proc",
+            "--unshare-net", "--die-with-parent", "--", *argv]
 
 
 def require_clean_repo(repo: Path) -> str:
@@ -220,13 +243,7 @@ def require_clean_repo(repo: Path) -> str:
     return head_sha
 
 
-def verify_inputs(
-    manifest_data: dict, stage: str, workspace: Path
-) -> dict[str, Path]:
-    inputs = manifest_data.get("inputs")
-    if not isinstance(inputs, dict):
-        raise SystemExit("manifest missing 'inputs' object")
-
+def required_inputs(stage: str) -> list[str]:
     required_ids = [
         "KERNEL_BZIMAGE",
         "MODULE_DIR",
@@ -248,20 +265,22 @@ def verify_inputs(
             ]
         )
     if stage in ("2h", "prod"):
-        required_ids.extend(
-            [
-                "A24_PKG",
-                "STOCK_MODULES_DEB",
-                "NV_MODULES_DEB",
-                "NV_FIRMWARE_DEB",
-                "GPU_BRINGUP",
-                "CUDA_PROBE",
-                "H100_NVML",
-            ]
-        )
+        required_ids.extend(["A24_PKG", "STOCK_MODULES_DEB", "NV_MODULES_DEB", "NV_FIRMWARE_DEB"])
     if stage == "2h":
-        required_ids.append("H100_REPORT")
+        required_ids.extend(["CUDA_PROBE", "H100_NVML", "H100_REPORT"])
+    if stage == "prod":
+        required_ids.append("NFT_PKG")
+    return required_ids
 
+
+def verify_inputs(
+    manifest_data: dict, stage: str, workspace: Path
+) -> dict[str, Path]:
+    inputs = manifest_data.get("inputs")
+    if not isinstance(inputs, dict):
+        raise SystemExit("manifest missing 'inputs' object")
+
+    required_ids = required_inputs(stage)
     paths: dict[str, Path] = {}
     for input_id in required_ids:
         if input_id not in inputs:
@@ -282,16 +301,24 @@ def verify_inputs(
         if not target_path.exists():
             raise SystemExit(f"input {input_id!r} path {target_path} does not exist")
 
-        if "files" in entry:
+        if target_path.is_dir() and "files" not in entry:
+            # Compact entry: only the tree digest is pinned. Recompute the file list the way the
+            # manifest was populated and compare digests (full lists ship beside the manifest).
+            from populate_manifest import tree_digest, tree_entries
+
+            got = tree_digest(tree_entries(target_path))
+            if got != expected_sha:
+                raise SystemExit(f"directory {input_id!r} sha256 mismatch: expected {expected_sha}, got {got}")
+        elif "files" in entry:
             # Directory entry
             expected_files = entry.get("files")
             if not isinstance(expected_files, list):
                 raise SystemExit(f"directory input {input_id!r} has null or non-list files")
 
-            # Collect on-disk regular non-symlink files
+            # Collect on-disk regular files and symlinks; a symlink entry pins its target.
             on_disk_map: dict[str, Path] = {}
             for p in target_path.rglob("*"):
-                if p.is_file() and not p.is_symlink():
+                if p.is_symlink() or p.is_file():
                     rel_p = p.relative_to(target_path).as_posix()
                     on_disk_map[rel_p] = p
 
@@ -319,6 +346,11 @@ def verify_inputs(
             for fpath in sorted(manifest_paths):
                 f_item = manifest_file_map[fpath]
                 f_disk_path = on_disk_map[fpath]
+                if f_disk_path.is_symlink() or "symlink" in f_item:
+                    target = os.readlink(f_disk_path) if f_disk_path.is_symlink() else None
+                    if target is None or f_item.get("symlink") != target:
+                        raise SystemExit(f"symlink mismatch for {fpath}: expected {f_item.get('symlink')!r}, got {target!r}")
+                    continue
                 disk_size = f_disk_path.stat().st_size
                 exp_file_size = f_item.get("size_bytes")
                 if not isinstance(exp_file_size, int) or exp_file_size != disk_size:
@@ -372,10 +404,47 @@ def write_historical_report(tree: Path) -> None:
 
 
 
-def install_prod_hardening(tree: Path) -> None:
+def install_prod_hardening(tree: Path, nft_pkg: Path) -> None:
+    # Build-time checks
+    for p in tree.rglob("*"):
+        if p.name == "systemd-coredump":
+            raise SystemExit(f"prohibited coredump binary found: {p}")
+        if "kdump" in p.name:
+            raise SystemExit(f"prohibited kdump file found: {p}")
+        if p.name == "swapfile" and p.is_file():
+            raise SystemExit(f"prohibited swapfile found: {p}")
+        if p.name == "fstab" and p.is_file():
+            content = p.read_text(encoding="utf-8", errors="ignore")
+            for line in content.splitlines():
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    parts = line.split()
+                    if len(parts) >= 3 and parts[2] == "swap":
+                        raise SystemExit(f"prohibited swap fstab entry found in {p}: {line}")
+
+    for rel in ("usr/sbin/nft",):
+        dst = tree / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(nft_pkg / rel, dst)
+    lib_src = nft_pkg / "usr/lib/x86_64-linux-gnu"
+    for lib in sorted(lib_src.iterdir()):
+        dst = tree / "usr/lib/x86_64-linux-gnu" / lib.name
+        if lib.is_symlink():
+            if dst.exists() or dst.is_symlink():
+                dst.unlink()
+            dst.symlink_to(lib.readlink())
+        else:
+            shutil.copy2(lib, dst)
+    spp_disk.run(["/sbin/ldconfig", "-r", str(tree)], cwd=tree)
+    (tree / "var/cache/ldconfig/aux-cache").unlink(missing_ok=True)
+
     nft_file = tree / "etc/nftables.d/spp-egress.nft"
     nft_file.parent.mkdir(parents=True, exist_ok=True)
     nft_file.write_text(NFT_RULESET)
+
+    (tree / "etc/systemd/system").mkdir(parents=True, exist_ok=True)
+    for name, text in SLICE_UNITS.items():
+        (tree / "etc/systemd/system" / name).write_text(text)
 
     egress_unit = tree / "etc/systemd/system/spp-egress.service"
     egress_unit.parent.mkdir(parents=True, exist_ok=True)
@@ -402,22 +471,6 @@ def install_prod_hardening(tree: Path) -> None:
     sysctl_conf.parent.mkdir(parents=True, exist_ok=True)
     sysctl_conf.write_text(SYSCTL_DROPIN)
 
-    # Build-time checks
-    for p in tree.rglob("*"):
-        if p.name == "systemd-coredump":
-            raise SystemExit(f"prohibited coredump binary found: {p}")
-        if "kdump" in p.name:
-            raise SystemExit(f"prohibited kdump file found: {p}")
-        if p.name == "swapfile" and p.is_file():
-            raise SystemExit(f"prohibited swapfile found: {p}")
-        if p.name == "fstab" and p.is_file():
-            content = p.read_text(encoding="utf-8", errors="ignore")
-            for line in content.splitlines():
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    parts = line.split()
-                    if len(parts) >= 3 and parts[2] == "swap":
-                        raise SystemExit(f"prohibited swap fstab entry found in {p}: {line}")
 
 
 def build_cmdline(
@@ -813,7 +866,7 @@ def assemble_serving_rootfs(
     )
 
     # Base units & scripts
-    (tree / "etc/systemd/system/spp-gateway.service").write_text(UNIT_GATEWAY)
+    (tree / "etc/systemd/system/spp-gateway.service").write_text(unit_gateway(stage))
     (tree / "etc/systemd/system/spp-asr.service").write_text(unit_asr(stage))
     (tree / "etc/systemd/system/sglang.service").write_text(unit_sglang(stage))
     stage_model = tree / "opt/spp/stage-model.sh"
@@ -850,7 +903,7 @@ def bake_gpu(
     nv_deb = paths["NV_MODULES_DEB"]
     nv_fw_deb = paths["NV_FIRMWARE_DEB"]
     a24_pkg = paths["A24_PKG"]
-    gpu_bringup = paths["GPU_BRINGUP"]
+    gpu_bringup = REPO / "appliance/gpu-bringup.sh"
 
     extract_dir = work / "gpu-deb-extract"
     extract_dir.mkdir(parents=True, exist_ok=True)
@@ -939,6 +992,10 @@ def install_h100_stack(
             }
         )
 
+    if not overwrite_report:
+        # prod: the CUDA probe and NVML attest script only ever fed the serial report.
+        return origins + bake_gpu(work, tree, paths)
+
     before_diag = _inventory_files(tree)
     probe_dst = tree / "opt/spp/spp-diag-cuda-driver"
     probe_dst.parent.mkdir(parents=True, exist_ok=True)
@@ -991,7 +1048,7 @@ def assemble_rootfs_prod(
     origins.extend(stack_origins)
 
     before_harden = _inventory_files(tree)
-    install_prod_hardening(tree)
+    install_prod_hardening(tree, paths["NFT_PKG"])
     harden_added = _inventory_files(tree) - before_harden
     if harden_added:
         origins.append(
@@ -1113,7 +1170,7 @@ def build_initramfs_r1(
 
 
 def generate_signer(
-    work: Path, *, ephemeral: bool = False
+    work: Path, *, ephemeral: bool = False, signer_dir: Path | None = None
 ) -> tuple[Path, Path, Path]:
     if ephemeral:
         key = work / "spp-ephemeral.key"
@@ -1139,13 +1196,20 @@ def generate_signer(
         )
         return key, cert, Path("/dev/null")
 
-    vault = Path.home() / "projects/extro/cso/vault/spp-secureboot-signer"
-    enc_key = vault / "spp-secureboot-1.key"
-    pass_file = vault / "spp-secureboot-1.pass"
-    cert = vault / "spp-secureboot-1-cert.pem"
+    if signer_dir is None:
+        raise SystemExit("--signer-dir is required unless --ephemeral-signer is given")
+    enc_key = signer_dir / "spp-secureboot-1.key"
+    pass_file = signer_dir / "spp-secureboot-1.pass"
+    cert = signer_dir / "spp-secureboot-1-cert.pem"
     if not (enc_key.exists() and pass_file.exists() and cert.exists()):
-        raise SystemExit(f"vault signer files missing in {vault}")
-    return enc_key, cert, pass_file
+        raise SystemExit(f"signer files missing in {signer_dir}")
+    # sbsign cannot prompt: decrypt into the work dir (0600); main() deletes it after signing.
+    key = work / "signer.key"
+    key.unlink(missing_ok=True)
+    spp_disk.run(["/usr/bin/openssl", "pkey", "-in", str(enc_key), "-passin", f"file:{pass_file}",
+                  "-out", str(key)], cwd=work)
+    key.chmod(0o600)
+    return key, cert, pass_file
 
 
 def build_uki(
@@ -1264,6 +1328,18 @@ def main(argv: list[str] | None = None) -> int:
         help="Reuse existing rootfs.img if present",
     )
     parser.add_argument(
+        "--signer-dir",
+        type=Path,
+        default=None,
+        help="Directory holding the Secure Boot signer (key, passphrase, certificate)",
+    )
+    parser.add_argument(
+        "--work",
+        type=Path,
+        default=None,
+        help="Build output directory (default WORKSPACE/r1-build/work-STAGE)",
+    )
+    parser.add_argument(
         "--ephemeral-signer",
         action="store_true",
         help="Use ephemeral RSA key instead of vault signer",
@@ -1277,7 +1353,7 @@ def main(argv: list[str] | None = None) -> int:
         or (Path.cwd() / "spp-appliance-workspace")
     )
     manifest_path = args.manifest or (REPO / "appliance/input-manifest.json")
-    work = ws / "r1-build" / f"work-{stage}"
+    work = args.work or (ws / "r1-build" / f"work-{stage}")
     work.mkdir(parents=True, exist_ok=True)
     (work / "generated").mkdir(parents=True, exist_ok=True)
     (work / "evidence").mkdir(parents=True, exist_ok=True)
@@ -1299,7 +1375,7 @@ def main(argv: list[str] | None = None) -> int:
     git_head = require_clean_repo(REPO)
 
     # Signer
-    key, cert_pem, _ = generate_signer(work, ephemeral=args.ephemeral_signer)
+    key, cert_pem, _ = generate_signer(work, ephemeral=args.ephemeral_signer, signer_dir=args.signer_dir)
 
     # Compile handoff init
     init_bin = compile_r1_init(work)
@@ -1370,6 +1446,8 @@ def main(argv: list[str] | None = None) -> int:
         build_epoch=BUILD_EPOCH,
         kernel_release=KERNEL_RELEASE,
     )
+    if not args.ephemeral_signer:
+        key.unlink()  # the decrypted production key never outlives the signing step
 
     # Synthetic binding
     binding = (

@@ -1,161 +1,162 @@
 {
-  "status": "unpopulated",
-  "inputs": {
-    "KERNEL_BZIMAGE": {
-      "filename": "vmlinuz-6.8.0-1058-azure-fde",
-      "path": "stock-kernel/extract/boot/vmlinuz-6.8.0-1058-azure-fde",
-      "url": "",
-      "sha256": null,
-      "size_bytes": null
-    },
-    "MODULE_DIR": {
-      "filename": "md",
-      "path": "stock-kernel/extract/lib/modules/6.8.0-1058-azure-fde/kernel/drivers/md",
-      "url": "",
-      "sha256": null,
-      "size_bytes": null,
-      "files": null
-    },
-    "STUB": {
-      "filename": "linuxx64.efi.stub",
-      "path": "stock-kernel/stub-noble/usr/lib/systemd/boot/efi/linuxx64.efi.stub",
-      "url": "",
-      "sha256": null,
-      "size_bytes": null
-    },
-    "UKIFY": {
-      "filename": "ukify.py",
-      "path": "build-tools-recovered/ukify.py",
-      "url": "",
-      "sha256": null,
-      "size_bytes": null
-    },
-    "PEFILE_DEB": {
-      "filename": "python3-pefile.deb",
-      "path": "packages/python3-pefile.deb",
-      "url": "",
-      "sha256": null,
-      "size_bytes": null
-    },
-    "MTOOLS_ROOT": {
-      "filename": "bin",
-      "path": "build-tools-recovered/usr/bin",
-      "url": "",
-      "sha256": null,
-      "size_bytes": null,
-      "files": null
-    },
-    "SGLANG_ROOTFS": {
-      "filename": "rootfs",
-      "path": "serving-inputs/sglang-bundle/rootfs",
-      "url": "",
-      "sha256": null,
-      "size_bytes": null,
-      "files": null
-    },
-    "ASR_OS_ROOT": {
-      "filename": "asr-os-root",
-      "path": "serving-inputs/asr-os-root",
-      "url": "",
-      "sha256": null,
-      "size_bytes": null,
-      "files": null
-    },
-    "ASR_SITE": {
-      "filename": "asr-site-packages",
-      "path": "serving-inputs/asr-site-packages",
-      "url": "",
-      "sha256": null,
-      "size_bytes": null,
-      "files": null
-    },
-    "QWEN": {
-      "filename": "qwen",
-      "path": "serving-inputs/qwen",
-      "url": "",
-      "sha256": null,
-      "size_bytes": null,
-      "files": null
-    },
-    "PARAKEET": {
-      "filename": "parakeet-tdt-0.6b-v3.nemo",
-      "path": "serving-inputs/asr/parakeet-tdt-0.6b-v3.nemo",
-      "url": "",
-      "sha256": "3cbdc85877e668ca7b82d0d56770eb1fac76691f55d6b97545e8d61ca588d10d",
-      "size_bytes": null
-    },
-    "DRIVER_DEBS": {
-      "filename": "nvidia-userspace-595-server",
-      "path": "stock-kernel/debs/nvidia-userspace-595-server",
-      "url": "",
-      "sha256": null,
-      "size_bytes": null,
-      "files": null
-    },
-    "PYDEPS": {
-      "filename": "target",
-      "path": "r1-build/pydeps/target",
-      "url": "",
-      "sha256": null,
-      "size_bytes": null,
-      "files": null
-    },
-    "A24_PKG": {
-      "filename": "package-root",
-      "path": "appliance-a24/package-root",
-      "url": "",
-      "sha256": null,
-      "size_bytes": null,
-      "files": null
-    },
-    "STOCK_MODULES_DEB": {
-      "filename": "linux-modules-6.8.0-1058-azure-fde_6.8.0-1058.65~22.04.1_amd64.deb",
-      "path": "stock-kernel/debs/kernel-fde-1058/linux-modules-6.8.0-1058-azure-fde_6.8.0-1058.65~22.04.1_amd64.deb",
-      "url": "",
-      "sha256": null,
-      "size_bytes": null
-    },
-    "NV_MODULES_DEB": {
-      "filename": "linux-modules-nvidia-595-server-open-6.8.0-1058-azure-fde_6.8.0-1058.65~22.04.1_amd64.deb",
-      "path": "stock-kernel/debs/nvidia-modules-fde-1058/linux-modules-nvidia-595-server-open-6.8.0-1058-azure-fde_6.8.0-1058.65~22.04.1_amd64.deb",
-      "url": "",
-      "sha256": null,
-      "size_bytes": null
-    },
-    "NV_FIRMWARE_DEB": {
-      "filename": "nvidia-firmware-595-server-595.71.05_595.71.05-0ubuntu0.22.04.1_amd64.deb",
-      "path": "stock-kernel/debs/nvidia-userspace-595-server/nvidia-firmware-595-server-595.71.05_595.71.05-0ubuntu0.22.04.1_amd64.deb",
-      "url": "",
-      "sha256": null,
-      "size_bytes": null
-    },
-    "GPU_BRINGUP": {
-      "filename": "gpu-bringup.sh",
-      "path": "r1-build/gpu-bringup.sh",
-      "url": "",
-      "sha256": null,
-      "size_bytes": null
-    },
-    "CUDA_PROBE": {
-      "filename": "spp-diag-cuda-driver",
-      "path": "spp-diag-cuda-driver",
-      "url": "",
-      "sha256": null,
-      "size_bytes": null
-    },
-    "H100_NVML": {
-      "filename": "h100-nvml-attest.py",
-      "path": "r1-build/h100-nvml-attest.py",
-      "url": "",
-      "sha256": null,
-      "size_bytes": null
-    },
-    "H100_REPORT": {
-      "filename": "h100-report.sh",
-      "path": "r1-build/h100-report.sh",
-      "url": "",
-      "sha256": null,
-      "size_bytes": null
-    }
+ "status": "unpopulated",
+ "inputs": {
+  "KERNEL_BZIMAGE": {
+   "filename": "vmlinuz-6.8.0-1058-azure-fde",
+   "path": "stock-kernel/extract/boot/vmlinuz-6.8.0-1058-azure-fde",
+   "url": "",
+   "sha256": null,
+   "size_bytes": null
+  },
+  "MODULE_DIR": {
+   "filename": "md",
+   "path": "stock-kernel/extract/lib/modules/6.8.0-1058-azure-fde/kernel/drivers/md",
+   "url": "",
+   "sha256": null,
+   "size_bytes": null,
+   "files": null
+  },
+  "STUB": {
+   "filename": "linuxx64.efi.stub",
+   "path": "stock-kernel/stub-noble/usr/lib/systemd/boot/efi/linuxx64.efi.stub",
+   "url": "",
+   "sha256": null,
+   "size_bytes": null
+  },
+  "UKIFY": {
+   "filename": "ukify.py",
+   "path": "build-tools-recovered/ukify.py",
+   "url": "",
+   "sha256": null,
+   "size_bytes": null
+  },
+  "PEFILE_DEB": {
+   "filename": "python3-pefile.deb",
+   "path": "packages/python3-pefile.deb",
+   "url": "",
+   "sha256": null,
+   "size_bytes": null
+  },
+  "MTOOLS_ROOT": {
+   "filename": "bin",
+   "path": "build-tools-recovered/usr/bin",
+   "url": "",
+   "sha256": null,
+   "size_bytes": null,
+   "files": null
+  },
+  "SGLANG_ROOTFS": {
+   "filename": "rootfs",
+   "path": "serving-inputs/sglang-bundle/rootfs",
+   "url": "docker://lmsysorg/sglang@sha256:9611bd4c5624b0e9e17829506188a12f17205f2083de0dd44d6c521733553a50 (every blob verified; applied with rootless umoci)",
+   "sha256": null,
+   "size_bytes": null,
+   "files": null
+  },
+  "ASR_OS_ROOT": {
+   "filename": "asr-os-root",
+   "path": "serving-inputs/asr-os-root",
+   "url": "Ubuntu 22.04 CPython 3.10 runtime plus signature-verified libmpdec3 2.5.1-2build2",
+   "sha256": null,
+   "size_bytes": null,
+   "files": null
+  },
+  "ASR_SITE": {
+   "filename": "asr-site-packages",
+   "path": "serving-inputs/asr-site-packages",
+   "url": "NeMo 2.7.3 dependency closure for CPython 3.10: PyPI wheels by hash, plus four sdists (antlr4-python3-runtime, kaldi-python-io, sox, wget) built offline with setuptools 83.0.0",
+   "sha256": null,
+   "size_bytes": null,
+   "files": null
+  },
+  "QWEN": {
+   "filename": "qwen",
+   "path": "serving-inputs/qwen",
+   "url": "https://huggingface.co/Qwen/Qwen3.5-4B revision 851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a (each file against its LFS oid; README.md and .gitattributes omitted)",
+   "sha256": null,
+   "size_bytes": null,
+   "files": null
+  },
+  "PARAKEET": {
+   "filename": "parakeet-tdt-0.6b-v3.nemo",
+   "path": "serving-inputs/asr/parakeet-tdt-0.6b-v3.nemo",
+   "url": "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3 revision 7c35754d166cca382ad1e53e68b01e7c575f3a1d, parakeet-tdt-0.6b-v3.nemo",
+   "sha256": "3cbdc85877e668ca7b82d0d56770eb1fac76691f55d6b97545e8d61ca588d10d",
+   "size_bytes": null
+  },
+  "DRIVER_DEBS": {
+   "filename": "nvidia-userspace-595-server",
+   "path": "stock-kernel/debs/nvidia-userspace-595-server",
+   "url": "",
+   "sha256": null,
+   "size_bytes": null,
+   "files": null
+  },
+  "PYDEPS": {
+   "filename": "target",
+   "path": "r1-build/pydeps/target",
+   "url": "PyPI cryptography 46.0.7, pyopenssl 26.2.0, cffi 2.1.0, pycparser 3.0, typing-extensions 4.16.0 (cp312/abi3 wheels by hash)",
+   "sha256": null,
+   "size_bytes": null,
+   "files": null
+  },
+  "A24_PKG": {
+   "filename": "package-root",
+   "path": "appliance-a24/package-root",
+   "url": "",
+   "sha256": null,
+   "size_bytes": null,
+   "files": null
+  },
+  "STOCK_MODULES_DEB": {
+   "filename": "linux-modules-6.8.0-1058-azure-fde_6.8.0-1058.65~22.04.1_amd64.deb",
+   "path": "stock-kernel/debs/kernel-fde-1058/linux-modules-6.8.0-1058-azure-fde_6.8.0-1058.65~22.04.1_amd64.deb",
+   "url": "",
+   "sha256": null,
+   "size_bytes": null
+  },
+  "NV_MODULES_DEB": {
+   "filename": "linux-modules-nvidia-595-server-open-6.8.0-1058-azure-fde_6.8.0-1058.65~22.04.1_amd64.deb",
+   "path": "stock-kernel/debs/nvidia-modules-fde-1058/linux-modules-nvidia-595-server-open-6.8.0-1058-azure-fde_6.8.0-1058.65~22.04.1_amd64.deb",
+   "url": "",
+   "sha256": null,
+   "size_bytes": null
+  },
+  "NV_FIRMWARE_DEB": {
+   "filename": "nvidia-firmware-595-server-595.71.05_595.71.05-0ubuntu0.22.04.1_amd64.deb",
+   "path": "stock-kernel/debs/nvidia-userspace-595-server/nvidia-firmware-595-server-595.71.05_595.71.05-0ubuntu0.22.04.1_amd64.deb",
+   "url": "",
+   "sha256": null,
+   "size_bytes": null
+  },
+  "CUDA_PROBE": {
+   "filename": "spp-diag-cuda-driver",
+   "path": "spp-diag-cuda-driver",
+   "url": "",
+   "sha256": null,
+   "size_bytes": null
+  },
+  "H100_NVML": {
+   "filename": "h100-nvml-attest.py",
+   "path": "r1-build/h100-nvml-attest.py",
+   "url": "",
+   "sha256": null,
+   "size_bytes": null
+  },
+  "H100_REPORT": {
+   "filename": "h100-report.sh",
+   "path": "r1-build/h100-report.sh",
+   "url": "",
+   "sha256": null,
+   "size_bytes": null
+  },
+  "NFT_PKG": {
+   "filename": "package-root",
+   "path": "nftables/package-root",
+   "url": "",
+   "sha256": null,
+   "size_bytes": null,
+   "files": null
   }
+ }
 }

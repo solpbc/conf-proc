@@ -33,6 +33,8 @@ from spp_appliance import (
     verify_inputs,
     write_historical_report,
 )
+from populate_manifest import populate
+from spp_appliance import generate_signer, unit_gateway
 from spp_image_sbom import generate_image_sbom
 from spp_image_sbom_check import check_image_sbom
 
@@ -60,6 +62,18 @@ class ApplianceCmdlineTest(unittest.TestCase):
             self.assertIn("ip=off spp_diag.root_data=", text_prod)
 
 
+def fake_nft_pkg(root: Path) -> Path:
+    (root / "etc").mkdir(exist_ok=True)
+    pkg = root / "nft-pkg"
+    (pkg / "usr/sbin").mkdir(parents=True)
+    (pkg / "usr/sbin/nft").write_text("#!/bin/sh\n")
+    lib = pkg / "usr/lib/x86_64-linux-gnu"
+    lib.mkdir(parents=True)
+    (lib / "libnftables.so.1.1.0").write_bytes(b"\x7fELF")
+    (lib / "libnftables.so.1").symlink_to("libnftables.so.1.1.0")
+    return pkg
+
+
 class ApplianceHardeningTest(unittest.TestCase):
     def test_historical_report_writes(self) -> None:
         with tempfile.TemporaryDirectory(dir="/var/tmp") as tmpdir:
@@ -76,8 +90,14 @@ class ApplianceHardeningTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir="/var/tmp") as tmpdir:
             tree = Path(tmpdir)
             (tree / "var/log/journal").mkdir(parents=True)
+            (tree / "usr/lib/x86_64-linux-gnu").mkdir(parents=True)
+            (tree / "etc").mkdir()
 
-            install_prod_hardening(tree)
+            with tempfile.TemporaryDirectory(dir="/var/tmp") as pkgdir:
+                install_prod_hardening(tree, fake_nft_pkg(Path(pkgdir)))
+
+            self.assertTrue((tree / "usr/sbin/nft").exists())
+            self.assertTrue((tree / "usr/lib/x86_64-linux-gnu/libnftables.so.1").is_symlink())
 
             self.assertFalse((tree / "etc/systemd/system/spp-r1-report.service").exists())
             self.assertFalse((tree / "opt/spp/r1-report.sh").exists())
@@ -87,7 +107,10 @@ class ApplianceHardeningTest(unittest.TestCase):
             egress_unit = tree / "etc/systemd/system/spp-egress.service"
             self.assertTrue(egress_unit.exists())
             egress_text = egress_unit.read_text()
-            self.assertIn("Before=spp-gateway.service spp-asr.service sglang.service", egress_text)
+            self.assertIn("Before=network-pre.target spp-gateway.service spp-asr.service sglang.service", egress_text)
+            self.assertIn("Requires=sppcontent.slice sppgateway.slice", egress_text)
+            for name in ("sppcontent.slice", "sppgateway.slice"):
+                self.assertTrue((tree / "etc/systemd/system" / name).exists())
 
             wants_link = tree / "etc/systemd/system/multi-user.target.wants/spp-egress.service"
             self.assertTrue(wants_link.is_symlink())
@@ -108,12 +131,15 @@ class ApplianceHardeningTest(unittest.TestCase):
             ruleset = tree / "etc/nftables.d/spp-egress.nft"
             self.assertTrue(ruleset.exists())
             rtext = ruleset.read_text()
-            self.assertIn("services.solstone.app", rtext)
-            self.assertIn("kdsintf.amd.com", rtext)
-            self.assertIn("168.63.129.16", rtext)
-            self.assertIn("dport 53", rtext)
-            self.assertIn('"sglang.service" drop', rtext)
-            self.assertIn('"spp-asr.service" drop', rtext)
+            # nft resolves a hostname when the rules load, before the network is up, and the
+            # whole ruleset then fails to load: no hostnames, ever.
+            self.assertNotIn("solstone.app", rtext)
+            self.assertNotIn("amd.com", rtext)
+            self.assertIn('oif "lo" accept', rtext)
+            self.assertIn('socket cgroupv2 level 1 "sppcontent.slice" drop', rtext)
+            self.assertIn('socket cgroupv2 level 1 "sppgateway.slice" tcp dport 443 accept', rtext)
+            self.assertIn("ip daddr 168.63.129.16 udp dport 53 accept", rtext)
+            self.assertIn("policy drop", rtext)
 
     def test_prod_hardening_rejects_forbidden_files(self) -> None:
         with tempfile.TemporaryDirectory(dir="/var/tmp") as tmpdir:
@@ -122,7 +148,7 @@ class ApplianceHardeningTest(unittest.TestCase):
             cdump.parent.mkdir(parents=True)
             cdump.touch()
             with self.assertRaises(SystemExit):
-                install_prod_hardening(tree)
+                install_prod_hardening(tree, fake_nft_pkg(tree))
 
         with tempfile.TemporaryDirectory(dir="/var/tmp") as tmpdir:
             tree = Path(tmpdir)
@@ -130,7 +156,7 @@ class ApplianceHardeningTest(unittest.TestCase):
             fstab.parent.mkdir(parents=True)
             fstab.write_text("/dev/sda2 none swap sw 0 0\n")
             with self.assertRaises(SystemExit):
-                install_prod_hardening(tree)
+                install_prod_hardening(tree, fake_nft_pkg(tree))
 
 
 class ApplianceUnitsTest(unittest.TestCase):
@@ -304,6 +330,68 @@ class ApplianceManifestTest(unittest.TestCase):
                 verify_inputs(manifest, "1a", ws)
             self.assertIn("extra.ko", str(ctx.exception))
             extra_file.unlink()
+
+
+class ApplianceProdUnitsTest(unittest.TestCase):
+    def test_prod_services_fail_closed_on_firewall_and_live_in_their_slices(self) -> None:
+        for text in (unit_sglang("prod"), unit_asr("prod")):
+            self.assertIn("Requires=spp-egress.service spp-gpu-bringup.service", text)
+            self.assertIn("Slice=sppcontent.slice", text)
+            self.assertIn("PYTHONNOUSERSITE=1", text)
+        gw = unit_gateway("prod")
+        self.assertIn("Requires=spp-egress.service", gw)
+        self.assertIn("Slice=sppgateway.slice", gw)
+        self.assertNotIn("secret", gw.lower())  # the gateway is handed no credential of any kind
+        self.assertNotIn("Slice=", unit_sglang("2h"))
+
+    def test_signer_directory_is_required(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as tmpdir:
+            with self.assertRaises(SystemExit):
+                generate_signer(Path(tmpdir))
+
+
+class ApplianceManifestRoundTripTest(unittest.TestCase):
+    def test_populate_then_verify_and_a_retargeted_symlink_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as tmpdir:
+            ws = Path(tmpdir)
+            files = {"KERNEL_BZIMAGE": "k/vmlinuz", "STUB": "s/stub", "UKIFY": "t/ukify.py", "PEFILE_DEB": "p/pefile.deb"}
+            for rel in files.values():
+                (ws / rel).parent.mkdir(parents=True, exist_ok=True)
+                (ws / rel).write_bytes(rel.encode())
+            (ws / "m").mkdir()
+            (ws / "m/dm-verity.ko").write_bytes(b"verity")
+            (ws / "m/dm-bufio.ko").write_bytes(b"bufio")
+            (ws / "m/current.ko").symlink_to("dm-verity.ko")
+            (ws / "mt").mkdir()
+            (ws / "mt/mformat").write_bytes(b"mformat")
+            manifest = {"inputs": {k: {"path": v} for k, v in files.items()}}
+            manifest["inputs"]["MODULE_DIR"] = {"path": "m"}
+            manifest["inputs"]["MTOOLS_ROOT"] = {"path": "mt"}
+            populate(manifest, ws)
+            self.assertEqual(verify_inputs(manifest, "1a", ws)["MODULE_DIR"], ws / "m")
+            (ws / "m/current.ko").unlink()
+            (ws / "m/current.ko").symlink_to("dm-bufio.ko")
+            with self.assertRaises(SystemExit):
+                verify_inputs(manifest, "1a", ws)
+
+    def test_compact_manifest_verifies_by_tree_digest(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as tmpdir:
+            ws = Path(tmpdir)
+            for rel in ("k/vmlinuz", "s/stub", "t/ukify.py", "p/pefile.deb", "mt/mformat"):
+                (ws / rel).parent.mkdir(parents=True, exist_ok=True)
+                (ws / rel).write_bytes(rel.encode())
+            (ws / "m").mkdir()
+            (ws / "m/dm-verity.ko").write_bytes(b"verity")
+            manifest = {"inputs": {"KERNEL_BZIMAGE": {"path": "k/vmlinuz"}, "STUB": {"path": "s/stub"},
+                                   "UKIFY": {"path": "t/ukify.py"}, "PEFILE_DEB": {"path": "p/pefile.deb"},
+                                   "MODULE_DIR": {"path": "m"}, "MTOOLS_ROOT": {"path": "mt"}}}
+            populate(manifest, ws)
+            for entry in manifest["inputs"].values():
+                entry.pop("files", None)
+            verify_inputs(manifest, "1a", ws)
+            (ws / "m/extra.ko").write_bytes(b"planted")
+            with self.assertRaises(SystemExit):
+                verify_inputs(manifest, "1a", ws)
 
 
 class ApplianceGitTest(unittest.TestCase):

@@ -65,7 +65,26 @@ the human-maintained direct-dependency intent. Refresh a lock only from an A–H
 qualified candidate and commit it with the source revision that advances the
 deployment recipe.
 
-The public sealed-appliance recipe lives at `appliance/spp_appliance.py` (`python3 appliance/spp_appliance.py --help`). It builds sealed appliance images across stages `1a`, `1b`, `2h`, and `prod`. Running a build requires a staged workspace and a populated `appliance/input-manifest.json`. The recipe fails closed when the manifest is unpopulated or any input check fails.
+## Sealed appliance recipe
+
+`appliance/` holds the public recipe for the sealed confidential-processing appliance
+(`python3 appliance/spp_appliance.py --help`). `--stage prod` is the image that serves; stages
+`1a`, `1b` and `2h` are the earlier qualification images, kept for reference and not reproducible
+(inputs they baked are no longer published).
+
+1. **Acquire.** `appliance/acquire_boot_inputs.py --workspace DIR` fetches the kernel, driver,
+   boot-tool, nftables and TLS-library inputs, each pinned by SHA-256. The serving stack's upstream
+   identities (OCI digest, Hugging Face revisions, the ASR dependency closure) are recorded in the
+   input manifest's `url` fields; its acquisition is not yet scripted in this repository.
+2. **Verify.** The build refuses unless every input matches `--manifest` exactly: each file by
+   SHA-256 and size, each directory by its full file list, symlink targets included.
+3. **Build.** `python3 appliance/spp_appliance.py --stage prod --workspace DIR --manifest M
+   --signer-dir SIGNER [--work OUT]` runs every step after input verification with no network
+   (`bwrap --unshare-net`) and refuses a dirty checkout of this repository. It emits the build
+   manifest, the verified input manifest and a generated SBOM of the assembled root.
+4. **Egress.** `appliance/check_egress_ruleset.sh NFT_PACKAGE_ROOT` loads the prod egress ruleset
+   with the image's own `nft` in a throwaway network namespace and checks that the content
+   services send nothing beyond loopback and the gateway reaches only TCP 443.
 
 ## Deployment
 

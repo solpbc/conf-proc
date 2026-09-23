@@ -1,0 +1,141 @@
+{
+ "inputs": {
+  "A24_PKG": {
+   "filename": "package-root",
+   "files_count": 273,
+   "path": "appliance-a24/package-root",
+   "sha256": "87d2b8904a5eb0ba95ab51f004f1fb330e826a12d5b2590bbb484ca51e5781cd",
+   "size_bytes": 2695700,
+   "url": ""
+  },
+  "ASR_OS_ROOT": {
+   "filename": "asr-os-root",
+   "files_count": 1628,
+   "path": "serving-inputs/asr-os-root",
+   "sha256": "dbc34ef678282a2f637cdbe4d5ce22643ca0bcc50f353d017f1be6c22600465b",
+   "size_bytes": 541795370,
+   "url": "Ubuntu 22.04 CPython 3.10 runtime plus signature-verified libmpdec3 2.5.1-2build2"
+  },
+  "ASR_SITE": {
+   "filename": "asr-site-packages",
+   "files_count": 52740,
+   "path": "serving-inputs/asr-site-packages",
+   "sha256": "5282e48fef78221a7f81f6bbe61354b4a78405a9c0a6616adede89a1ceab41f5",
+   "size_bytes": 5881536247,
+   "url": "NeMo 2.7.3 dependency closure for CPython 3.10: PyPI wheels by hash, plus four sdists (antlr4-python3-runtime, kaldi-python-io, sox, wget) built offline with setuptools 83.0.0"
+  },
+  "DRIVER_DEBS": {
+   "filename": "nvidia-userspace-595-server",
+   "files_count": 4,
+   "path": "stock-kernel/debs/nvidia-userspace-595-server",
+   "sha256": "81be8f3e7cb4aa0325d699607134cdee916f96c98028a2e43b178f2f20e45445",
+   "size_bytes": 162488276,
+   "url": ""
+  },
+  "KERNEL_BZIMAGE": {
+   "filename": "vmlinuz-6.8.0-1058-azure-fde",
+   "path": "stock-kernel/extract/boot/vmlinuz-6.8.0-1058-azure-fde",
+   "sha256": "78d4c293142d78588d7b31a2fd9272109e2d305d93c8685abeb6cbcb60c39609",
+   "size_bytes": 14455296,
+   "url": ""
+  },
+  "MODULE_DIR": {
+   "filename": "md",
+   "files_count": 38,
+   "path": "stock-kernel/extract/lib/modules/6.8.0-1058-azure-fde/kernel/drivers/md",
+   "sha256": "f69008efa069fd2da160029c426f0ec4ec2b37d4b58358c41e8f1b8f7269d2a7",
+   "size_bytes": 3834606,
+   "url": ""
+  },
+  "MTOOLS_ROOT": {
+   "filename": "bin",
+   "files_count": 32,
+   "path": "build-tools-recovered/usr/bin",
+   "sha256": "249ea63586075af43a037e4af9257e758cd211751295a10ccc9326d9143cb306",
+   "size_bytes": 5074987,
+   "url": ""
+  },
+  "NFT_PKG": {
+   "filename": "package-root",
+   "files_count": 52,
+   "path": "nftables/package-root",
+   "sha256": "90a96bd88d73f1329d872b016eb3ac998bc5b4362817dd0efe581dcce5b529bb",
+   "size_bytes": 1360858,
+   "url": ""
+  },
+  "NV_FIRMWARE_DEB": {
+   "filename": "nvidia-firmware-595-server-595.71.05_595.71.05-0ubuntu0.22.04.1_amd64.deb",
+   "path": "stock-kernel/debs/nvidia-userspace-595-server/nvidia-firmware-595-server-595.71.05_595.71.05-0ubuntu0.22.04.1_amd64.deb",
+   "sha256": "740636b37668ac78a5f392dee3139b78f534561b01a6152db74c8380b00ec1f9",
+   "size_bytes": 74976158,
+   "url": ""
+  },
+  "NV_MODULES_DEB": {
+   "filename": "linux-modules-nvidia-595-server-open-6.8.0-1058-azure-fde_6.8.0-1058.65~22.04.1_amd64.deb",
+   "path": "stock-kernel/debs/nvidia-modules-fde-1058/linux-modules-nvidia-595-server-open-6.8.0-1058-azure-fde_6.8.0-1058.65~22.04.1_amd64.deb",
+   "sha256": "194779828374b36e53ee7293415d44023f3dc7399fc852874a16852d6a8e897c",
+   "size_bytes": 8165906,
+   "url": ""
+  },
+  "PARAKEET": {
+   "filename": "parakeet-tdt-0.6b-v3.nemo",
+   "path": "serving-inputs/asr/parakeet-tdt-0.6b-v3.nemo",
+   "sha256": "3cbdc85877e668ca7b82d0d56770eb1fac76691f55d6b97545e8d61ca588d10d",
+   "size_bytes": 2509332480,
+   "url": "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3 revision 7c35754d166cca382ad1e53e68b01e7c575f3a1d, parakeet-tdt-0.6b-v3.nemo"
+  },
+  "PEFILE_DEB": {
+   "filename": "python3-pefile.deb",
+   "path": "packages/python3-pefile.deb",
+   "sha256": "cc1bed11dd4d485e402c2c071014f1774b23b9bbedc1a90d944dad531f898f6a",
+   "size_bytes": 66476,
+   "url": ""
+  },
+  "PYDEPS": {
+   "filename": "target",
+   "files_count": 190,
+   "path": "r1-build/pydeps/target",
+   "sha256": "f60346092a0df0c68b09ca17e2f7c3bb28f3cff7b458a15bd5f9364f380254d5",
+   "size_bytes": 14645747,
+   "url": "PyPI cryptography 46.0.7, pyopenssl 26.2.0, cffi 2.1.0, pycparser 3.0, typing-extensions 4.16.0 (cp312/abi3 wheels by hash)"
+  },
+  "QWEN": {
+   "filename": "qwen",
+   "files_count": 12,
+   "path": "serving-inputs/qwen",
+   "sha256": "fd5588c8a3bc2435ac3f10d2f527d593cbe4f7dbc2279f2b4ab4473a6039d329",
+   "size_bytes": 9342828238,
+   "url": "https://huggingface.co/Qwen/Qwen3.5-4B revision 851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a (each file against its LFS oid; README.md and .gitattributes omitted)"
+  },
+  "SGLANG_ROOTFS": {
+   "filename": "rootfs",
+   "files_count": 185222,
+   "path": "serving-inputs/sglang-bundle/rootfs",
+   "sha256": "ac52fd0dd60b41d7daeed7b5cfb10355160c1e322003e8910b4e95d0743788de",
+   "size_bytes": 28288619260,
+   "url": "docker://lmsysorg/sglang@sha256:9611bd4c5624b0e9e17829506188a12f17205f2083de0dd44d6c521733553a50 (every blob verified; applied with rootless umoci)"
+  },
+  "STOCK_MODULES_DEB": {
+   "filename": "linux-modules-6.8.0-1058-azure-fde_6.8.0-1058.65~22.04.1_amd64.deb",
+   "path": "stock-kernel/debs/kernel-fde-1058/linux-modules-6.8.0-1058-azure-fde_6.8.0-1058.65~22.04.1_amd64.deb",
+   "sha256": "64350ba17e95e02796291dac6072b8b7fb29addbda0be6f8023da16764c99037",
+   "size_bytes": 23500102,
+   "url": ""
+  },
+  "STUB": {
+   "filename": "linuxx64.efi.stub",
+   "path": "stock-kernel/stub-noble/usr/lib/systemd/boot/efi/linuxx64.efi.stub",
+   "sha256": "45688b1614952ccac1c0386f0d68f6018ea72a842fe1fc56d7c61c8cc3536de5",
+   "size_bytes": 68608,
+   "url": ""
+  },
+  "UKIFY": {
+   "filename": "ukify.py",
+   "path": "build-tools-recovered/ukify.py",
+   "sha256": "46856022e436a11c92ee43ff5c90823d51511dd2f112866c4ecef369564e9c8a",
+   "size_bytes": 56179,
+   "url": ""
+  }
+ },
+ "status": "populated"
+}
