@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 from typing import Final
@@ -1153,24 +1154,18 @@ def assemble_rootfs_prod(
 
 
 def compile_r1_init(work: Path) -> Path:
+    # The flags the qualified boots' init was built with.
     out = work / "spp-diag-handoff"
     spp_disk.run(
         [
-            "/usr/bin/gcc",
-            "-O2",
-            "-Wall",
-            "-Wextra",
-            "-static",
-            "-DSPP_R1_SYSTEMD_INIT",
-            "-I",
-            str(REPO),
-            str(REPO / "spp_diag_handoff.c"),
-            "-o",
-            str(out),
+            "/usr/bin/gcc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-pedantic",
+            "-DSPP_R1_SYSTEMD_INIT", "-static", "-Os",
+            str(REPO / "spp-diag-runtime-src/spp_diag_handoff.c"),
+            "-o", str(out),
         ],
         cwd=work,
     )
-    spp_disk.run(["/usr/bin/strip", str(out)], cwd=work)
+    out.chmod(0o555)
     return out
 
 
@@ -1216,26 +1211,26 @@ def build_initramfs_r1(
     *,
     build_epoch: int = BUILD_EPOCH,
 ) -> Path:
-    initramfs_cpio = work / "initramfs.cpio"
-    init_data = init_bin.read_bytes()
-    entries: list[bytes] = []
-    ino = 1
-
-    entries.append(spp_disk.newc_entry("spp-diag-handoff", 0o100755, init_data, ino, build_epoch=build_epoch))
-    ino += 1
-
+    # The layout the init expects: it mounts proc/sys/devtmpfs onto /proc, /sys and /dev, opens
+    # the verity root at /mnt/spp-diag-root, and loads /modules/dm-bufio.ko and dm-verity.ko.
+    directories = (".", "dev", "dev/mapper", "mnt", "mnt/spp-diag-root", "modules", "proc", "sys")
+    files = {"spp-diag-handoff": (init_bin, stat.S_IFREG | 0o555)}
     for mod_name in R1_MODULES:
         mod_path = paths["MODULE_DIR"] / mod_name
         if not mod_path.exists():
             raise SystemExit(f"required module {mod_name} not found in {paths['MODULE_DIR']}")
-        mod_data = mod_path.read_bytes()
-        entries.append(spp_disk.newc_entry(f"lib/modules/{mod_name}", 0o100644, mod_data, ino, build_epoch=build_epoch))
+        files[f"modules/{mod_name}"] = (mod_path, stat.S_IFREG | 0o444)
+    entries: list[bytes] = []
+    ino = 1
+    for directory in sorted(directories, key=lambda v: (v.count("/"), v)):
+        entries.append(spp_disk.newc_entry(directory, stat.S_IFDIR | 0o755, b"", ino, build_epoch=build_epoch))
         ino += 1
-
-    trailer = spp_disk.newc_entry("TRAILER!!!", 0, b"", ino, build_epoch=build_epoch)
-    entries.append(trailer)
-
-    spp_disk.write_bytes(initramfs_cpio, b"".join(entries), 0o644)
+    for name, (source, mode) in sorted(files.items()):
+        entries.append(spp_disk.newc_entry(name, mode, source.read_bytes(), ino, build_epoch=build_epoch))
+        ino += 1
+    entries.append(spp_disk.newc_entry("TRAILER!!!", stat.S_IFREG, b"", ino, build_epoch=build_epoch))
+    initramfs_cpio = work / "initramfs.cpio"
+    spp_disk.write_bytes(initramfs_cpio, b"".join(entries), 0o444)
     return initramfs_cpio
 
 

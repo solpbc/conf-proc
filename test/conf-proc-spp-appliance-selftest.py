@@ -34,7 +34,7 @@ from spp_appliance import (
     write_historical_report,
 )
 from populate_manifest import populate
-from spp_appliance import COLLECTOR_SH, copy_tracked_source, generate_signer, required_inputs, unit_gateway
+from spp_appliance import COLLECTOR_SH, build_initramfs_r1, copy_tracked_source, generate_signer, required_inputs, unit_gateway
 from spp_image_sbom import generate_image_sbom
 from spp_image_sbom_check import check_image_sbom
 
@@ -406,6 +406,29 @@ class ApplianceManifestRoundTripTest(unittest.TestCase):
             (ws / "m/extra.ko").write_bytes(b"planted")
             with self.assertRaises(SystemExit):
                 verify_inputs(manifest, "1a", ws)
+
+
+class ApplianceInitramfsTest(unittest.TestCase):
+    def test_initramfs_carries_every_path_the_init_opens(self) -> None:
+        import re
+
+        source = (REPO / "spp-diag-runtime-src/spp_diag_handoff.c").read_text()
+        wanted = set(re.findall(r'spp_r1_load_module\("/([^"]+)"\)', source))
+        wanted |= {m.lstrip("/") for m in re.findall(r'"(/(?:proc|sys|dev))"', source)}
+        wanted.add(re.search(r'SPP_DIAG_ROOT_MOUNTPOINT "/([^"]+)"', source).group(1))
+        self.assertIn("modules/dm-verity.ko", wanted)
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as tmpdir:
+            work = Path(tmpdir)
+            (work / "md").mkdir()
+            for mod in ("dm-bufio.ko", "dm-verity.ko"):
+                (work / "md" / mod).write_bytes(b"ko")
+            init = work / "init"
+            init.write_bytes(b"\x7fELF")
+            cpio = build_initramfs_r1(work, init, {"MODULE_DIR": work / "md"})
+            listing = subprocess.run(["cpio", "-it"], stdin=cpio.open("rb"), capture_output=True,
+                                     check=True).stdout.decode().split()
+        self.assertTrue(wanted <= set(listing), sorted(wanted - set(listing)))
+        self.assertIn("spp-diag-handoff", listing)
 
 
 class ApplianceGitTest(unittest.TestCase):
