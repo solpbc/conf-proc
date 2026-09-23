@@ -1042,8 +1042,6 @@ def install_h100_stack(
         return spp_disk.run(["/bin/bash", "-euo", "pipefail", "-c", cmd], cwd=work)
 
     a24_pkg = paths["A24_PKG"]
-    cuda_probe = paths["CUDA_PROBE"]
-    h100_nvml = paths["H100_NVML"]
 
     before_tpm = _inventory_files(tree)
     _sh(f"cp -a --remove-destination {a24_pkg}/usr/bin/tpm2* {tree}/usr/bin/ 2>/dev/null || true")
@@ -1067,6 +1065,8 @@ def install_h100_stack(
         # prod: the CUDA probe and NVML attest script only ever fed the serial report.
         return origins + bake_gpu(work, tree, paths)
 
+    cuda_probe = paths["CUDA_PROBE"]
+    h100_nvml = paths["H100_NVML"]
     before_diag = _inventory_files(tree)
     probe_dst = tree / "opt/spp/spp-diag-cuda-driver"
     probe_dst.parent.mkdir(parents=True, exist_ok=True)
@@ -1441,8 +1441,8 @@ def main(argv: list[str] | None = None) -> int:
     # Verify clean git repo
     git_head = require_clean_repo(REPO)
 
-    # Signer
-    key, cert_pem, _ = generate_signer(work, ephemeral=args.ephemeral_signer, signer_dir=args.signer_dir)
+    if not args.ephemeral_signer and args.signer_dir is None:
+        raise SystemExit("--signer-dir is required unless --ephemeral-signer is given")
 
     # Compile handoff init
     init_bin = compile_r1_init(work)
@@ -1503,18 +1503,22 @@ def main(argv: list[str] | None = None) -> int:
         root_hash,
         stage=stage,
     )
-    uki = build_uki(
-        work,
-        cmdline,
-        initramfs,
-        key,
-        cert_pem,
-        paths,
-        build_epoch=BUILD_EPOCH,
-        kernel_release=KERNEL_RELEASE,
-    )
-    if not args.ephemeral_signer:
-        key.unlink()  # the decrypted production key never outlives the signing step
+    # The decrypted production key exists only for the signing step, whatever happens in it.
+    key, cert_pem, _ = generate_signer(work, ephemeral=args.ephemeral_signer, signer_dir=args.signer_dir)
+    try:
+        uki = build_uki(
+            work,
+            cmdline,
+            initramfs,
+            key,
+            cert_pem,
+            paths,
+            build_epoch=BUILD_EPOCH,
+            kernel_release=KERNEL_RELEASE,
+        )
+    finally:
+        if not args.ephemeral_signer:
+            key.unlink(missing_ok=True)
 
     # Synthetic binding
     binding = (
