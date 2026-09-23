@@ -240,6 +240,10 @@ def unit_gateway(stage: str) -> str:
         return UNIT_GATEWAY
     unit = UNIT_GATEWAY.replace("--collector-command /opt/conf-proc/run-collector.sh",
                                 "--collector-command /opt/spp/run-collector.sh")
+    # PCR 11 carries systemd-pcrphase's boot-phase words, so the phase a quote is taken in is part
+    # of what the owner pins. The gateway (the only thing that quotes) starts after the last
+    # boot-time phase, "ready", is measured: every quote sees sysinit:ready.
+    unit = unit.replace("After=network.target\n", "After=network.target systemd-pcrphase.service\n", 1)
     return _require(unit, "spp-egress.service", "sppgateway.slice")
 
 

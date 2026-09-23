@@ -350,6 +350,7 @@ class ApplianceProdUnitsTest(unittest.TestCase):
     def test_prod_collector_is_the_sealed_one(self) -> None:
         gw = unit_gateway("prod")
         self.assertIn("--collector-command /opt/spp/run-collector.sh", gw)
+        self.assertIn("After=network.target systemd-pcrphase.service", gw)  # quotes see sysinit:ready
         self.assertIn("--collector-command /opt/conf-proc/run-collector.sh", unit_gateway("2h"))
         self.assertIn("COLLECTOR_SITE", required_inputs("prod"))
         self.assertNotIn("sudo", COLLECTOR_SH)  # the gateway is root; the image carries no sudo
