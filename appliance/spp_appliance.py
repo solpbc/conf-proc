@@ -29,6 +29,45 @@ KERNEL_RELEASE: Final = "6.8.0-1058-azure-fde"
 R1_MODULES: Final = ("dm-bufio.ko", "dm-verity.ko")
 PARAKEET_SHA: Final = "3cbdc85877e668ca7b82d0d56770eb1fac76691f55d6b97545e8d61ca588d10d"
 
+# "prodtrace" is the production image plus one diagnostic unit that copies service state and
+# journal tails to the serial port. It is for debugging a production boot on hardware: its
+# measurements differ from prod's, and it is never published or pinned.
+PROD_STAGES: Final = ("prod", "prodtrace")
+
+TRACE_UNIT: Final = """[Unit]
+Description=SPP diagnostic: service state and journal tails to the serial port (prodtrace only)
+After=multi-user.target
+[Service]
+Type=simple
+ExecStart=/opt/spp/trace-report.sh
+[Install]
+WantedBy=multi-user.target
+"""
+
+TRACE_SH: Final = """#!/bin/bash
+# prodtrace only: never halts. Content-free by construction of the services' own logging.
+report() {
+  exec 3>/dev/ttyS0
+  {
+    echo; echo "==== SPP-TRACE $1 uptime=$(cut -d' ' -f1 /proc/uptime) ===="
+    for u in spp-egress spp-gpu-bringup sglang spp-asr spp-gateway systemd-networkd; do
+      echo "unit $u: active=$(systemctl is-active $u.service) result=$(systemctl show -p Result --value $u.service) restarts=$(systemctl show -p NRestarts --value $u.service)"
+    done
+    echo "-- addr --"; ip -brief addr 2>&1
+    echo "-- mem --"; free -m 2>&1 | head -3
+    echo "-- gpu --"; nvidia-smi --query-gpu=memory.used,memory.total --format=csv 2>&1 | head -3
+    nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv 2>&1 | head -6
+    for u in spp-asr sglang spp-gateway spp-gpu-bringup systemd-networkd spp-egress; do
+      echo "-- journal $u --"; journalctl -u $u.service --no-pager -n 40 -o short-monotonic 2>&1 | tail -40
+    done
+    echo "==== SPP-TRACE-END $1 ===="
+  } >&3 2>&1
+  exec 3>&-
+}
+sleep 480; report t8
+sleep 720; report t20
+"""
+
 NFT_RULESET: Final = """table inet spp_filter {
     chain output {
         type filter hook output priority 0; policy drop;
@@ -243,21 +282,21 @@ SLICE_UNITS: Final = {
 
 
 def unit_sglang(stage: str) -> str:
-    if stage == "prod":
+    if stage in PROD_STAGES:
         unit = UNIT_SGLANG.replace("[Service]\n", "[Service]\nEnvironment=PYTHONNOUSERSITE=1\n", 1)
         return _require(unit, "spp-egress.service spp-gpu-bringup.service", "sppcontent.slice")
     return UNIT_SGLANG
 
 
 def unit_asr(stage: str) -> str:
-    if stage == "prod":
+    if stage in PROD_STAGES:
         unit = UNIT_ASR.replace("[Service]\n", "[Service]\nEnvironment=PYTHONNOUSERSITE=1\n", 1)
         return _require(unit, "spp-egress.service spp-gpu-bringup.service", "sppcontent.slice")
     return UNIT_ASR
 
 
 def unit_gateway(stage: str) -> str:
-    if stage != "prod":
+    if stage not in PROD_STAGES:
         return UNIT_GATEWAY
     unit = UNIT_GATEWAY.replace("--collector-command /opt/conf-proc/run-collector.sh",
                                 "--collector-command /opt/spp/run-collector.sh")
@@ -303,7 +342,7 @@ def required_inputs(stage: str) -> list[str]:
         "PEFILE_DEB",
         "MTOOLS_ROOT",
     ]
-    if stage in ("1b", "2h", "prod"):
+    if stage in ("1b", "2h", *PROD_STAGES):
         required_ids.extend(
             [
                 "SGLANG_ROOTFS",
@@ -315,11 +354,11 @@ def required_inputs(stage: str) -> list[str]:
                 "PYDEPS",
             ]
         )
-    if stage in ("2h", "prod"):
+    if stage in ("2h", *PROD_STAGES):
         required_ids.extend(["A24_PKG", "STOCK_MODULES_DEB", "NV_MODULES_DEB", "NV_FIRMWARE_DEB"])
     if stage == "2h":
         required_ids.extend(["CUDA_PROBE", "H100_NVML", "H100_REPORT"])
-    if stage == "prod":
+    if stage in PROD_STAGES:
         required_ids.extend(["NFT_PKG", "COLLECTOR_SITE"])
     return required_ids
 
@@ -549,7 +588,7 @@ def build_cmdline(
     cmdline_file = work / "cmdline.txt"
     cmdline = (
         "ro rdinit=/spp-diag-handoff root=/dev/mapper/spp-diag-root rootfstype=squashfs "
-        "ip=off " + ("" if stage == "prod" else "console=ttyS0 ")
+        "ip=off " + ("" if stage in PROD_STAGES else "console=ttyS0 ")
         + f"spp_diag.root_data=PARTUUID={root_partuuid} "
         f"spp_diag.root_hash=PARTUUID={verity_partuuid} "
         f"spp_diag.roothash={root_hash}"
@@ -977,7 +1016,7 @@ def assemble_serving_rootfs(
         if not symlink.exists():
             symlink.symlink_to(f"/etc/systemd/system/{u}")
 
-    if stage == "prod":
+    if stage in PROD_STAGES:
         before_collector = _inventory_files(tree)
         _sh(f"cp -a {paths['COLLECTOR_SITE']}/. {tree}/opt/spp/collector-site/")
         collector_sh = tree / "opt/spp/run-collector.sh"
@@ -1156,9 +1195,19 @@ def assemble_rootfs_2h(work: Path, paths: dict[str, Path]) -> Path:
 
 
 def assemble_rootfs_prod(
-    work: Path, paths: dict[str, Path]
+    work: Path, paths: dict[str, Path], stage: str = "prod"
 ) -> tuple[Path, list[dict[str, object]]]:
     tree, origins = assemble_serving_rootfs(work, "prod", paths)
+    if stage == "prodtrace":
+        before_trace = _inventory_files(tree)
+        (tree / "etc/systemd/system/spp-trace-report.service").write_text(TRACE_UNIT)
+        trace_sh = tree / "opt/spp/trace-report.sh"
+        trace_sh.write_text(TRACE_SH)
+        trace_sh.chmod(0o755)
+        (tree / "etc/systemd/system/multi-user.target.wants/spp-trace-report.service").symlink_to(
+            "/etc/systemd/system/spp-trace-report.service")
+        origins.append({"kind": "recipe", "name": "prodtrace-diagnostic", "version": "1.0", "sha256": "",
+                        "revision": "", "files": sorted(_inventory_files(tree) - before_trace)})
     stack_origins = install_h100_stack(work, tree, paths, overwrite_report=False)
     origins.extend(stack_origins)
 
@@ -1445,7 +1494,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="SPP sealed appliance build recipe")
     parser.add_argument(
         "--stage",
-        choices=("1a", "1b", "2h", "prod"),
+        choices=("1a", "1b", "2h", *PROD_STAGES),
         default="1a",
         help="Appliance stage to build",
     )
@@ -1533,8 +1582,8 @@ def main(argv: list[str] | None = None) -> int:
     elif stage == "2h":
         tree = assemble_rootfs_2h(work, paths)
         rootfs = build_squashfs_1b(work, tree, build_epoch=BUILD_EPOCH, resume=args.resume, command_prefix=cmd_prefix)
-    elif stage == "prod":
-        tree, origins = assemble_rootfs_prod(work, paths)
+    elif stage in PROD_STAGES:
+        tree, origins = assemble_rootfs_prod(work, paths, stage)
         rootfs = build_squashfs_1b(work, tree, build_epoch=BUILD_EPOCH, resume=args.resume, command_prefix=cmd_prefix)
     else:
         raise SystemExit(f"unknown stage {stage}")
@@ -1546,7 +1595,7 @@ def main(argv: list[str] | None = None) -> int:
     initramfs = build_initramfs_r1(work, init_bin, paths, build_epoch=BUILD_EPOCH)
 
     # For prod stage: emit origins & SBOM outside rootfs
-    if stage == "prod":
+    if stage in PROD_STAGES:
         (work / "image-origins.json").write_text(canonical_dumps(origins))
         boot_meta = {
             "stub": paths["STUB"],
