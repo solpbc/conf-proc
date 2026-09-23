@@ -472,11 +472,31 @@ class ApplianceGitTest(unittest.TestCase):
             (repo / "build").mkdir()  # what `make ci` leaves behind: ignored, so porcelain stays clean
             (repo / "build/out.o").write_text("")
             require_clean_repo(repo)
-            copy_tracked_source(repo, dest)
+            (repo / "roots").mkdir()
+            (repo / "roots/r.pem").write_text("r")
+            subprocess.run(["git", "-C", str(repo), "add", "roots"], check=True)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@solstone.app", "-c",
+                            "user.name=T", "commit", "-qm", "roots"], check=True)
+            copy_tracked_source(repo, dest, ("lib.py", "tool.sh", "roots/", "test/"))
             self.assertEqual(sorted(p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file()),
-                             [".gitignore", "lib.py", "tool.sh"])
+                             ["lib.py", "roots/r.pem", "test/case.py", "tool.sh"])
             self.assertEqual((dest / "tool.sh").stat().st_mode & 0o777, 0o755)
             self.assertEqual((dest / "lib.py").stat().st_mode & 0o777, 0o644)
+
+    def test_the_runtime_set_is_everything_the_units_start(self) -> None:
+        from spp_appliance import RUNTIME_SOURCE
+
+        for name in ("ratls_gateway.py", "ratls_collector.py", "asr_shim.py"):
+            self.assertIn(name, RUNTIME_SOURCE)
+        # and everything they import from this repo
+        import re
+        for name in [n for n in RUNTIME_SOURCE if n.endswith(".py")]:
+            for mod in re.findall(r"^from (\w+) import", (REPO / name).read_text(), re.M):
+                if (REPO / f"{mod}.py").exists():
+                    self.assertIn(f"{mod}.py", RUNTIME_SOURCE, f"{name} imports {mod}")
+        for name in COLLECTOR_SH.split() + [unit_gateway("prod")]:
+            for path in re.findall(r"/opt/conf-proc/([\w./-]+)", name):
+                self.assertIn(path, RUNTIME_SOURCE)
 
 
 class ApplianceDiskFormulasTest(unittest.TestCase):

@@ -708,8 +708,15 @@ def _inventory_files(tree: Path) -> set[str]:
     return files
 
 
-def copy_tracked_source(repo: Path, dest: Path) -> None:
-    # Only what HEAD tracks, test trees excluded: an ignored build/ or cache left behind by
+# What the image runs from this repository: the gateway, its collector, the ASR sidecar and the
+# AMD roots they check against. Nothing else of the repo reaches the image, so a change to the
+# recipe or the docs does not move the roothash, and the image carries no unused code.
+RUNTIME_SOURCE: Final = ("LICENSE", "asr_shim.py", "ratls_collector.py", "ratls_contract.py",
+                         "ratls_gateway.py", "roots/amd/", "strict_wav.py", "verifier.py")
+
+
+def copy_tracked_source(repo: Path, dest: Path, allow: tuple[str, ...] = RUNTIME_SOURCE) -> None:
+    # Only what HEAD tracks and the runtime needs: an ignored build/ or cache left behind by
     # `make ci` never reaches the image, and two clean clones at one commit give one tree.
     # File modes come from the index, not from the checkout's umask.
     listing = subprocess.run(["git", "-C", str(repo), "ls-files", "-s", "-z"],
@@ -719,7 +726,7 @@ def copy_tracked_source(repo: Path, dest: Path) -> None:
             continue
         meta, raw_path = entry.split(b"\t", 1)
         rel = raw_path.decode("utf-8")
-        if "test" in Path(rel).parts:
+        if not any(rel == a or (a.endswith("/") and rel.startswith(a)) for a in allow):
             continue
         mode = meta.split()[0]
         src, dst = repo / rel, dest / rel
