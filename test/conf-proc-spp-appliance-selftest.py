@@ -92,9 +92,23 @@ class ApplianceHardeningTest(unittest.TestCase):
             (tree / "var/log/journal").mkdir(parents=True)
             (tree / "usr/lib/x86_64-linux-gnu").mkdir(parents=True)
             (tree / "etc").mkdir()
+            source_resolv = Path(tmpdir + "-input-resolv.conf")
+            source_resolv.write_text("")
+            os.link(source_resolv, tree / "etc/resolv.conf")  # the tree is hard-linked to its input
 
             with tempfile.TemporaryDirectory(dir="/var/tmp") as pkgdir:
                 install_prod_hardening(tree, fake_nft_pkg(Path(pkgdir)))
+
+            # The base configures no network: the appliance must bring up its own NIC and resolver,
+            # and must do so without writing through to the hard-linked input.
+            self.assertIn("Driver=hv_netvsc", (tree / "etc/systemd/network/10-spp-azure.network").read_text())
+            self.assertEqual(os.readlink(tree / "etc/systemd/system/multi-user.target.wants/systemd-networkd.service"),
+                             "/usr/lib/systemd/system/systemd-networkd.service")
+            self.assertEqual((tree / "etc/resolv.conf").read_text(), "nameserver 168.63.129.16\n")
+            self.assertEqual(source_resolv.read_text(), "")
+            source_resolv.unlink()
+            # the resolver the image uses is the one DNS server the egress policy admits
+            self.assertIn("ip daddr 168.63.129.16 udp dport 53 accept", NFT_RULESET)
 
             self.assertTrue((tree / "usr/sbin/nft").exists())
             self.assertTrue((tree / "usr/lib/x86_64-linux-gnu/libnftables.so.1").is_symlink())

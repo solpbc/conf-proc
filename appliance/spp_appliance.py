@@ -70,6 +70,27 @@ RuntimeMaxUse=16M
 SYSCTL_DROPIN: Final = """kernel.core_pattern=|/bin/false
 """
 
+# The serving image's base (a container rootfs) configures no network at all: networkd is present
+# but disabled, no .network file matches the NIC, and /etc/resolv.conf is empty. The appliance
+# takes one DHCPv4 lease on Azure's synthetic NIC and resolves through the platform resolver, the
+# only DNS server the egress policy admits.
+NETWORKD_CONF: Final = """[Match]
+Driver=hv_netvsc
+
+[Network]
+DHCP=ipv4
+LinkLocalAddressing=no
+IPv6AcceptRA=no
+
+[DHCPv4]
+ClientIdentifier=mac
+UseDNS=no
+UseNTP=no
+UseHostname=no
+"""
+
+RESOLV_CONF: Final = "nameserver 168.63.129.16\n"
+
 UNIT_GATEWAY: Final = """[Unit]
 Description=SPP RA-TLS gateway (:9443)
 After=network.target
@@ -498,6 +519,16 @@ def install_prod_hardening(tree: Path, nft_pkg: Path) -> None:
             shutil.rmtree(journal_dir)
         else:
             journal_dir.unlink()
+
+    network = tree / "etc/systemd/network/10-spp-azure.network"
+    network.parent.mkdir(parents=True, exist_ok=True)
+    network.write_text(NETWORKD_CONF)
+    link = tree / "etc/systemd/system/multi-user.target.wants/systemd-networkd.service"
+    link.unlink(missing_ok=True)
+    link.symlink_to("/usr/lib/systemd/system/systemd-networkd.service")
+    resolv = tree / "etc/resolv.conf"
+    resolv.unlink(missing_ok=True)  # hard-linked to the input; replace, never write through
+    resolv.write_text(RESOLV_CONF)
 
     sysctl_conf = tree / "etc/sysctl.d/spp.conf"
     sysctl_conf.parent.mkdir(parents=True, exist_ok=True)
