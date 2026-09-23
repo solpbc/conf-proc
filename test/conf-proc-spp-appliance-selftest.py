@@ -431,6 +431,22 @@ class ApplianceInitramfsTest(unittest.TestCase):
         self.assertIn("spp-diag-handoff", listing)
 
 
+class DerivePcrsTest(unittest.TestCase):
+    def test_quote_parser_reads_a_real_azure_quote(self) -> None:
+        import hashlib
+        from derive_pcrs import parse_quote_pcrs
+
+        raw = (REPO / "test/fixtures/spp-attest-azure/quote.pcrs").read_bytes()
+        pcrs = parse_quote_pcrs(raw)
+        self.assertEqual(sorted(pcrs), [0, 2, 4, 7, 8, 9, 15, 16, 22, 23])
+        self.assertEqual(pcrs[8], "00" * 32)
+        self.assertEqual(pcrs[22], "ff" * 32)
+        # the flat fingerprint the journal pins is the SHA-256 of this file
+        self.assertTrue(hashlib.sha256(raw).hexdigest().startswith("b162f461"))
+        with self.assertRaises(SystemExit):
+            parse_quote_pcrs(raw[:-1])
+
+
 class ApplianceGitTest(unittest.TestCase):
     def test_clean_repo_check(self) -> None:
         with tempfile.TemporaryDirectory(dir="/var/tmp") as tmpdir:
