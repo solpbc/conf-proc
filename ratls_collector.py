@@ -4,10 +4,11 @@
 """Live CVM evidence collector for ``ratls_gateway.py``.
 
 Reads one gateway collector request from stdin and writes one JSON response to
-stdout.  It must run inside the Azure H100 CVM with the vTPM, ``snpguest``,
-``tpm2-tools``, ``nvidia-smi``, and Azure confidential-GPU onboarding stack.
-Set ``SPP_NVIDIA_VERIFIER_SRC`` to the onboarding package directory containing
-the ``verifier`` Python package.
+stdout.  It must run inside the Azure H100 CVM with the vTPM, ``tpm2-tools``,
+``nvidia-smi``, and NVIDIA's local GPU verifier.  Set
+``SPP_NVIDIA_VERIFIER_SRC`` to the directory containing that ``verifier``
+Python package.  The AMD report is the one the vTPM's HCL report embeds, and
+its ARK/ASK are this repository's pinned roots; only the VCEK is fetched.
 
 Diagnostics go to stderr.  Evidence goes only to the gateway over stdout and
 is held in an ephemeral temporary directory.
@@ -17,14 +18,17 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import functools
 import hashlib
 import importlib
+import importlib.util
 import json
 import os
 import struct
 import subprocess
 import sys
 import tempfile
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -40,11 +44,11 @@ AK_HANDLE = os.environ.get("SPP_AK_HANDLE", "0x81000003")
 HCL_NV_INDEX = os.environ.get("SPP_HCL_NV_INDEX", "0x01400001")
 PCR_LIST = os.environ.get("SPP_PCR_LIST", "sha256:0,2,4,7,8,9,15,16,22,23")
 COMMAND_TIMEOUT = int(os.environ.get("SPP_COLLECT_COMMAND_TIMEOUT", "120"))
-# AMD KDS rate-limits aggressively (HTTP 429); the ARK/ASK/VCEK chain is
-# per-chip/TCB-stable, so fetch once and reuse. Verification still runs on
-# every collection; a stale cached chain falls back to one refetch.
+# AMD KDS rate-limits aggressively (HTTP 429); the VCEK is per-chip/TCB-stable,
+# so fetch once and reuse. Verification still runs on every collection; a stale
+# cached VCEK (TCB bump) falls back to one refetch.
 VCEK_CACHE_DIR = os.environ.get("SPP_VCEK_CACHE_DIR", "/var/tmp/spp-vcek-cache")
-_CHAIN_FILES = ("ark.pem", "ask.pem", "vcek.pem")
+AMD_ROOTS_DIR = Path(__file__).resolve().parent / "roots" / "amd"
 
 
 def _b64(value: bytes) -> str:
@@ -178,29 +182,53 @@ def _quote(directory: Path, qualifying_data: bytes) -> dict[str, str]:
     }
 
 
-def _amd_chain(certs: Path, report: Path) -> None:
-    """Materialize + verify the ARK/ASK/VCEK chain, KDS-fetching at most once."""
-    cache = Path(VCEK_CACHE_DIR)
+@functools.cache
+def _amd_verifier() -> Any:
+    # This repo's off-CVM verifier.py, loaded under its own name: the vendor GPU
+    # package is also called `verifier`, and the two must not shadow each other.
+    spec = importlib.util.spec_from_file_location(
+        "spp_amd_verifier", Path(__file__).resolve().parent / "verifier.py"
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("verifier.py could not be loaded")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module  # its dataclasses resolve their module by name
+    spec.loader.exec_module(module)
+    return module
+
+
+def _amd_chain(certs: Path, report_raw: bytes) -> None:
+    """Materialize + verify the ARK/ASK/VCEK chain, KDS-fetching the VCEK at most once."""
+    amd = _amd_verifier()
+    report = amd.SnpReport.parse(report_raw)
+    product = amd.kds_product_for_cpuid(report.cpuid_family, report.cpuid_model)
+    if product is None:
+        raise RuntimeError("AMD report CPUID maps to no known KDS product")
+    for name in ("ark.pem", "ask.pem"):
+        (certs / name).write_bytes((AMD_ROOTS_DIR / product / name).read_bytes())
+    cached = Path(VCEK_CACHE_DIR) / "vcek.pem"
     for source in ("cache", "fetch"):
         if source == "cache":
-            if not all((cache / name).is_file() for name in _CHAIN_FILES):
+            if not cached.is_file():
                 continue
-            for name in _CHAIN_FILES:
-                (certs / name).write_bytes((cache / name).read_bytes())
+            pem = cached.read_bytes()
         else:
-            _run("snpguest", "fetch", "ca", "pem", str(certs), "--report", str(report))
-            _run("snpguest", "fetch", "vcek", "pem", str(certs), str(report))
+            url = amd.vcek_url(report, amd.VCEK_SOURCES["kds"], product)
+            with urllib.request.urlopen(url, timeout=COMMAND_TIMEOUT) as response:
+                der = response.read()
+            pem = amd.x509.load_der_x509_certificate(der).public_bytes(
+                amd.serialization.Encoding.PEM
+            )
+        (certs / "vcek.pem").write_bytes(pem)
         try:
-            _run("snpguest", "verify", "certs", str(certs))
-            _run("snpguest", "verify", "attestation", str(certs), str(report))
-        except RuntimeError:
+            amd.verify_amd_chain_and_report(report, certs, AMD_ROOTS_DIR)
+        except (amd.VerificationError, ValueError):
             if source == "fetch":
                 raise
-            continue  # cached chain went stale (TCB bump); refetch once
+            continue  # cached VCEK went stale (TCB bump); refetch once
         if source == "fetch":
-            cache.mkdir(parents=True, exist_ok=True)
-            for name in _CHAIN_FILES:
-                (cache / name).write_bytes((certs / name).read_bytes())
+            cached.parent.mkdir(parents=True, exist_ok=True)
+            cached.write_bytes(pem)
         return
     raise RuntimeError("AMD certificate chain could not be materialized")
 
@@ -223,20 +251,19 @@ def _certificate_evidence(request: dict[str, Any]) -> dict[str, str]:
 
     with tempfile.TemporaryDirectory(prefix="spp-ratls-") as temp:
         directory = Path(temp)
-        report = directory / "report.bin"
-        request_file = directory / "request.bin"
         hcl_report = directory / "hcl_report.bin"
         certs = directory / "certs"
         certs.mkdir()
-        _run("snpguest", "report", "--platform", str(report), str(request_file))
-        _amd_chain(certs, report)
         _run("tpm2_nvread", "-C", "o", HCL_NV_INDEX, "-o", str(hcl_report))
+        hcl = hcl_report.read_bytes()
+        report = _amd_verifier().parse_hcla(hcl).report
+        _amd_chain(certs, report)
         quote = _quote(directory, qualifying_data)
         return {
             "owner_nonce_b64": _b64(owner_nonce),
             "tls_spki_der_b64": _b64(spki_der),
-            "amd_report_b64": _b64(report.read_bytes()),
-            "hcl_report_b64": _b64(hcl_report.read_bytes()),
+            "amd_report_b64": _b64(report),
+            "hcl_report_b64": _b64(hcl),
             "amd_ark_pem_b64": _b64((certs / "ark.pem").read_bytes()),
             "amd_ask_pem_b64": _b64((certs / "ask.pem").read_bytes()),
             "amd_vcek_pem_b64": _b64((certs / "vcek.pem").read_bytes()),

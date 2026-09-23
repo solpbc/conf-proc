@@ -15,8 +15,10 @@ The production deployment at `processing.solstone.app` runs these components:
 - `asr_shim.py` + `strict_wav.py` — the bounded hosted-transcription sidecar
 - `spp_health.py` — content-free on-box readiness and health
 
-SGLang, the model weights, NVIDIA's local GPU verifier, and `snpguest` are
-deployment dependencies rather than vendored source.
+SGLang, the model weights and NVIDIA's local GPU verifier are deployment
+dependencies rather than vendored source. The collector takes the AMD report
+from the vTPM's HCL report and checks it against the AMD roots pinned in
+`roots/amd/` before returning it, fetching only the VCEK from AMD's KDS.
 
 ## Trust boundary
 

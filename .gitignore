@@ -27,6 +27,7 @@ venv/
 *.crt
 *.der
 *.bin
+!test/fixtures/spp-attest-azure/*.bin
 *.quote
 *.report
 hcl-blob*

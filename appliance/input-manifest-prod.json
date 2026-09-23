@@ -24,6 +24,14 @@
    "size_bytes": 5881536247,
    "url": "NeMo 2.7.3 dependency closure for CPython 3.10: PyPI wheels by hash, plus four sdists (antlr4-python3-runtime, kaldi-python-io, sox, wget) built offline with setuptools 83.0.0"
   },
+  "COLLECTOR_SITE": {
+   "filename": "target",
+   "files_count": 812,
+   "path": "r1-build/collector-site/target",
+   "sha256": "591bc796e90014eceae6a35ab7ad0167f4767fe13084009793766f26fde47204",
+   "size_bytes": 39673687,
+   "url": "PyPI nv-local-gpu-verifier 2.3.0 and its closure (18 wheels by hash, appliance/acquire_boot_inputs.py COLLECTOR_PINS)"
+  },
   "DRIVER_DEBS": {
    "filename": "nvidia-userspace-595-server",
    "files_count": 4,

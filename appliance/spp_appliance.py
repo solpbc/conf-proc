@@ -83,6 +83,21 @@ Restart=no
 WantedBy=multi-user.target
 """
 
+# The sealed appliance's evidence collector. The gateway already runs as root, so no sudo; the
+# collector's pinned dependencies sit in their own tree, ahead of the SGLang base's; the vendor
+# GPU verifier opens verifier.log in its working directory, which must therefore be tmpfs; and the
+# quote carries the fourteen-register selection the owner appraises, not the running engine's ten.
+COLLECTOR_SH: Final = """#!/bin/sh
+set -eu
+mkdir -p /run/gw/collector
+cd /run/gw/collector
+exec env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin TMPDIR=/run/gw \\
+  PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/opt/spp/collector-site \\
+  SPP_NVIDIA_VERIFIER_SRC=/opt/spp/collector-site SPP_VCEK_CACHE_DIR=/run/gw/vcek-cache \\
+  SPP_PCR_LIST=sha256:0,2,4,7,8,9,11,12,13,14,15,16,22,23 \\
+  /usr/bin/python3 /opt/conf-proc/ratls_collector.py
+"""
+
 UNIT_REPORT: Final = """[Unit]
 Description=SPP R1 stage-1b boot report
 After=multi-user.target
@@ -189,7 +204,10 @@ WantedBy=multi-user.target
 
 
 def _require(unit: str, deps: str, slice_name: str) -> str:
+    # prod only: the serving units come back after a crash (same measured code), where the
+    # qualification stages kept Restart=no so a failure stayed visible in their report.
     unit = unit.replace("[Unit]\n", f"[Unit]\nRequires={deps}\nAfter={deps}\n", 1)
+    unit = unit.replace("Restart=no\n", "Restart=on-failure\nRestartSec=5\n", 1)
     return unit.replace("[Service]\n", f"[Service]\nSlice={slice_name}\n", 1)
 
 
@@ -214,7 +232,11 @@ def unit_asr(stage: str) -> str:
 
 
 def unit_gateway(stage: str) -> str:
-    return _require(UNIT_GATEWAY, "spp-egress.service", "sppgateway.slice") if stage == "prod" else UNIT_GATEWAY
+    if stage != "prod":
+        return UNIT_GATEWAY
+    unit = UNIT_GATEWAY.replace("--collector-command /opt/conf-proc/run-collector.sh",
+                                "--collector-command /opt/spp/run-collector.sh")
+    return _require(unit, "spp-egress.service", "sppgateway.slice")
 
 
 def offline(argv: list[str]) -> list[str]:
@@ -269,7 +291,7 @@ def required_inputs(stage: str) -> list[str]:
     if stage == "2h":
         required_ids.extend(["CUDA_PROBE", "H100_NVML", "H100_REPORT"])
     if stage == "prod":
-        required_ids.append("NFT_PKG")
+        required_ids.extend(["NFT_PKG", "COLLECTOR_SITE"])
     return required_ids
 
 
@@ -425,6 +447,7 @@ def install_prod_hardening(tree: Path, nft_pkg: Path) -> None:
     for rel in ("usr/sbin/nft",):
         dst = tree / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.unlink(missing_ok=True)
         shutil.copy2(nft_pkg / rel, dst)
     lib_src = nft_pkg / "usr/lib/x86_64-linux-gnu"
     for lib in sorted(lib_src.iterdir()):
@@ -434,6 +457,7 @@ def install_prod_hardening(tree: Path, nft_pkg: Path) -> None:
                 dst.unlink()
             dst.symlink_to(lib.readlink())
         else:
+            dst.unlink(missing_ok=True)
             shutil.copy2(lib, dst)
     spp_disk.run(["/sbin/ldconfig", "-r", str(tree)], cwd=tree)
     (tree / "var/cache/ldconfig/aux-cache").unlink(missing_ok=True)
@@ -680,6 +704,31 @@ def _inventory_files(tree: Path) -> set[str]:
     return files
 
 
+def copy_tracked_source(repo: Path, dest: Path) -> None:
+    # Only what HEAD tracks, test trees excluded: an ignored build/ or cache left behind by
+    # `make ci` never reaches the image, and two clean clones at one commit give one tree.
+    # File modes come from the index, not from the checkout's umask.
+    listing = subprocess.run(["git", "-C", str(repo), "ls-files", "-s", "-z"],
+                             capture_output=True, check=True).stdout
+    for entry in listing.split(b"\0"):
+        if not entry:
+            continue
+        meta, raw_path = entry.split(b"\t", 1)
+        rel = raw_path.decode("utf-8")
+        if "test" in Path(rel).parts:
+            continue
+        mode = meta.split()[0]
+        src, dst = repo / rel, dest / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if mode == b"120000":
+            dst.symlink_to(os.readlink(src))
+        elif mode in (b"100644", b"100755"):
+            shutil.copyfile(src, dst)
+            dst.chmod(0o755 if mode == b"100755" else 0o644)
+        else:
+            raise SystemExit(f"unsupported tracked entry {rel} (mode {mode.decode()})")
+
+
 def assemble_serving_rootfs(
     work: Path, stage: str, paths: dict[str, Path]
 ) -> tuple[Path, list[dict[str, object]]]:
@@ -700,6 +749,8 @@ def assemble_serving_rootfs(
     for g in ("serial-getty@.service", "getty@.service", "console-getty.service", "getty.target"):
         _sh(f"ln -sf /dev/null {tree}/etc/systemd/system/{g}")
     _sh(f"rm -f {tree}/etc/systemd/system/getty.target.wants/* 2>/dev/null || true")
+    # The tree shares inodes with the SGLang input (cp -al): replace, never write through.
+    (tree / "etc/machine-id").unlink(missing_ok=True)
     (tree / "etc/machine-id").write_text("00000000000000000000000000000001\n")
     sglang_files = _inventory_files(tree)
     origins.append(
@@ -741,8 +792,8 @@ def assemble_serving_rootfs(
         )
 
     before_driver = _inventory_files(tree)
-    _sh(f"cp -a {driver_extract}/usr/lib/x86_64-linux-gnu/. {tree}/usr/lib/x86_64-linux-gnu/")
-    _sh(f"cp -a {driver_extract}/usr/bin/. {tree}/usr/bin/")
+    _sh(f"cp -a --remove-destination {driver_extract}/usr/lib/x86_64-linux-gnu/. {tree}/usr/lib/x86_64-linux-gnu/")
+    _sh(f"cp -a --remove-destination {driver_extract}/usr/bin/. {tree}/usr/bin/")
     _sh(f"/sbin/ldconfig -r {tree}")
     _sh(f"rm -f {tree}/var/cache/ldconfig/aux-cache")
     driver_added = _inventory_files(tree) - before_driver
@@ -758,6 +809,7 @@ def assemble_serving_rootfs(
         "opt/spp-asr",
         "opt/conf-proc",
         "opt/spp/pydeps",
+        "opt/spp/collector-site",
         "opt/sglang",
         "etc/spp",
     ):
@@ -835,10 +887,8 @@ def assemble_serving_rootfs(
 
     # conf-proc source sync
     before_conf = _inventory_files(tree)
-    _sh(
-        f"rsync -a --exclude=.git --exclude=.venv --exclude=__pycache__ --exclude='test' {REPO}/ {tree}/opt/conf-proc/ 2>/dev/null || cp -a {REPO}/. {tree}/opt/conf-proc/"
-    )
     head_rev = require_clean_repo(REPO)
+    copy_tracked_source(REPO, tree / "opt/conf-proc")
     origins.append(
         {
             "kind": "git",
@@ -880,6 +930,23 @@ def assemble_serving_rootfs(
         symlink = wants / u
         if not symlink.exists():
             symlink.symlink_to(f"/etc/systemd/system/{u}")
+
+    if stage == "prod":
+        before_collector = _inventory_files(tree)
+        _sh(f"cp -a {paths['COLLECTOR_SITE']}/. {tree}/opt/spp/collector-site/")
+        collector_sh = tree / "opt/spp/run-collector.sh"
+        collector_sh.write_text(COLLECTOR_SH)
+        collector_sh.chmod(0o755)
+        origins.append(
+            {
+                "kind": "tree",
+                "name": "collector-site",
+                "version": "nv-local-gpu-verifier-2.3.0",
+                "sha256": "",
+                "revision": "",
+                "files": sorted(_inventory_files(tree) - before_collector),
+            }
+        )
 
     # Stage-specific artifacts
     if stage in ("1b", "2h"):
@@ -932,11 +999,11 @@ def bake_gpu(
         )
 
     before_copy = _inventory_files(tree)
-    _sh(f"cp -a {extract_dir}/lib/modules/{kernel_release} {tree}/lib/modules/")
-    _sh(f"cp -a {extract_dir}/lib/firmware {tree}/lib/")
+    _sh(f"cp -a --remove-destination {extract_dir}/lib/modules/{kernel_release} {tree}/lib/modules/")
+    _sh(f"cp -a --remove-destination {extract_dir}/lib/firmware {tree}/lib/")
     modprobe_src = a24_pkg / "usr/bin/nvidia-modprobe"
     if modprobe_src.exists():
-        _sh(f"cp -a {modprobe_src} {tree}/usr/bin/")
+        _sh(f"cp -a --remove-destination {modprobe_src} {tree}/usr/bin/")
         (tree / "usr/bin/nvidia-modprobe").chmod(0o4755)
     _sh(f"/sbin/depmod -b {tree} {kernel_release}")
 
@@ -975,8 +1042,8 @@ def install_h100_stack(
     h100_nvml = paths["H100_NVML"]
 
     before_tpm = _inventory_files(tree)
-    _sh(f"cp -a {a24_pkg}/usr/bin/tpm2* {tree}/usr/bin/ 2>/dev/null || true")
-    _sh(f"cp -a {a24_pkg}/usr/lib/x86_64-linux-gnu/libtss2* {tree}/usr/lib/x86_64-linux-gnu/ 2>/dev/null || true")
+    _sh(f"cp -a --remove-destination {a24_pkg}/usr/bin/tpm2* {tree}/usr/bin/ 2>/dev/null || true")
+    _sh(f"cp -a --remove-destination {a24_pkg}/usr/lib/x86_64-linux-gnu/libtss2* {tree}/usr/lib/x86_64-linux-gnu/ 2>/dev/null || true")
     _sh(f"/sbin/ldconfig -r {tree}")
     _sh(f"rm -f {tree}/var/cache/ldconfig/aux-cache")
     tpm_added = _inventory_files(tree) - before_tpm
@@ -1345,6 +1412,8 @@ def main(argv: list[str] | None = None) -> int:
         help="Use ephemeral RSA key instead of vault signer",
     )
     args = parser.parse_args(argv)
+    # Directory and file modes in the image must not depend on the builder's umask.
+    os.umask(0o022)
 
     stage = args.stage
     ws = (

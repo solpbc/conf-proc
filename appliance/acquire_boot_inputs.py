@@ -91,6 +91,66 @@ PINS = [
      "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8", 45571),
 ]
 
+# The evidence collector's GPU leg: NVIDIA's local GPU verifier 2.3.0 and its closure, at the
+# versions the running engine's collector uses. Installed apart from the gateway's pydeps: the
+# two pin different cryptography releases.
+COLLECTOR_PINS = [
+    ("collector-wheels/certifi-2026.5.20-py3-none-any.whl",
+     PYPI + "certifi-2026.5.20-py3-none-any.whl",
+     "3c52e209ba0a4ad7aebe60436a4ab349c39e1e602e8c134221e546902ad25897", 134134),
+    ("collector-wheels/cffi-2.0.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+     PYPI + "cffi-2.0.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+     "3e17ed538242334bf70832644a32a7aae3d83b57567f9fd60a26257e992b79ba", 219572),
+    ("collector-wheels/charset_normalizer-3.4.7-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+     PYPI + "charset_normalizer-3.4.7-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+     "5649fd1c7bade02f320a462fdefd0b4bd3ce036065836d4f42e0de958038e116", 216589),
+    ("collector-wheels/cryptography-43.0.1-cp39-abi3-manylinux_2_28_x86_64.whl",
+     PYPI + "cryptography-43.0.1-cp39-abi3-manylinux_2_28_x86_64.whl",
+     "511f4273808ab590912a93ddb4e3914dfd8a388fed883361b02dea3791f292e1", 3993152),
+    ("collector-wheels/ecdsa-0.18.0-py2.py3-none-any.whl",
+     PYPI + "ecdsa-0.18.0-py2.py3-none-any.whl",
+     "80600258e7ed2f16b9aa1d7c295bd70194109ad5a30fdee0eaeefef1d4c559dd", 142915),
+    ("collector-wheels/elementpath-4.8.0-py3-none-any.whl",
+     PYPI + "elementpath-4.8.0-py3-none-any.whl",
+     "5393191f84969bcf8033b05ec4593ef940e58622ea13cefe60ecefbbf09d58d9", 243271),
+    ("collector-wheels/idna-3.18-py3-none-any.whl",
+     PYPI + "idna-3.18-py3-none-any.whl",
+     "7f952cbe720b688055e3f87de14f5c3e5fdaa8bc3928985c4077ca689de849a2", 65455),
+    ("collector-wheels/lxml-4.9.4-cp312-cp312-manylinux_2_28_x86_64.whl",
+     PYPI + "lxml-4.9.4-cp312-cp312-manylinux_2_28_x86_64.whl",
+     "e8f9f93a23634cfafbad6e46ad7d09e0f4a25a2400e4a64b1b7b7c0fbaa06d9d", 8026189),
+    ("collector-wheels/nv_local_gpu_verifier-2.3.0-py3-none-any.whl",
+     PYPI + "nv_local_gpu_verifier-2.3.0-py3-none-any.whl",
+     "ebee7d44453a19d2c550cbb259f76c7af53343c8878fc33fcabaabb283c4253d", 207213),
+    ("collector-wheels/nvidia_ml_py-12.550.52-py3-none-any.whl",
+     PYPI + "nvidia_ml_py-12.550.52-py3-none-any.whl",
+     "b78a1175f299f702dea17fc468676443f3fefade880202da8d0997df15dc11e2", 39295),
+    ("collector-wheels/pycparser-3.0-py3-none-any.whl",
+     PYPI + "pycparser-3.0-py3-none-any.whl",
+     "b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992", 48172),
+    ("collector-wheels/PyJWT-2.7.0-py3-none-any.whl",
+     PYPI + "PyJWT-2.7.0-py3-none-any.whl",
+     "ba2b425b15ad5ef12f200dc67dd56af4e26de2331f965c5439994dad075876e1", 22366),
+    ("collector-wheels/pyOpenSSL-24.2.1-py3-none-any.whl",
+     PYPI + "pyOpenSSL-24.2.1-py3-none-any.whl",
+     "967d5719b12b243588573f39b0c677637145c7a1ffedcd495a487e58177fbb8d", 58390),
+    ("collector-wheels/requests-2.32.3-py3-none-any.whl",
+     PYPI + "requests-2.32.3-py3-none-any.whl",
+     "70761cfe03c773ceb22aa2f671b4757976145175cdfca038c02654d061d6dcc6", 64928),
+    ("collector-wheels/signxml-3.2.0-py3-none-any.whl",
+     PYPI + "signxml-3.2.0-py3-none-any.whl",
+     "0ee07e3e8fcba8fa0975f5bf9e205e557ea3f0b34ea95b4fde1c897e75c4812c", 57867),
+    ("collector-wheels/six-1.17.0-py2.py3-none-any.whl",
+     PYPI + "six-1.17.0-py2.py3-none-any.whl",
+     "4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", 11050),
+    ("collector-wheels/urllib3-2.7.0-py3-none-any.whl",
+     PYPI + "urllib3-2.7.0-py3-none-any.whl",
+     "9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897", 131087),
+    ("collector-wheels/xmlschema-2.2.3-py3-none-any.whl",
+     PYPI + "xmlschema-2.2.3-py3-none-any.whl",
+     "7d971045eeeb8de183b56bc7530eb8f3d8276072d08017a962c2c34e93bfdd26", 355468),
+]
+
 # Expected digest of the kernel image extracted from the linux-image deb (the value the
 # R1 SBOM recorded, so this also proves the deb is the one the qualified image used).
 BZIMAGE_SHA256 = "78d4c293142d78588d7b31a2fd9272109e2d305d93c8685abeb6cbcb60c39609"
@@ -143,7 +203,7 @@ def main() -> int:
     ws = a.workspace.resolve()
     pkgs = (a.packages or ws / "packages").resolve()
 
-    rows = [fetch(ws, *pin) for pin in PINS]
+    rows = [fetch(ws, *pin) for pin in PINS + COLLECTOR_PINS]
 
     ext = ws / "stock-kernel/extract"
     vmlinuz = ext / "boot/vmlinuz-6.8.0-1058-azure-fde"
@@ -194,6 +254,14 @@ def main() -> int:
         # Console scripts carry the build host's interpreter path in their shebang and nothing in
         # the image runs them; the gateway only imports these packages.
         shutil.rmtree(target / "bin", ignore_errors=True)
+
+    collector = ws / "r1-build/collector-site/target"
+    if not collector.exists():
+        collector.mkdir(parents=True)
+        wheels = sorted(str(ws / rel) for rel, *_ in COLLECTOR_PINS)
+        sh("uv", "pip", "install", "--no-index", "--no-deps", "--no-cache", "--python", "3.12",
+           "--python-platform", "x86_64-manylinux_2_28", "--target", str(collector), *wheels)
+        shutil.rmtree(collector / "bin", ignore_errors=True)
 
     (ws / "boot-inputs-verified.json").write_text(json.dumps(rows, indent=2) + "\n")
     print(f"{len(rows)} pinned boot/driver/tool inputs verified; vmlinuz matches {BZIMAGE_SHA256[:12]}")

@@ -157,6 +157,14 @@
    "sha256": null,
    "size_bytes": null,
    "files": null
+  },
+  "COLLECTOR_SITE": {
+   "filename": "target",
+   "path": "r1-build/collector-site/target",
+   "url": "PyPI nv-local-gpu-verifier 2.3.0 and its closure (18 wheels by hash, appliance/acquire_boot_inputs.py COLLECTOR_PINS)",
+   "sha256": null,
+   "size_bytes": null,
+   "files": null
   }
  }
 }

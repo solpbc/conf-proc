@@ -13,11 +13,13 @@ import socket
 import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
 import urllib.error
 from pathlib import Path
+from unittest import mock
 
 from cryptography import x509
 from OpenSSL import SSL, crypto
@@ -657,6 +659,88 @@ class CollectorVendorImportTest(unittest.TestCase):
                     os.environ.pop("SPP_NVIDIA_VERIFIER_SRC", None)
                 else:
                     os.environ["SPP_NVIDIA_VERIFIER_SRC"] = environment_backup
+
+
+class CollectorAmdChainTest(unittest.TestCase):
+    """The AMD leg without snpguest, on real Azure evidence: the report is the one
+    the HCL report embeds, ARK/ASK are the pinned roots, only the VCEK is fetched."""
+
+    FIXTURES = ROOT / "test" / "fixtures" / "spp-attest-azure"
+
+    def setUp(self) -> None:
+        import ratls_collector
+
+        self.collector = ratls_collector
+        self.amd = ratls_collector._amd_verifier()
+        self.hcl = (self.FIXTURES / "hcl_report.bin").read_bytes()
+        self.report = self.amd.parse_hcla(self.hcl).report
+        self.vcek_pem = (self.FIXTURES / "vcek.pem").read_bytes()
+        self.temp = tempfile.TemporaryDirectory()
+        self.certs = Path(self.temp.name) / "certs"
+        self.certs.mkdir()
+        self.cache = Path(self.temp.name) / "cache"
+        self.cache_backup = ratls_collector.VCEK_CACHE_DIR
+        ratls_collector.VCEK_CACHE_DIR = str(self.cache)
+        self.fetches: list[str] = []
+
+    def tearDown(self) -> None:
+        self.collector.VCEK_CACHE_DIR = self.cache_backup
+        self.temp.cleanup()
+
+    def _serve(self, pem: bytes):
+        der = self.amd.x509.load_pem_x509_certificate(pem).public_bytes(
+            self.amd.serialization.Encoding.DER
+        )
+        fetches = self.fetches
+
+        class Response(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+        def urlopen(url, timeout=None):
+            fetches.append(url)
+            return Response(der)
+
+        return mock.patch.object(self.collector.urllib.request, "urlopen", urlopen)
+
+    def test_embedded_report_is_the_report_snpguest_wrote(self) -> None:
+        self.assertEqual(self.report, (self.FIXTURES / "report.bin").read_bytes())
+
+    def test_cached_vcek_needs_no_fetch(self) -> None:
+        self.cache.mkdir()
+        (self.cache / "vcek.pem").write_bytes(self.vcek_pem)
+        with mock.patch.object(
+            self.collector.urllib.request, "urlopen", side_effect=AssertionError("fetched")
+        ):
+            self.collector._amd_chain(self.certs, self.report)
+        for name in ("ark.pem", "ask.pem"):
+            self.assertEqual(
+                (self.certs / name).read_bytes(), (ROOT / "roots/amd/Genoa" / name).read_bytes()
+            )
+        self.assertEqual((self.certs / "vcek.pem").read_bytes(), self.vcek_pem)
+
+    def test_stale_cache_refetches_once_and_recaches(self) -> None:
+        self.cache.mkdir()
+        (self.cache / "vcek.pem").write_bytes((ROOT / "roots/amd/Milan/ask.pem").read_bytes())
+        with self._serve(self.vcek_pem):
+            self.collector._amd_chain(self.certs, self.report)
+        self.assertEqual(len(self.fetches), 1)
+        self.assertIn("kdsintf.amd.com/vcek/v1/Genoa/", self.fetches[0])
+        self.assertEqual(
+            self.amd.x509.load_pem_x509_certificate((self.cache / "vcek.pem").read_bytes()),
+            self.amd.x509.load_pem_x509_certificate(self.vcek_pem),
+        )
+
+    def test_a_vcek_that_did_not_sign_the_report_is_refused(self) -> None:
+        tampered = bytearray(self.report)
+        tampered[0x50] ^= 1  # REPORT_DATA: the VCEK signature no longer covers it
+        with self._serve(self.vcek_pem):
+            with self.assertRaises(self.amd.VerificationError):
+                self.collector._amd_chain(self.certs, bytes(tampered))
+        self.assertFalse((self.cache / "vcek.pem").exists())
 
 
 class RoutedRelayTest(unittest.TestCase):

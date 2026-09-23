@@ -34,7 +34,7 @@ from spp_appliance import (
     write_historical_report,
 )
 from populate_manifest import populate
-from spp_appliance import generate_signer, unit_gateway
+from spp_appliance import COLLECTOR_SH, copy_tracked_source, generate_signer, required_inputs, unit_gateway
 from spp_image_sbom import generate_image_sbom
 from spp_image_sbom_check import check_image_sbom
 
@@ -343,6 +343,20 @@ class ApplianceProdUnitsTest(unittest.TestCase):
         self.assertIn("Slice=sppgateway.slice", gw)
         self.assertNotIn("secret", gw.lower())  # the gateway is handed no credential of any kind
         self.assertNotIn("Slice=", unit_sglang("2h"))
+        for text in (unit_sglang("prod"), unit_asr("prod"), gw):
+            self.assertIn("Restart=on-failure", text)
+        self.assertIn("Restart=no", unit_gateway("2h"))
+
+    def test_prod_collector_is_the_sealed_one(self) -> None:
+        gw = unit_gateway("prod")
+        self.assertIn("--collector-command /opt/spp/run-collector.sh", gw)
+        self.assertIn("--collector-command /opt/conf-proc/run-collector.sh", unit_gateway("2h"))
+        self.assertIn("COLLECTOR_SITE", required_inputs("prod"))
+        self.assertNotIn("sudo", COLLECTOR_SH)  # the gateway is root; the image carries no sudo
+        self.assertIn("cd /run/gw/collector", COLLECTOR_SH)  # the vendor verifier logs to its cwd
+        self.assertIn("SPP_VCEK_CACHE_DIR=/run/gw/", COLLECTOR_SH)  # /var/tmp is read-only
+        # The quote carries the fourteen registers the owner appraises, 11-14 included.
+        self.assertIn("SPP_PCR_LIST=sha256:0,2,4,7,8,9,11,12,13,14,15,16,22,23", COLLECTOR_SH)
 
     def test_signer_directory_is_required(self) -> None:
         with tempfile.TemporaryDirectory(dir="/var/tmp") as tmpdir:
@@ -418,6 +432,28 @@ class ApplianceGitTest(unittest.TestCase):
             (repo / "untracked.txt").write_text("untracked")
             with self.assertRaises(SystemExit):
                 require_clean_repo(repo)
+
+    def test_image_source_is_what_head_tracks(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as tmpdir:
+            repo, dest = Path(tmpdir) / "repo", Path(tmpdir) / "dest"
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            (repo / ".gitignore").write_text("build/\n")
+            (repo / "tool.sh").write_text("#!/bin/sh\n")
+            (repo / "tool.sh").chmod(0o700)
+            (repo / "lib.py").write_text("x = 1\n")
+            (repo / "test").mkdir()
+            (repo / "test/case.py").write_text("")
+            subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@solstone.app", "-c",
+                            "user.name=T", "commit", "-qm", "init"], check=True)
+            (repo / "build").mkdir()  # what `make ci` leaves behind: ignored, so porcelain stays clean
+            (repo / "build/out.o").write_text("")
+            require_clean_repo(repo)
+            copy_tracked_source(repo, dest)
+            self.assertEqual(sorted(p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file()),
+                             [".gitignore", "lib.py", "tool.sh"])
+            self.assertEqual((dest / "tool.sh").stat().st_mode & 0o777, 0o755)
+            self.assertEqual((dest / "lib.py").stat().st_mode & 0o777, 0o644)
 
 
 class ApplianceDiskFormulasTest(unittest.TestCase):
