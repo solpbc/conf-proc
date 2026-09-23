@@ -8,9 +8,9 @@ this computes the SHA-256 bank values of the registers the image itself determin
 quote's PCR file, prints them beside the quoted values:
 
   PCR 4   firmware: "Calling EFI Application from Boot Option", separator, the UKI's Authenticode
-          digest; a second candidate adds the embedded kernel's, for a stub that LoadImage()s it
-  PCR 9   the Linux EFI stub: the initrd (tagged event "Linux initrd"), then candidates with the
-          kernel's LoadOptions (the command line as UTF-16LE)
+          digest (a second candidate adds the embedded kernel's, for a stub that LoadImage()s it)
+  PCR 9   the Linux EFI stub: its LoadOptions (the command line as NUL-terminated UTF-16LE), then
+          the initrd (tagged event "Linux initrd")
   PCR 11  systemd-stub's UKI section measurements plus systemd-pcrphase's boot-phase words,
           computed by systemd-measure for each phase the quote could have been taken in
   PCR 12, 13, 14   zero: no credentials, system extensions or shim
@@ -177,7 +177,15 @@ def derive(uki_path: Path, pefile, machine_id: str) -> dict[str, object]:
         "14": {"zero": ZERO.hex()},
         "15": {"machine-id": chain(hashlib.sha256(f"machine-id:{machine_id}".encode()).digest()).hex()},
     }
+    # One expected value per register: the measurement conventions the qualification H100 exhibits
+    # (firmware measures the UKI alone; the kernel measures its NUL-terminated UTF-16 load options
+    # before the initrd; quotes are taken at sysinit:ready). The other candidates stay for
+    # diagnosing a platform or stub that measures differently.
+    expected = {"4": candidates["4"]["uki"], "9": candidates["9"]["options-nul+initrd"],
+                "11": candidates["11"]["sysinit:ready"], "12": ZERO.hex(), "13": ZERO.hex(),
+                "14": ZERO.hex(), "15": candidates["15"]["machine-id"]}
     return {
+        "expected": expected,
         "uki_sha256": hashlib.sha256(uki).hexdigest(),
         "uki_authenticode_sha256": uki_hash.hex(),
         "kernel_authenticode_sha256": kernel_hash.hex(),
@@ -210,15 +218,16 @@ def main(argv: list[str] | None = None) -> int:
         quoted = parse_quote_pcrs(a.quote.read_bytes())
         table = {}
         for pcr in sorted(quoted):
-            options = result["candidates"].get(str(pcr))
-            if options is None:
-                table[pcr] = {"quoted": quoted[pcr], "derived": "platform (vendor-vouched)"}
+            want = result["expected"].get(str(pcr))
+            if want is None:
+                kind = "unused (zero or all-FF expected)" if pcr in (8, 16, 22, 23) else "platform (vendor-vouched)"
+                table[pcr] = {"quoted": quoted[pcr], "derived": kind}
                 continue
-            hits = [label for label, value in options.items() if value == quoted[pcr]]
-            table[pcr] = {"quoted": quoted[pcr], "match": hits[0] if hits else None}
+            other = [label for label, value in result["candidates"][str(pcr)].items() if value == quoted[pcr]]
+            table[pcr] = {"quoted": quoted[pcr], "expected": want, "match": want == quoted[pcr],
+                          "candidate_matching": other[0] if other else None}
         result["match"] = table
-        derived = [p for p in table if isinstance(result["candidates"].get(str(p)), dict)]
-        result["all_derived_match"] = all(table[p].get("match") for p in derived)
+        result["all_derived_match"] = all(r.get("match") for r in table.values() if "expected" in r)
     print(json.dumps(result, indent=1, sort_keys=True))
     return 0 if result.get("all_derived_match", True) else 1
 
