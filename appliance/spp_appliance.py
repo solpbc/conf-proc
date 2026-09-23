@@ -1376,6 +1376,36 @@ def build_uki(
     return signed
 
 
+# Host tools whose output reaches the image or the UKI. The recipe pins its inputs, not this
+# environment, so every build records it: a rebuild matches only on the same package versions
+# (glibc's libc.a is linked into the init; ldconfig and depmod write files into the rootfs).
+BUILD_TOOLS: Final = ("/usr/bin/gcc", "/usr/libexec/gcc/x86_64-linux-gnu/13/cc1", "/usr/bin/as", "/usr/bin/ld",
+                      "/usr/lib/x86_64-linux-gnu/libc.a", "/sbin/ldconfig", "/sbin/depmod", "/usr/bin/mksquashfs",
+                      "/usr/sbin/veritysetup", "/usr/bin/gzip", "/usr/sbin/sgdisk", "/usr/bin/sbsign",
+                      "/usr/bin/dpkg-deb", "/usr/bin/python3", "/usr/bin/bwrap")
+
+
+def build_environment() -> list[dict[str, str]]:
+    rows = []
+    for tool in BUILD_TOOLS:
+        real = Path(tool).resolve()
+        owner = subprocess.run(["dpkg-query", "-S", str(real)], capture_output=True, text=True)
+        package = owner.stdout.split(":", 1)[0].strip() if owner.returncode == 0 else ""
+        # merged /usr: dpkg may record the path under either prefix
+        for alias in (tool, tool.replace("/usr/sbin/", "/sbin/"), tool.replace("/sbin/", "/usr/sbin/")):
+            if package:
+                break
+            owner = subprocess.run(["dpkg-query", "-S", alias], capture_output=True, text=True)
+            package = owner.stdout.split(":", 1)[0].strip() if owner.returncode == 0 else ""
+        version = ""
+        if package:
+            version = subprocess.run(["dpkg-query", "-W", "-f=${Version}", package.split(",")[0]],
+                                     capture_output=True, text=True).stdout.strip()
+        rows.append({"tool": tool, "resolved": str(real), "sha256": spp_disk.sha256_file(real),
+                     "package": package, "version": version})
+    return rows
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="SPP sealed appliance build recipe")
     parser.add_argument(
@@ -1602,6 +1632,7 @@ def main(argv: list[str] | None = None) -> int:
             "partitions": layout["partitions"],
         },
         "partuuids": partuuids,
+        "build_environment": build_environment(),
     }
 
     manifest_file = work / "build-manifest.json"
