@@ -1213,8 +1213,10 @@ class RetiredPortalCredentialScanTest(unittest.TestCase):
         ]
         self.assertEqual(len(positive_hits), len(needles))
 
+        # Tracked files only: that is what the appliance bakes (its build refuses a dirty
+        # tree). A recursive grep also read .git/COMMIT_EDITMSG, .venv and stray files.
         negative_result = subprocess.run(
-            ["grep", "-rnI", "-F", "-f", str(fixture_path), "."],
+            ["git", "grep", "-nI", "-F", "-f", str(fixture_path)],
             cwd=str(ROOT),
             capture_output=True,
             text=True,
