@@ -930,15 +930,19 @@ def assemble_serving_rootfs(
         }
     )
 
-    # libmpdec gap bridge
+    # libmpdec gap bridge: the ASR root's python3.10 _decimal needs libmpdec.so.3. Expose only
+    # libmpdec, from the ASR root itself, on the ASR unit's LD_LIBRARY_PATH (the whole ASR lib dir
+    # would shadow the base libc). The files must exist: an empty glob here once shipped an image
+    # whose ASR could not import lhotse, and it failed only on the GPU host.
     libmpdec_dir = tree / "opt/asr-libs"
     libmpdec_dir.mkdir(parents=True, exist_ok=True)
-    for src in (tree / "usr/lib/x86_64-linux-gnu").glob("libmpdec*.so.2*"):
-        _sh(f"cp -a {src} {libmpdec_dir}/")
-    for src in libmpdec_dir.glob("libmpdec.so.2*"):
-        _sh(f"ln -sf {src.name} {libmpdec_dir}/libmpdec.so.3")
-    for src in libmpdec_dir.glob("libmpdec++.so.2*"):
-        _sh(f"ln -sf {src.name} {libmpdec_dir}/libmpdec++.so.3")
+    asr_lib = tree / "opt/asr-root/usr/lib/x86_64-linux-gnu"
+    for name in ("libmpdec.so.2.5.1", "libmpdec++.so.2.5.1"):
+        if not (asr_lib / name).is_file():
+            raise SystemExit(f"ASR root lacks {name}")
+        _sh(f"cp -a {asr_lib / name} {libmpdec_dir}/")
+    _sh(f"ln -sf libmpdec.so.2.5.1 {libmpdec_dir}/libmpdec.so.3")
+    _sh(f"ln -sf libmpdec++.so.2.5.1 {libmpdec_dir}/libmpdec++.so.3")
 
     # Qwen model
     qwen = paths["QWEN"]
@@ -1226,6 +1230,8 @@ def assemble_rootfs_prod(
             }
         )
 
+    smoke_imports(tree)
+
     # Ensure all files currently in tree are accounted for
     all_current = _inventory_files(tree)
     claimed: set[str] = set()
@@ -1244,6 +1250,35 @@ def assemble_rootfs_prod(
             }
         )
     return tree, origins
+
+
+def smoke_imports(tree: Path) -> None:
+    """Each interpreter in the image imports what its unit runs, executed inside the image tree
+    with that unit's environment and no network. A missing library or module fails the build
+    here rather than restart-looping on the H100."""
+    base = ["bwrap", "--ro-bind", str(tree), "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/run",
+            "--tmpfs", "/tmp", "--unshare-net", "--die-with-parent", "--chdir", "/run", "--", "/usr/bin/env", "-i",
+            "PATH=/usr/bin:/bin", "HOME=/run", "TMPDIR=/tmp", "PYTHONNOUSERSITE=1", "PYTHONDONTWRITEBYTECODE=1",
+            "HF_HUB_OFFLINE=1", "TRANSFORMERS_OFFLINE=1"]
+    checks = [
+        ("asr", ["PYTHONPATH=/opt/asr-site-packages:/opt/conf-proc", "LD_LIBRARY_PATH=/opt/asr-libs",
+                 "/opt/asr-root/usr/bin/python3.10", "-c",
+                 "import _decimal, lhotse, nemo.collections.asr, asr_shim"]),
+        ("gateway", ["PYTHONPATH=/opt/conf-proc:/opt/spp/pydeps", "/usr/bin/python3", "-c",
+                     "import OpenSSL, cryptography, ratls_gateway"]),
+        ("collector", ["PYTHONPATH=/opt/spp/collector-site", "SPP_NVIDIA_VERIFIER_SRC=/opt/spp/collector-site",
+                       "/usr/bin/python3", "-c",
+                       "import sys; sys.path.insert(0, '/opt/conf-proc'); import ratls_collector as c; "
+                       "c._vendor_import(); c._amd_verifier()"]),
+        # the unit's cache environment; USER because the build sandbox's uid has no passwd entry
+        ("sglang", ["USER=root", "XDG_CACHE_HOME=/run/.cache", "HF_HOME=/run/hf",
+                    "TORCHINDUCTOR_CACHE_DIR=/run/inductor", "TRITON_CACHE_DIR=/run/triton",
+                    "OUTLINES_CACHE_DIR=/run/outlines", "/usr/bin/python3", "-c", "import sglang.launch_server"]),
+    ]
+    for name, argv in checks:
+        result = subprocess.run(base + argv, capture_output=True, text=True, timeout=900)
+        if result.returncode != 0:
+            raise SystemExit(f"{name} imports fail inside the image:\n{result.stderr[-2000:]}")
 
 
 def compile_r1_init(work: Path) -> Path:
