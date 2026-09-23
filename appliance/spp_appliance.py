@@ -1003,8 +1003,10 @@ def bake_gpu(
         )
 
     before_copy = _inventory_files(tree)
+    # Both destinations must exist first, or cp makes lib/modules a copy of the kernel's own dir.
+    _sh(f"mkdir -p {tree}/lib/modules {tree}/lib/firmware")
     _sh(f"cp -a --remove-destination {extract_dir}/lib/modules/{kernel_release} {tree}/lib/modules/")
-    _sh(f"cp -a --remove-destination {extract_dir}/lib/firmware {tree}/lib/")
+    _sh(f"cp -a --remove-destination {extract_dir}/lib/firmware/. {tree}/lib/firmware/")
     modprobe_src = a24_pkg / "usr/bin/nvidia-modprobe"
     if modprobe_src.exists():
         _sh(f"cp -a --remove-destination {modprobe_src} {tree}/usr/bin/")
