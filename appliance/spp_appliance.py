@@ -10,7 +10,6 @@ import json
 import os
 from pathlib import Path
 import shutil
-import stat
 import subprocess
 import sys
 from typing import Final
@@ -201,6 +200,10 @@ Restart=no
 [Install]
 WantedBy=multi-user.target
 """ % PARAKEET_SHA
+
+
+def canonical_dumps(value: object) -> str:
+    return json.dumps(value, indent=1, sort_keys=True) + "\n"
 
 
 def _require(unit: str, deps: str, slice_name: str) -> str:
