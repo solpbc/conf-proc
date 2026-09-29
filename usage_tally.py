@@ -15,6 +15,8 @@ from typing import Any
 
 TOKEN_MAX = 2**31 - 1
 USAGE_OBJECT_MAX_BYTES = 4096
+KEY_MAX_BYTES = 4096
+PARSER_DEPTH_MAX = 64
 
 
 def device_label(key: bytes, material: str) -> str:
@@ -27,6 +29,8 @@ class UsageWalker:
     def __init__(self) -> None:
         self.last: tuple[int, int] | None = None
         self.bad: bool = False
+        # Buffer or depth overflow: do not record totals for this response.
+        self.disabled: bool = False
         self._depth = 0
         self._in_string = False
         self._escaped = False
@@ -41,29 +45,64 @@ class UsageWalker:
         self._usage_buffer = bytearray()
 
     def feed(self, data: bytes) -> None:
+        if self.disabled:
+            return
         try:
             self._feed(data)
         except Exception:
             self.bad = True
 
+    def _disable_accounting(self) -> None:
+        # Overflow drops parser memory. feed() does not raise, so forwarded
+        # response bytes stay unchanged.
+        self.disabled = True
+        self.bad = True
+        self._depth = 0
+        self._in_string = False
+        self._escaped = False
+        self._stack.clear()
+        self._expecting_key = False
+        self._capturing_key = False
+        self._key_buffer.clear()
+        self._current_key = None
+        self._expecting_value = False
+        self._capturing_usage = False
+        self._usage_buffer.clear()
+
+    def _append_key(self, byte: int) -> bool:
+        if len(self._key_buffer) >= KEY_MAX_BYTES:
+            self._disable_accounting()
+            return False
+        self._key_buffer.append(byte)
+        return True
+
+    def _push(self, kind: str) -> bool:
+        if self._depth >= PARSER_DEPTH_MAX or len(self._stack) >= PARSER_DEPTH_MAX:
+            self._disable_accounting()
+            return False
+        self._stack.append(kind)
+        self._depth += 1
+        return True
+
     def _feed(self, data: bytes) -> None:
         for b in data:
+            if self.disabled:
+                return
             if self._capturing_usage:
+                if len(self._usage_buffer) >= USAGE_OBJECT_MAX_BYTES:
+                    self._disable_accounting()
+                    return
                 self._usage_buffer.append(b)
-                if len(self._usage_buffer) > USAGE_OBJECT_MAX_BYTES:
-                    self.bad = True
-                    self._capturing_usage = False
-                    self._usage_buffer.clear()
 
             if self._in_string:
                 if self._escaped:
                     self._escaped = False
-                    if self._capturing_key:
-                        self._key_buffer.append(b)
+                    if self._capturing_key and not self._append_key(b):
+                        return
                 elif b == ord(b"\\"):
                     self._escaped = True
-                    if self._capturing_key:
-                        self._key_buffer.append(b)
+                    if self._capturing_key and not self._append_key(b):
+                        return
                 elif b == ord(b'"'):
                     self._in_string = False
                     if self._capturing_key:
@@ -71,8 +110,8 @@ class UsageWalker:
                         self._current_key = self._key_buffer.decode("utf-8", errors="replace")
                         self._key_buffer.clear()
                 else:
-                    if self._capturing_key:
-                        self._key_buffer.append(b)
+                    if self._capturing_key and not self._append_key(b):
+                        return
                 continue
 
             if b == ord(b'"'):
@@ -106,12 +145,12 @@ class UsageWalker:
             if b == ord(b"{"):
                 if self._depth == 0 or (self._stack and self._stack[-1] == "obj"):
                     self._expecting_key = True
-                self._stack.append("obj")
-                self._depth += 1
+                if not self._push("obj"):
+                    return
                 self._expecting_value = False
             elif b == ord(b"["):
-                self._stack.append("arr")
-                self._depth += 1
+                if not self._push("arr"):
+                    return
                 self._expecting_value = False
             elif b == ord(b"}"):
                 if self._depth > 0:
@@ -179,25 +218,29 @@ class ChatTally:
         return device_label(self._key, credential)
 
     def commit_response(self, label: str, walker: UsageWalker, truncated: bool) -> None:
+        disabled = walker.disabled
         last = walker.last
         bad = walker.bad
         walker._usage_buffer.clear()
         with self._lock:
-            if not truncated:
-                if not bad and last is not None:
+            if disabled:
+                self._incomplete += 1
+                return
+            if truncated:
+                # A later malformed usage object must not drop the last valid
+                # cumulative sample. Overflow sets disabled and is handled above.
+                if last is not None:
                     pt, ct = last
                     self._prompt_tokens[label] = self._prompt_tokens.get(label, 0) + pt
                     self._completion_tokens[label] = self._completion_tokens.get(label, 0) + ct
-                else:
-                    self._incomplete += 1
+                self._incomplete += 1
+                return
+            if not bad and last is not None:
+                pt, ct = last
+                self._prompt_tokens[label] = self._prompt_tokens.get(label, 0) + pt
+                self._completion_tokens[label] = self._completion_tokens.get(label, 0) + ct
             else:
-                if not bad and last is not None:
-                    pt, ct = last
-                    self._prompt_tokens[label] = self._prompt_tokens.get(label, 0) + pt
-                    self._completion_tokens[label] = self._completion_tokens.get(label, 0) + ct
-                    self._incomplete += 1
-                else:
-                    self._incomplete += 1
+                self._incomplete += 1
 
     def render(self) -> str:
         with self._lock:

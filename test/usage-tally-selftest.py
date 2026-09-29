@@ -28,7 +28,10 @@ from ratls_gateway import (
     _http_relay,
 )
 from usage_tally import (
+    KEY_MAX_BYTES,
+    PARSER_DEPTH_MAX,
     TOKEN_MAX,
+    USAGE_OBJECT_MAX_BYTES,
     ChatTally,
     LoopbackMetricsServer,
     UsageWalker,
@@ -698,6 +701,121 @@ class UsageTallyTest(unittest.TestCase):
         self.assertEqual(len(chat_devices), 4097)
         self.assertEqual(len(asr_devices), 4098)
         self.assertIn("unlabeled", asr_devices)
+
+    def test_parser_overflow_bounds_buffers_and_disables_accounting(self) -> None:
+        key_walker = UsageWalker()
+        key_walker.feed(b'{"' + b"x" * 1_048_576)
+        self.assertTrue(key_walker.disabled)
+        self.assertLessEqual(len(key_walker._key_buffer), KEY_MAX_BYTES)
+        self.assertLess(len(key_walker._key_buffer), 1_048_576)
+        self.assertLessEqual(len(key_walker._usage_buffer), USAGE_OBJECT_MAX_BYTES)
+        self.assertLessEqual(len(key_walker._stack), PARSER_DEPTH_MAX)
+
+        depth_walker = UsageWalker()
+        depth_walker.feed(b"[" * 100_000)
+        self.assertTrue(depth_walker.disabled)
+        self.assertLessEqual(len(depth_walker._stack), PARSER_DEPTH_MAX)
+        self.assertLess(len(depth_walker._stack), 100_000)
+        self.assertLessEqual(len(depth_walker._key_buffer), KEY_MAX_BYTES)
+        self.assertLessEqual(depth_walker._depth, PARSER_DEPTH_MAX)
+
+        usage_walker = UsageWalker()
+        usage_walker.feed(
+            b'{"usage":{"pad":"' + b"x" * (USAGE_OBJECT_MAX_BYTES + 10) + b'"}}'
+        )
+        self.assertTrue(usage_walker.disabled)
+        self.assertLessEqual(len(usage_walker._usage_buffer), USAGE_OBJECT_MAX_BYTES)
+        self.assertLessEqual(len(usage_walker._key_buffer), KEY_MAX_BYTES)
+        self.assertLessEqual(len(usage_walker._stack), PARSER_DEPTH_MAX)
+
+        tally = ChatTally(b"\x0e" * 32)
+        label = tally.label_for("cred-overflow")
+        held = UsageWalker()
+        held.feed(b'{"usage":{"prompt_tokens":3,"completion_tokens":4}}')
+        self.assertEqual(held.last, (3, 4))
+        held.feed(b"[" * 100_000)
+        self.assertTrue(held.disabled)
+        self.assertEqual(held.last, (3, 4))
+        tally.commit_response(label, held, truncated=True)
+        render = tally.render()
+        self.assertNotIn(f'device="{label}"', render)
+        self.assertIn("spp_chat_incomplete_accounting_total 1", render)
+
+        finished = UsageWalker()
+        finished.feed(b'{"usage":{"prompt_tokens":3,"completion_tokens":4}}')
+        finished.feed(b'{"' + b"x" * 1_048_576)
+        self.assertTrue(finished.disabled)
+        tally.commit_response(label, finished, truncated=False)
+        render = tally.render()
+        self.assertNotIn(f'device="{label}"', render)
+        self.assertIn("spp_chat_incomplete_accounting_total 2", render)
+
+    def test_truncated_malformed_usage_counts_last_valid_sample_once(self) -> None:
+        tally = ChatTally(b"\x0f" * 32)
+        label = tally.label_for("cred-last-valid")
+        walker = UsageWalker()
+        walker.feed(b'{"usage":{"prompt_tokens":3,"completion_tokens":4}}')
+        walker.feed(b'{"usage":{"prompt_tokens":true,"completion_tokens":1}}')
+        self.assertEqual(walker.last, (3, 4))
+        self.assertTrue(walker.bad)
+        self.assertFalse(walker.disabled)
+        tally.commit_response(label, walker, truncated=True)
+        render = tally.render()
+        self.assertIn(f'spp_chat_prompt_tokens_total{{device="{label}"}} 3', render)
+        self.assertIn(f'spp_chat_completion_tokens_total{{device="{label}"}} 4', render)
+        self.assertIn("spp_chat_incomplete_accounting_total 1", render)
+
+    def test_parser_overflow_does_not_change_forwarded_bytes(self) -> None:
+        key = b"\x10" * 32
+        tally = ChatTally(key)
+        authorizer = DummyAuthorizer()
+        cred = "cred-overflow-bytes"
+        label = tally.label_for(cred)
+        bodies = (
+            b'{"' + b"x" * 1_048_576,
+            b"[" * 100_000,
+        )
+        for i, body in enumerate(bodies, start=1):
+            resp = (
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: application/json\r\n"
+                + f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
+                + body
+            )
+
+            def handle(server: MockUpstream, conn: socket.socket, payload=resp) -> None:
+                _read_http_request(conn)
+                conn.sendall(payload)
+
+            server = MockUpstream(handle)
+            try:
+                req = (
+                    b"POST /v1/chat/completions HTTP/1.1\r\n"
+                    b"Host: 127.0.0.1\r\n"
+                    b"Connection: close\r\n"
+                    b"Authorization: Bearer " + cred.encode("ascii") + b"\r\n"
+                    b"Content-Length: 2\r\n\r\n{}"
+                )
+
+                def relay_call(client_sock: socket.socket) -> None:
+                    _http_relay(
+                        client_sock,
+                        ("127.0.0.1", server.port),
+                        None,
+                        10,
+                        authorizer,
+                        60.0,
+                        time.monotonic(),
+                        tally,
+                    )
+
+                client_bytes = _run_client_request(relay_call, req)
+                self.assertEqual(client_bytes, resp)
+                render = tally.render()
+                self.assertNotIn(f'device="{label}"', render)
+                self.assertIn(f"spp_chat_incomplete_accounting_total {i}", render)
+            finally:
+                server.close()
 
 
 if __name__ == "__main__":
