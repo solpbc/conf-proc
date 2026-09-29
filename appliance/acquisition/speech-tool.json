@@ -1,0 +1,32 @@
+[
+  {
+    "filename": "espeak-ng_1.51+dfsg-12build1_amd64.deb",
+    "url": "https://snapshot.ubuntu.com/ubuntu/20260615T120000Z/pool/universe/e/espeak-ng/espeak-ng_1.51+dfsg-12build1_amd64.deb",
+    "sha256": "ffeac730f1f43b5cdbca708a8215d6b7310bf3bd40d7dcf0affd6a62f86aa6df",
+    "size_bytes": 364018
+  },
+  {
+    "filename": "espeak-ng-data_1.51+dfsg-12build1_amd64.deb",
+    "url": "https://snapshot.ubuntu.com/ubuntu/20260615T120000Z/pool/main/e/espeak-ng/espeak-ng-data_1.51+dfsg-12build1_amd64.deb",
+    "sha256": "60057f68ba6f79e69aafd943e67e7d9a844de0531e77dc86b1971c43782e4d88",
+    "size_bytes": 4537670
+  },
+  {
+    "filename": "libespeak-ng1_1.51+dfsg-12build1_amd64.deb",
+    "url": "https://snapshot.ubuntu.com/ubuntu/20260615T120000Z/pool/main/e/espeak-ng/libespeak-ng1_1.51+dfsg-12build1_amd64.deb",
+    "sha256": "aab65c41ccd62c3998d0fc45cdb9e7e3a2d91031d7ee51b913775718b3f0f60e",
+    "size_bytes": 206490
+  },
+  {
+    "filename": "libpcaudio0_1.2-2build3_amd64.deb",
+    "url": "https://snapshot.ubuntu.com/ubuntu/20260615T120000Z/pool/main/p/pcaudiolib/libpcaudio0_1.2-2build3_amd64.deb",
+    "sha256": "a0528a39edac8a05174a219315392422e54ce9f85364a3ca001fdbf25da2dc4e",
+    "size_bytes": 9144
+  },
+  {
+    "filename": "libsonic0_0.2.0-13build1_amd64.deb",
+    "url": "https://snapshot.ubuntu.com/ubuntu/20260615T120000Z/pool/main/s/sonic/libsonic0_0.2.0-13build1_amd64.deb",
+    "sha256": "2cdd82b71f417cd41725452e91649708e129b4f706eca7a11a7815acb0ed4ad1",
+    "size_bytes": 10338
+  }
+]

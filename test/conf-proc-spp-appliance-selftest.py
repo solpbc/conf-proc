@@ -37,6 +37,7 @@ from populate_manifest import populate
 from spp_appliance import COLLECTOR_SH, build_initramfs_r1, copy_tracked_source, generate_signer, required_inputs, unit_gateway
 from spp_image_sbom import generate_image_sbom
 from spp_image_sbom_check import check_image_sbom
+from test_hardening import HardeningTests
 
 
 class ApplianceCmdlineTest(unittest.TestCase):

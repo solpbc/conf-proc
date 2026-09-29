@@ -263,6 +263,10 @@ def main() -> int:
            "--python-platform", "x86_64-manylinux_2_28", "--target", str(collector), *wheels)
         shutil.rmtree(collector / "bin", ignore_errors=True)
 
+    from normalize_wheels import normalize
+    normalize(target)
+    normalize(collector)
+
     (ws / "boot-inputs-verified.json").write_text(json.dumps(rows, indent=2) + "\n")
     print(f"{len(rows)} pinned boot/driver/tool inputs verified; vmlinuz matches {BZIMAGE_SHA256[:12]}")
     return 0

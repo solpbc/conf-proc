@@ -52,7 +52,15 @@ report() {
     echo; echo "==== SPP-TRACE $1 uptime=$(cut -d' ' -f1 /proc/uptime) ===="
     for u in spp-egress spp-gpu-bringup sglang spp-asr spp-gateway systemd-networkd; do
       echo "unit $u: active=$(systemctl is-active $u.service) result=$(systemctl show -p Result --value $u.service) restarts=$(systemctl show -p NRestarts --value $u.service)"
+      pid=$(systemctl show -p MainPID --value $u.service)
+      if [ "$pid" != 0 ] && [ -r "/proc/$pid/status" ]; then
+        grep -E '^(Name|Uid|Gid|CapEff|NoNewPrivs):' "/proc/$pid/status"
+      fi
     done
+    echo "-- listeners --"; ss -ltnp 2>&1
+    echo "-- egress --"; nft list ruleset 2>&1
+    echo "-- local synthetic-workload metrics --"
+    /usr/bin/python3 /opt/spp/trace-metrics.py
     echo "-- addr --"; ip -brief addr 2>&1
     echo "-- mem --"; free -m 2>&1 | head -3
     echo "-- gpu --"; nvidia-smi --query-gpu=memory.used,memory.total --format=csv 2>&1 | head -3
@@ -66,6 +74,36 @@ report() {
 }
 sleep 480; report t8
 sleep 720; report t20
+sleep 300; report before-asr-restart
+systemctl restart spp-asr.service
+sleep 300; report after-asr-restart
+systemctl restart spp-gateway.service
+sleep 300; report after-gateway-restart
+sleep 300; report t40
+"""
+
+TRACE_METRICS: Final = """#!/usr/bin/python3
+# Use diagnostic images only with synthetic qualification traffic. This exporter
+# is never installed in the serving image.
+import urllib.request
+ports = set()
+with open('/proc/net/tcp') as table:
+    for line in list(table)[1:]:
+        fields = line.split()
+        address, port = fields[1].split(':')
+        if address == '0100007F' and fields[3] == '0A':
+            ports.add(int(port, 16))
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+for port in sorted(ports):
+    try:
+        with opener.open(f'http://127.0.0.1:{port}/metrics', timeout=3) as response:
+            body = response.read(65537)
+            if len(body) > 65536:
+                raise ValueError('metrics exceed diagnostic bound')
+            print(f'metrics-port={port} status={response.status}')
+            print(body.decode('utf-8'))
+    except Exception as error:
+        print(f'metrics-port={port} unavailable={type(error).__name__}')
 """
 
 NFT_RULESET: Final = """table inet spp_filter {
@@ -143,8 +181,8 @@ Restart=no
 WantedBy=multi-user.target
 """
 
-# The sealed appliance's evidence collector. The gateway already runs as root, so no sudo; the
-# collector's pinned dependencies sit in their own tree, ahead of the SGLang base's; the vendor
+# The evidence collector shares the unprivileged gateway identity and its TPM device group.
+# Its pinned dependencies sit in their own tree, ahead of the SGLang base; the vendor
 # GPU verifier opens verifier.log in its working directory, which must therefore be tmpfs; and the
 # quote carries the fourteen-register selection the owner appraises, not the running engine's ten.
 COLLECTOR_SH: Final = """#!/bin/sh
@@ -1208,6 +1246,7 @@ def assemble_rootfs_prod(
         trace_sh = tree / "opt/spp/trace-report.sh"
         trace_sh.write_text(TRACE_SH)
         trace_sh.chmod(0o755)
+        (tree / "opt/spp/trace-metrics.py").write_text(TRACE_METRICS)
         (tree / "etc/systemd/system/multi-user.target.wants/spp-trace-report.service").symlink_to(
             "/etc/systemd/system/spp-trace-report.service")
         origins.append({"kind": "recipe", "name": "prodtrace-diagnostic", "version": "1.0", "sha256": "",
@@ -1230,6 +1269,7 @@ def assemble_rootfs_prod(
             }
         )
 
+    harden_service_identities(tree)
     smoke_imports(tree)
 
     # Ensure all files currently in tree are accounted for
@@ -1250,6 +1290,62 @@ def assemble_rootfs_prod(
             }
         )
     return tree, origins
+
+
+
+def harden_service_identities(tree: Path) -> None:
+    """Give each serving process its own identity without a privilege escalator."""
+    # Detach inherited hardlinks before changing bytes or modes. Input roots are
+    # shared by independent builds and their manifest must remain unchanged.
+    for name, rows in (
+        ("passwd", ["spp-gateway:x:61100:61100::/run/gw:/usr/sbin/nologin",
+                    "spp-sglang:x:61101:61101::/run/sglang:/usr/sbin/nologin",
+                    "spp-asr:x:61102:61102::/run/asr:/usr/sbin/nologin"]),
+        ("group", ["spp-gateway:x:61100:", "spp-sglang:x:61101:", "spp-asr:x:61102:"]),
+    ):
+        path = tree / "etc" / name
+        old = path.read_text()
+        for row in rows:
+            fields = row.split(":")
+            if any(line.split(":")[0] == fields[0] or line.split(":")[2] == fields[2]
+                   for line in old.splitlines() if len(line.split(":")) >= 3):
+                raise ValueError("serving identity already exists in base")
+        path.unlink()
+        path.write_text(old.rstrip() + "\n" + "\n".join(rows) + "\n")
+    for unit, user in (("spp-gateway", "spp-gateway"), ("sglang", "spp-sglang"), ("spp-asr", "spp-asr")):
+        path = tree / "etc/systemd/system" / (unit + ".service")
+        text = path.read_text().replace("[Service]\n", f"[Service]\nUser={user}\nGroup={user}\nNoNewPrivileges=yes\nCapabilityBoundingSet=\n", 1)
+        if unit == "spp-gateway":
+            text = text.replace("[Unit]\n", "[Unit]\nRequires=spp-tpm-access.service\nAfter=spp-tpm-access.service\n", 1)
+        path.write_text(text)
+    # TPM authorization remains the TPM's own policy. Only the gateway needs
+    # device access; neither content-handling service receives it.
+    (tree / "etc/systemd/system/spp-tpm-access.service").write_text("""[Unit]
+Description=Grant the attestation gateway access to the TPM resource manager
+After=dev-tpmrm0.device
+Requires=dev-tpmrm0.device
+Before=spp-gateway.service
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/chgrp spp-gateway /dev/tpmrm0
+ExecStart=/usr/bin/chmod 0660 /dev/tpmrm0
+""")
+    for rel in ("root/.cargo", "root/.rustup", "root/.cache", "root/.nv", "var/cache/apt", "var/lib/apt/lists"):
+        path = tree / rel
+        if path.is_symlink():
+            path.unlink()
+        elif path.is_dir():
+            shutil.rmtree(path)
+    for path in tree.rglob("*"):
+        if path.is_symlink() or not path.is_file():
+            continue
+        mode = stat.S_IMODE(path.stat().st_mode)
+        if mode & 0o6000:
+            temp = path.with_name(path.name + ".unprivileged")
+            shutil.copyfile(path, temp)
+            temp.chmod(mode & ~0o6000)
+            temp.replace(path)
 
 
 def smoke_imports(tree: Path) -> None:
@@ -1495,9 +1591,8 @@ def build_uki(
     return signed
 
 
-# Host tools whose output reaches the image or the UKI. The recipe pins its inputs, not this
-# environment, so every build records it: a rebuild matches only on the same package versions
-# (glibc's libc.a is linked into the init; ldconfig and depmod write files into the rootfs).
+# Tools whose output reaches the image or UKI. toolchain.py supplies their pinned
+# package closure; record the actual executables as additional build provenance.
 BUILD_TOOLS: Final = ("/usr/bin/gcc", "/usr/libexec/gcc/x86_64-linux-gnu/13/cc1", "/usr/bin/as", "/usr/bin/ld",
                       "/usr/lib/x86_64-linux-gnu/libc.a", "/sbin/ldconfig", "/sbin/depmod", "/usr/bin/mksquashfs",
                       "/usr/sbin/veritysetup", "/usr/bin/gzip", "/usr/sbin/sgdisk", "/usr/bin/sbsign",
