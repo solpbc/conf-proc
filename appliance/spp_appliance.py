@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
 from pathlib import Path
@@ -1573,6 +1574,9 @@ def build_uki(
         env=env,
     )
 
+    faketime = Path("/usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1")
+    if not faketime.is_file():
+        raise SystemExit("pinned signing-time library is missing; use the toolchain root")
     spp_disk.run(
         offline(
             [
@@ -1587,7 +1591,13 @@ def build_uki(
             ]
         ),
         cwd=work,
-        env={"PATH": "/usr/bin:/bin"},
+        # sbsign 0.9.4 inserts OpenSSL's wall-clock signingTime and does not
+        # honor SOURCE_DATE_EPOCH. Freeze only this subprocess to the build
+        # epoch; keep monotonic time real and verify at the actual current time.
+        env={"PATH": "/usr/bin:/bin", "TZ": "UTC",
+             "LD_PRELOAD": str(faketime),
+             "FAKETIME": datetime.datetime.fromtimestamp(build_epoch, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+             "FAKETIME_DONT_FAKE_MONOTONIC": "1"},
     )
     spp_disk.run(
         offline(["/usr/bin/sbverify", "--cert", str(cert_pem), str(signed)]),
@@ -1600,7 +1610,7 @@ def build_uki(
 # Tools whose output reaches the image or UKI. toolchain.py supplies their pinned
 # package closure; record the actual executables as additional build provenance.
 BUILD_TOOLS: Final = ("/usr/bin/gcc", "/usr/libexec/gcc/x86_64-linux-gnu/13/cc1", "/usr/bin/as", "/usr/bin/ld",
-                      "/usr/lib/x86_64-linux-gnu/libc.a", "/bin/sh", "/sbin/ldconfig", "/sbin/ldconfig.real", "/sbin/depmod", "/usr/bin/mksquashfs",
+                      "/usr/lib/x86_64-linux-gnu/libc.a", "/usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1", "/bin/sh", "/sbin/ldconfig", "/sbin/ldconfig.real", "/sbin/depmod", "/usr/bin/mksquashfs",
                       "/usr/sbin/veritysetup", "/usr/bin/gzip", "/usr/sbin/sgdisk", "/usr/bin/sbsign",
                       "/usr/bin/dpkg-deb", "/usr/bin/python3", "/usr/bin/bwrap")
 

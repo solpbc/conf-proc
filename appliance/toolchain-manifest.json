@@ -525,6 +525,15 @@
       "url": "https://us.archive.ubuntu.com/ubuntu/pool/main/e/expat/libexpat1_2.6.1-2ubuntu0.6_amd64.deb"
     },
     {
+      "filename": "libfaketime_0.9.10-2.1_amd64.deb",
+      "package": "libfaketime",
+      "version": "0.9.10-2.1",
+      "architecture": "amd64",
+      "size_bytes": 43110,
+      "sha256": "25fc8987f1f700c58603f68edd93ac03a1b7dea35da1e84509f29f444d5b11e9",
+      "url": "https://us.archive.ubuntu.com/ubuntu/pool/universe/f/faketime/libfaketime_0.9.10-2.1_amd64.deb"
+    },
+    {
       "filename": "libffi8_3.4.6-1build1_amd64.deb",
       "package": "libffi8",
       "version": "3.4.6-1build1",
