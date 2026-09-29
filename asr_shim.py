@@ -27,8 +27,8 @@ Fail-closed properties baked in:
   gate with 503; per-request timeout with 504.
 - Content-free logging and metrics: counts, durations, and reason classes
   only. No transcript, path payload, or audio byte ever reaches a log line.
-- Per-device audio-seconds metering counter, keyed by the opaque x-sol-device
-  header — capacity-shaped entitlement/fleet telemetry only (Article 8).
+- Per-device audio-seconds metering counter, keyed by process-randomized device
+  labels — capacity-shaped entitlement/fleet telemetry only (Article 8).
 
 Stdlib HTTP server + owned multipart parser: no web framework inside the
 attested boundary. NeMo/numpy import lazily at model load, so the module is
@@ -57,6 +57,7 @@ from strict_wav import (
     build_canonical_wav,
     parse_canonical_wav,
 )
+from usage_tally import device_label
 
 LOG = logging.getLogger("spp-asr-shim")
 
@@ -65,7 +66,6 @@ MAX_BATCH_HARD_CAP = 8  # locked constraint: micro-batch <= 8 for co-location
 # canonical 300s WAV is ~9.6 MB; allow validator tolerance + multipart framing
 MAX_REQUEST_BYTES = 11 * 1024 * 1024
 MAX_MULTIPART_PARTS = 8
-DEVICE_LABEL_MAX = 4096  # metering-label cardinality bound
 DEVICE_LABEL_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 # TDT/FastConformer frame stride: window_stride 0.01s x 8x subsampling
 FRAME_SEC = 0.08
@@ -208,9 +208,10 @@ def _words_from_hypothesis(hypothesis: Any) -> list[dict]:
 
 
 class Metrics:
-    """Content-free Prometheus counters with bounded label cardinality."""
+    """Content-free Prometheus counters."""
 
-    def __init__(self) -> None:
+    def __init__(self, key: bytes | None = None) -> None:
+        self._key = key if key is not None else os.urandom(32)
         self._lock = threading.Lock()
         self.outcomes: dict[str, int] = {}
         self.audio_seconds = 0.0
@@ -224,13 +225,13 @@ class Metrics:
             self.outcomes[outcome] = self.outcomes.get(outcome, 0) + 1
 
     def record_audio(self, seconds: float, device: str | None) -> None:
-        label = device if device and DEVICE_LABEL_RE.match(device) else "unlabeled"
+        label = (
+            device_label(self._key, device)
+            if device and DEVICE_LABEL_RE.match(device)
+            else "unlabeled"
+        )
         with self._lock:
             self.audio_seconds += seconds
-            if label not in self.device_audio_seconds and (
-                len(self.device_audio_seconds) >= DEVICE_LABEL_MAX
-            ):
-                label = "overflow"
             self.device_audio_seconds[label] = (
                 self.device_audio_seconds.get(label, 0.0) + seconds
             )

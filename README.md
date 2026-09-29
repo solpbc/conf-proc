@@ -28,7 +28,8 @@ upstream, the gateway validates its portal-issued bearer against the live SPP
 binding and entitlement state. Invalid/inactive credentials fail 401;
 authorizer failure fails 503; neither path opens an upstream connection. The
 raw bearer is stripped before forwarding, and the gateway replaces any
-client-asserted `x-sol-device` value with a SHA-256-derived opaque id. Inference
+client-asserted `x-sol-device` value with a process-randomized label derived from
+the admitted credential (not stable across restart of the gateway process). Inference
 and audio upstreams bind only to loopback. The engine does not log request or
 response content, write owner content to durable storage, or send content to a
 third-party telemetry service. The audio path accepts only canonical PCM16

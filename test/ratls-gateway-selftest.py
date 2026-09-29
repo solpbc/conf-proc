@@ -9,6 +9,7 @@ import io
 import json
 import hashlib
 import http.server
+import re
 import socket
 import ssl
 import subprocess
@@ -73,6 +74,7 @@ _require_ec_capable_pyopenssl()
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from asr_shim import DEVICE_LABEL_RE  # noqa: E402
 from ratls_contract import (  # noqa: E402
     COMPOSITE_EVIDENCE_OID,
     EXPORTER_BYTES,
@@ -197,6 +199,8 @@ class GatewayProcess:
             "--listen-host",
             "127.0.0.1",
             "--listen-port",
+            "0",
+            "--metrics-port",
             "0",
             "--upstream-port",
             str(upstream_port),
@@ -787,15 +791,30 @@ class RoutedRelayTest(unittest.TestCase):
         self.assertEqual(len(self.audio_upstream.requests), 1)
         audio_head, recorded_audio_body = self.audio_upstream.requests[0]
         self.assertTrue(audio_head.startswith(b"POST /v1/audio/transcriptions HTTP/1.1"))
-        canonical_device = hashlib.sha256(TEST_ENTITLEMENT.encode()).hexdigest().encode()
-        self.assertIn(b"x-sol-device: " + canonical_device, audio_head)
+        self.assertEqual(len(self.default_upstream.requests), 1)
+        chat_head, recorded_chat_body = self.default_upstream.requests[0]
+        self.assertTrue(
+            chat_head.startswith(b"POST /v1/chat/completions HTTP/1.1")
+        )
+
+        audio_device_match = re.search(rb"^x-sol-device:\s*([^\r\n]+)", audio_head, re.MULTILINE | re.IGNORECASE)
+        self.assertIsNotNone(audio_device_match)
+        audio_device = audio_device_match.group(1).decode("ascii")
+
+        chat_device_match = re.search(rb"^x-sol-device:\s*([^\r\n]+)", chat_head, re.MULTILINE | re.IGNORECASE)
+        self.assertIsNotNone(chat_device_match)
+        chat_device = chat_device_match.group(1).decode("ascii")
+
+        self.assertEqual(audio_device, chat_device)
+        self.assertTrue(bool(DEVICE_LABEL_RE.match(audio_device)))
+        self.assertNotEqual(audio_device, "client-spoof")
+        self.assertNotEqual(audio_device, TEST_ENTITLEMENT)
+        sha256_device = hashlib.sha256(TEST_ENTITLEMENT.encode()).hexdigest()
+        self.assertNotEqual(audio_device, sha256_device)
+
         self.assertNotIn(b"client-spoof", audio_head)
         self.assertNotIn(b"authorization:", audio_head.lower())
         self.assertEqual(recorded_audio_body, audio_body)
-        self.assertEqual(len(self.default_upstream.requests), 1)
-        self.assertTrue(
-            self.default_upstream.requests[0][0].startswith(b"POST /v1/chat/completions")
-        )
         self.assertEqual(len(self.gateway.authority.requests), 1)
         self.assertEqual(
             self.gateway.authority.requests[0].get("X-Sol-Entitlement"),
@@ -949,6 +968,7 @@ class RoutedRelayTest(unittest.TestCase):
             b"GET /health HTTP/1.1\r\nHost: spp-engine\r\n" + AUTHORIZATION_LINE + b"\r\n",
             b"GET /v1/models HTTP/1.1\r\nHost: spp-engine\r\n" + AUTHORIZATION_LINE + b"\r\n",
             b"GET /get_server_info HTTP/1.1\r\nHost: spp-engine\r\n" + AUTHORIZATION_LINE + b"\r\n",
+            b"GET /metrics HTTP/1.1\r\nHost: spp-engine\r\n" + AUTHORIZATION_LINE + b"\r\n",
             b"POST /v1/responses HTTP/1.1\r\nHost: spp-engine\r\n" + AUTHORIZATION_LINE + b"Content-Length: 0\r\n\r\n",
             b"GET /v1/chat/completions HTTP/1.1\r\nHost: spp-engine\r\n" + AUTHORIZATION_LINE + b"\r\n",
             b"POST /v1/chat/completions?x=1 HTTP/1.1\r\nHost: spp-engine\r\n" + AUTHORIZATION_LINE + b"Content-Length: 0\r\n\r\n",

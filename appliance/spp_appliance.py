@@ -175,7 +175,7 @@ After=network.target
 Environment=PYTHONPATH=/opt/conf-proc:/opt/spp/pydeps
 RuntimeDirectory=gw
 Environment=TMPDIR=/run/gw
-ExecStart=/usr/bin/python3 /opt/conf-proc/ratls_gateway.py --listen-host 0.0.0.0 --listen-port 9443 --upstream-host 127.0.0.1 --upstream-port 8000 --audio-upstream-host 127.0.0.1 --audio-upstream-port 8100 --collector-command /opt/conf-proc/run-collector.sh --entitlement-url https://services.solstone.app/spp/authorize --entitlement-timeout 10
+ExecStart=/usr/bin/python3 /opt/conf-proc/ratls_gateway.py --listen-host 0.0.0.0 --listen-port 9443 --upstream-host 127.0.0.1 --upstream-port 8000 --audio-upstream-host 127.0.0.1 --audio-upstream-port 8100 --collector-command /opt/conf-proc/run-collector.sh --entitlement-url https://services.solstone.app/spp/authorize --entitlement-timeout 10 --metrics-host 127.0.0.1 --metrics-port 9100
 Restart=no
 [Install]
 WantedBy=multi-user.target
@@ -275,7 +275,7 @@ Environment=TRITON_CACHE_DIR=/run/sglang/triton
 Environment=OUTLINES_CACHE_DIR=/run/sglang/outlines
 TimeoutStartSec=2400
 ExecStartPre=/opt/spp/stage-model.sh
-ExecStart=/usr/bin/python3 -m sglang.launch_server --model-path /dev/shm/qwen --served-model-name Qwen/Qwen3.5-4B --host 127.0.0.1 --port 8000 --mem-fraction-static 0.80 --context-length 16384 --trust-remote-code
+ExecStart=/usr/bin/python3 -m sglang.launch_server --model-path /dev/shm/qwen --served-model-name Qwen/Qwen3.5-4B --host 127.0.0.1 --port 8000 --mem-fraction-static 0.80 --context-length 16384 --trust-remote-code --stream-response-default-include-usage
 Restart=no
 [Install]
 WantedBy=multi-user.target
@@ -824,7 +824,7 @@ def _inventory_files(tree: Path) -> set[str]:
 # AMD roots they check against. Nothing else of the repo reaches the image, so a change to the
 # recipe or the docs does not move the roothash, and the image carries no unused code.
 RUNTIME_SOURCE: Final = ("LICENSE", "asr_shim.py", "ratls_collector.py", "ratls_contract.py",
-                         "ratls_gateway.py", "roots/amd/", "strict_wav.py", "verifier.py")
+                         "ratls_gateway.py", "roots/amd/", "strict_wav.py", "usage_tally.py", "verifier.py")
 
 
 def copy_tracked_source(repo: Path, dest: Path, allow: tuple[str, ...] = RUNTIME_SOURCE) -> None:

@@ -6,20 +6,24 @@
 The client sends a bounded nonce preface, verifies the per-session certificate
 evidence during the TLS 1.3 handshake, then verifies an exporter-bound AK quote
 at the reserved proof endpoint.  Only after both phases does this process admit
-the connection.  It never logs or parses inference request/response bodies.
+the connection.  It never logs inference request/response bodies; forwarded
+bytes are unchanged, reading only a model-reported usage object on a finished
+chat response.
 
-Post-admission, the relay parses HTTP/1.1 FRAMING only (request line, header
-lines, body lengths).  Before the first upstream byte, it validates the
-request's bearer credential against the portal's live entitlement state; each
-later request on the channel must carry the same credential.  It derives the
-opaque metering id from that credential rather than trusting a client-asserted
-``x-sol-device`` value.  Bodies stream through untouched and unlogged.  With
-``--audio-upstream-port``, ``/v1/audio/*`` routes to the ASR sidecar loopback
-and everything else routes to SGLang.  One exception answers instead of
-tearing down: an audio-route body declared over the sidecar's request cap gets
-a relay-level 413 without the upstream ever being opened, and the attested
-channel survives.  The Phase-1/2 admission contract is unchanged — this is
-post-admission behavior, invisible to ``ratls-contract.json``.
+Post-admission, the relay parses HTTP/1.1 FRAMING (request line, header lines,
+body lengths) and reads only a model-reported usage object on a finished chat
+response.  Before the first upstream byte, it validates the request's bearer
+credential against the portal's live entitlement state; each later request on
+the channel must carry the same credential.  It derives the process-randomized
+metering label from that credential (not stable across restart of this process)
+rather than trusting a client-asserted ``x-sol-device`` value.  Bodies stream
+through untouched and unlogged.  With ``--audio-upstream-port``,
+``/v1/audio/*`` routes to the ASR sidecar loopback and everything else routes
+to SGLang.  One exception answers instead of tearing down: an audio-route body
+declared over the sidecar's request cap gets a relay-level 413 without the
+upstream ever being opened, and the attested channel survives.  The Phase-1/2
+admission contract is unchanged — this is post-admission behavior, invisible to
+``ratls-contract.json``.
 
 Every connection also carries an absolute lifetime from accept, independent
 of read activity: ``--channel-lifetime-seconds`` (T_max) is checked in the
@@ -56,7 +60,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -77,6 +81,11 @@ from ratls_contract import (
     PREFACE_MAGIC,
     CompositeEvidence,
     ExporterProof,
+)
+from usage_tally import (
+    ChatTally,
+    LoopbackMetricsServer,
+    UsageWalker,
 )
 
 
@@ -649,17 +658,28 @@ def _drain_exact(reader: _RelayReader, length: int) -> bool:
     return True
 
 
-def _copy_exact(reader: _RelayReader, destination: Any, length: int) -> None:
+def _copy_exact(
+    reader: _RelayReader,
+    destination: Any,
+    length: int,
+    observer: Callable[[bytes], None] | None = None,
+) -> None:
     remaining = length
     while remaining:
         chunk = reader.read_available(min(RELAY_CHUNK_BYTES, remaining))
         if not chunk:
             raise RelayProtocolError("peer closed mid-body")
         destination.sendall(chunk)
+        if observer is not None:
+            observer(chunk)
         remaining -= len(chunk)
 
 
-def _copy_chunked(reader: _RelayReader, destination: Any) -> None:
+def _copy_chunked(
+    reader: _RelayReader,
+    destination: Any,
+    observer: Callable[[bytes], None] | None = None,
+) -> None:
     while True:
         size_line = reader.read_line()
         destination.sendall(size_line)
@@ -668,7 +688,8 @@ def _copy_chunked(reader: _RelayReader, destination: Any) -> None:
         except ValueError as exc:
             raise RelayProtocolError("invalid chunk size") from exc
         if chunk_size:
-            _copy_exact(reader, destination, chunk_size + 2)  # data + CRLF
+            _copy_exact(reader, destination, chunk_size, observer=observer)
+            _copy_exact(reader, destination, 2)  # CRLF
             continue
         while True:  # trailer section through the final blank line
             line = reader.read_line()
@@ -685,6 +706,7 @@ def _http_relay(
     authorizer: PortalEntitlementAuthorizer,
     channel_lifetime: float,
     channel_started: float,
+    tally: ChatTally,
 ) -> None:
     """Serial per-request HTTP/1.1 relay over the one admitted channel.
 
@@ -732,7 +754,7 @@ def _http_relay(
             if admitted_credential is None:
                 authorizer.authorize(credential)
                 admitted_credential = credential
-                device_id = hashlib.sha256(credential.encode("ascii")).hexdigest()
+                device_id = tally.label_for(credential)
                 LOG.info("event=entitlement_admitted")
             elif not hmac.compare_digest(credential, admitted_credential):
                 raise EntitlementRejectedError(
@@ -807,17 +829,44 @@ def _http_relay(
                     continue  # interim response; the real one follows
                 response_headers = _parse_relay_headers(response_lines[1:])
                 mode, length = _response_body_mode(status, method, response_headers)
-                if mode == "length" and length:
-                    _copy_exact(upstream_reader, client, length)
-                elif mode == "chunked":
-                    _copy_chunked(upstream_reader, client)
-                elif mode == "close":
-                    while True:
-                        chunk = upstream_reader.read_available(RELAY_CHUNK_BYTES)
-                        if not chunk:
-                            break
-                        client.sendall(chunk)
-                    return  # close-delimited response ends the channel
+                if not is_audio:
+                    walker = UsageWalker()
+                    try:
+                        if mode == "length":
+                            if length:
+                                _copy_exact(
+                                    upstream_reader, client, length, observer=walker.feed
+                                )
+                            tally.commit_response(device_id, walker, truncated=False)
+                        elif mode == "chunked":
+                            _copy_chunked(
+                                upstream_reader, client, observer=walker.feed
+                            )
+                            tally.commit_response(device_id, walker, truncated=False)
+                        elif mode == "close":
+                            while True:
+                                chunk = upstream_reader.read_available(RELAY_CHUNK_BYTES)
+                                if not chunk:
+                                    break
+                                client.sendall(chunk)
+                                walker.feed(chunk)
+                            tally.commit_response(device_id, walker, truncated=False)
+                            return  # close-delimited response ends the channel
+                    except (RelayProtocolError, OSError, ConnectionError):
+                        tally.commit_response(device_id, walker, truncated=True)
+                        raise
+                else:
+                    if mode == "length" and length:
+                        _copy_exact(upstream_reader, client, length)
+                    elif mode == "chunked":
+                        _copy_chunked(upstream_reader, client)
+                    elif mode == "close":
+                        while True:
+                            chunk = upstream_reader.read_available(RELAY_CHUNK_BYTES)
+                            if not chunk:
+                                break
+                            client.sendall(chunk)
+                        return  # close-delimited response ends the channel
                 break
         finally:
             upstream.close()
@@ -876,6 +925,7 @@ class GatewayServer(socketserver.ThreadingTCPServer):
         channel_lifetime: float = DEFAULT_CHANNEL_LIFETIME_SECONDS,
         channel_force_close_grace: float = DEFAULT_CHANNEL_FORCE_CLOSE_GRACE_SECONDS,
         admission_timeout: float = DEFAULT_ADMISSION_TIMEOUT_SECONDS,
+        tally: ChatTally | None = None,
     ) -> None:
         self.collector = collector
         self.authorizer = authorizer
@@ -885,6 +935,7 @@ class GatewayServer(socketserver.ThreadingTCPServer):
         self.channel_lifetime = channel_lifetime
         self.channel_force_close_grace = channel_force_close_grace
         self.admission_timeout = admission_timeout
+        self.tally = tally if tally is not None else ChatTally()
         super().__init__(address, GatewayHandler)
 
 
@@ -945,6 +996,7 @@ class GatewayHandler(socketserver.BaseRequestHandler):
                 self.server.authorizer,
                 self.server.channel_lifetime,
                 channel_started,
+                self.server.tally,
             )
         except Exception as exc:
             if isinstance(exc, CollectorError):
@@ -1018,6 +1070,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="route /v1/audio/* to this loopback upstream (enables the "
         "per-request HTTP relay; omit for the single-upstream opaque tunnel)",
     )
+    parser.add_argument("--metrics-host", default="127.0.0.1")
+    parser.add_argument("--metrics-port", type=int, default=9100)
     parser.add_argument("--collector-command")
     parser.add_argument("--collector-timeout", type=int, default=120)
     parser.add_argument("--socket-timeout", type=int, default=180)
@@ -1075,23 +1129,32 @@ def main() -> int:
         if args.audio_upstream_port
         else None
     )
-    with GatewayServer(
-        (args.listen_host, args.listen_port),
-        collector,
-        authorizer,
-        (args.upstream_host, args.upstream_port),
-        args.socket_timeout,
-        audio_upstream=audio_upstream,
-        channel_lifetime=args.channel_lifetime_seconds,
-        channel_force_close_grace=args.channel_force_close_grace_seconds,
-        admission_timeout=args.admission_timeout_seconds,
-    ) as server:
-        host, port = server.server_address
-        print(json.dumps({"event": "listening", "host": host, "port": port}), flush=True)
-        try:
-            server.serve_forever()
-        except KeyboardInterrupt:
-            pass
+    tally = ChatTally()
+    metrics_server = LoopbackMetricsServer((args.metrics_host, args.metrics_port), tally)
+    metrics_thread = threading.Thread(target=metrics_server.serve_forever, daemon=True)
+    metrics_thread.start()
+    try:
+        with GatewayServer(
+            (args.listen_host, args.listen_port),
+            collector,
+            authorizer,
+            (args.upstream_host, args.upstream_port),
+            args.socket_timeout,
+            audio_upstream=audio_upstream,
+            channel_lifetime=args.channel_lifetime_seconds,
+            channel_force_close_grace=args.channel_force_close_grace_seconds,
+            admission_timeout=args.admission_timeout_seconds,
+            tally=tally,
+        ) as server:
+            host, port = server.server_address
+            print(json.dumps({"event": "listening", "host": host, "port": port}), flush=True)
+            try:
+                server.serve_forever()
+            except KeyboardInterrupt:
+                pass
+    finally:
+        metrics_server.shutdown()
+        metrics_server.server_close()
     return 0
 
 

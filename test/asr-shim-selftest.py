@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT))
 
 from asr_shim import MODEL_ID, MultipartReject, create_server, parse_multipart  # noqa: E402
 from strict_wav import CANONICAL_SAMPLE_RATE, build_canonical_wav  # noqa: E402
+from usage_tally import device_label  # noqa: E402
 
 BOUNDARY = "testboundary1234"
 
@@ -310,8 +311,10 @@ class AsrShimTest(unittest.TestCase):
         status, _headers, metrics = self.shim.request("GET", "/metrics")
         self.assertEqual(status, 200)
         text = metrics.decode()
-        self.assertIn('spp_asr_device_audio_seconds_total{device="dev-abc.1"}', text)
-        self.assertIn("spp_asr_audio_seconds_total", text)
+        expected_label = device_label(self.shim.server.metrics._key, "dev-abc.1")
+        self.assertIn(f'spp_asr_device_audio_seconds_total{{device="{expected_label}"}} 1.500', text)
+        self.assertNotIn('device="dev-abc.1"', text)
+        self.assertIn("spp_asr_audio_seconds_total 1.500", text)
         self.assertNotIn("stub transcript", text)  # never content
 
 
