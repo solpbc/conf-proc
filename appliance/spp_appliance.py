@@ -1320,6 +1320,12 @@ def harden_service_identities(tree: Path) -> None:
         path.write_text(text)
     # TPM authorization remains the TPM's own policy. Only the gateway needs
     # device access; neither content-handling service receives it.
+    rules = tree / "etc/udev/rules.d"
+    rules.mkdir(parents=True, exist_ok=True)
+    # A character device needs this tag before systemd exposes its .device unit.
+    (rules / "70-spp-tpm.rules").write_text(
+        'SUBSYSTEM=="tpmrm", KERNEL=="tpmrm0", TAG+="systemd"\n'
+    )
     (tree / "etc/systemd/system/spp-tpm-access.service").write_text("""[Unit]
 Description=Grant the attestation gateway access to the TPM resource manager
 After=dev-tpmrm0.device
