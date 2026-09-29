@@ -88,6 +88,9 @@ def prepare(root: Path, cache: Path, manifest: Path) -> None:
         if old.is_symlink():
             old.unlink()
         old.symlink_to('usr/' + name)
+    # Archive extraction does not run the shell-alternative maintainer scripts.
+    # Supply /bin/sh explicitly from the pinned bash package for Debian wrappers.
+    (root / 'usr/bin/sh').symlink_to('bash')
     for directory in ('proc', 'dev', 'tmp', 'run', 'workspace', 'src', 'signer'):
         (root / directory).mkdir(parents=True, exist_ok=True)
     (root / 'etc/passwd').write_text('root:x:0:0:root:/root:/bin/bash\n')

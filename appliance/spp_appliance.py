@@ -1594,7 +1594,7 @@ def build_uki(
 # Tools whose output reaches the image or UKI. toolchain.py supplies their pinned
 # package closure; record the actual executables as additional build provenance.
 BUILD_TOOLS: Final = ("/usr/bin/gcc", "/usr/libexec/gcc/x86_64-linux-gnu/13/cc1", "/usr/bin/as", "/usr/bin/ld",
-                      "/usr/lib/x86_64-linux-gnu/libc.a", "/sbin/ldconfig", "/sbin/depmod", "/usr/bin/mksquashfs",
+                      "/usr/lib/x86_64-linux-gnu/libc.a", "/bin/sh", "/sbin/ldconfig", "/sbin/ldconfig.real", "/sbin/depmod", "/usr/bin/mksquashfs",
                       "/usr/sbin/veritysetup", "/usr/bin/gzip", "/usr/sbin/sgdisk", "/usr/bin/sbsign",
                       "/usr/bin/dpkg-deb", "/usr/bin/python3", "/usr/bin/bwrap")
 
