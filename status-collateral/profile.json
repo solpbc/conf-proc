@@ -1,0 +1,20 @@
+{
+  "architecture": "HOPPER",
+  "driver": "595.71.05",
+  "files": {
+    "NV_GPU_DRIVER_GH100_595.71.05.xml": "143005c060a5eb2866f7db046c234d27f87ae386cab20ab40d9daa706be46ea4",
+    "NV_GPU_VBIOS_1010_0210_886_9600880011.xml": "a948d7b1e183a8dbede96a3288a1a14b54ddf4f8d4e8576dc4ccb2798022b183",
+    "NV_GPU_VBIOS_1010_0210_886_96009F0004.xml": "d5dd2bc3f138713ce9a6bd9ba472cb2833e362316e4528b7f2b5d6890e4315db",
+    "device_root_cert.txt": "5f6ce25ce0374fff3d28b85812d1d902a0c2680e2e3c2aa36e67f7d83f1a543d",
+    "rim_root_cert.txt": "a02d042fcb64b4b753fcfb574ad06ccc4687aede653df8fb3000185a0e242aee"
+  },
+  "origins": {
+    "rims": "solstone-journal@3b3a7becd94e1154c91dd4d37b960b9cded60f67",
+    "roots": "attestation-sdk@873252c6f4f4e54d04b7db14922e8e46102467d3"
+  },
+  "vbios": [
+    "96.00.88.00.11",
+    "96.00.9F.00.04"
+  ],
+  "version": 1
+}

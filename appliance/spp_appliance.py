@@ -176,7 +176,7 @@ After=network.target
 Environment=PYTHONPATH=/opt/conf-proc:/opt/spp/pydeps
 RuntimeDirectory=gw
 Environment=TMPDIR=/run/gw
-ExecStart=/usr/bin/python3 /opt/conf-proc/ratls_gateway.py --listen-host 0.0.0.0 --listen-port 9443 --upstream-host 127.0.0.1 --upstream-port 8000 --audio-upstream-host 127.0.0.1 --audio-upstream-port 8100 --collector-command /opt/conf-proc/run-collector.sh --entitlement-url https://services.solstone.app/spp/authorize --entitlement-timeout 10 --metrics-host 127.0.0.1 --metrics-port 9100
+ExecStart=/usr/bin/python3 /opt/conf-proc/ratls_gateway.py --listen-host 0.0.0.0 --listen-port 9443 --upstream-host 127.0.0.1 --upstream-port 8000 --audio-upstream-host 127.0.0.1 --audio-upstream-port 8100 --collector-command /opt/conf-proc/run-collector.sh --entitlement-url https://services.solstone.app/spp/authorize --entitlement-timeout 10 --metrics-host 127.0.0.1 --metrics-port 9100 --status-proofs
 Restart=no
 [Install]
 WantedBy=multi-user.target
@@ -825,7 +825,8 @@ def _inventory_files(tree: Path) -> set[str]:
 # AMD roots they check against. Nothing else of the repo reaches the image, so a change to the
 # recipe or the docs does not move the roothash, and the image carries no unused code.
 RUNTIME_SOURCE: Final = ("LICENSE", "asr_shim.py", "ratls_collector.py", "ratls_contract.py",
-                         "ratls_gateway.py", "roots/amd/", "strict_wav.py", "usage_tally.py", "verifier.py")
+                         "ratls_gateway.py", "ratls_status_proofs.py", "status-proofs-contract.json",
+                         "status-collateral/", "roots/amd/", "strict_wav.py", "usage_tally.py", "verifier.py")
 
 
 def copy_tracked_source(repo: Path, dest: Path, allow: tuple[str, ...] = RUNTIME_SOURCE) -> None:
@@ -1368,7 +1369,8 @@ def smoke_imports(tree: Path) -> None:
                  "/opt/asr-root/usr/bin/python3.10", "-c",
                  "import _decimal, lhotse, nemo.collections.asr, asr_shim"]),
         ("gateway", ["PYTHONPATH=/opt/conf-proc:/opt/spp/pydeps", "/usr/bin/python3", "-c",
-                     "import OpenSSL, cryptography, ratls_gateway"]),
+                     "import OpenSSL, cryptography, ratls_gateway, ratls_status_proofs; "
+                     "ratls_status_proofs.Collateral()"]),
         ("collector", ["PYTHONPATH=/opt/spp/collector-site", "SPP_NVIDIA_VERIFIER_SRC=/opt/spp/collector-site",
                        "/usr/bin/python3", "-c",
                        "import sys; sys.path.insert(0, '/opt/conf-proc'); import ratls_collector as c; "

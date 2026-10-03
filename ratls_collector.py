@@ -135,6 +135,15 @@ def _gpu_tlv(owner_nonce: bytes) -> bytes:
     )
 
 
+def _status_inventory(request: dict[str, Any]) -> dict[str, str]:
+    if request != {"operation": "status-inventory-v1"}:
+        raise ValueError("status inventory accepts no caller data")
+    _require_cc_production()
+    # Generate a local worker nonce; this path never opens the TPM.
+    from ratls_status_proofs import inventory_from_envelope
+    return inventory_from_envelope(_gpu_tlv(os.urandom(32)))
+
+
 def _quote(directory: Path, qualifying_data: bytes) -> dict[str, str]:
     ak_public = directory / "akpub.pem"
     quote_message = directory / "quote.msg"
@@ -307,6 +316,8 @@ def main() -> int:
         operation = request.get("operation")
         if operation == "certificate-evidence-v1":
             response = _certificate_evidence(request)
+        elif operation == "status-inventory-v1":
+            response = _status_inventory(request)
         elif operation == "exporter-proof-v1":
             response = _exporter_proof(request)
         else:

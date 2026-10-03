@@ -68,7 +68,10 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID, ObjectIdentifier
 from OpenSSL import SSL, crypto
 
+from ratls_status_proofs import Collateral, ProofCache, StatusUnavailable, StatusWorker
+
 from ratls_contract import (
+    STATUS_PROOFS,
     CERTIFICATE_BINDING_DOMAIN,
     COMPOSITE_EVIDENCE_OID,
     EXPORTER_BINDING_DOMAIN,
@@ -313,6 +316,9 @@ class CommandCollector:
             raise CollectorError("attestation collector response must be an object")
         return response
 
+    def collect_status_inventory(self) -> dict[str, str]:
+        return self.call({"operation": "status-inventory-v1"})
+
     def collect_composite(self, owner_nonce: bytes, spki_der: bytes) -> CompositeEvidence:
         response = self.call(
             {
@@ -381,11 +387,11 @@ class CommandCollector:
 
 
 def _make_certificate(
-    key: ec.EllipticCurvePrivateKey, extension_der: bytes
+    key: ec.EllipticCurvePrivateKey, extension_der: bytes, status_der: bytes | None = None
 ) -> x509.Certificate:
     now = datetime.now(timezone.utc)  # datetime.UTC needs 3.11; CVM is 3.10
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "spp-engine")])
-    return (
+    builder = (
         x509.CertificateBuilder()
         .subject_name(name)
         .issuer_name(name)
@@ -399,8 +405,16 @@ def _make_certificate(
             ),
             critical=True,
         )
-        .sign(key, hashes.SHA256())
     )
+    if status_der is not None:
+        builder = builder.add_extension(
+            x509.UnrecognizedExtension(ObjectIdentifier(STATUS_PROOFS["oid"]), status_der),
+            critical=False,
+        )
+    certificate = builder.sign(key, hashes.SHA256())
+    if len(certificate.public_bytes(serialization.Encoding.DER)) > STATUS_PROOFS["limits"]["max_certificate_bytes"]:
+        raise StatusUnavailable("attestation certificate exceeds limit")
+    return certificate
 
 
 def _tls_context(
@@ -926,7 +940,9 @@ class GatewayServer(socketserver.ThreadingTCPServer):
         channel_force_close_grace: float = DEFAULT_CHANNEL_FORCE_CLOSE_GRACE_SECONDS,
         admission_timeout: float = DEFAULT_ADMISSION_TIMEOUT_SECONDS,
         tally: ChatTally | None = None,
+        status_cache: ProofCache | None = None,
     ) -> None:
+        self.status_cache = status_cache
         self.collector = collector
         self.authorizer = authorizer
         self.upstream = upstream
@@ -961,13 +977,17 @@ class GatewayHandler(socketserver.BaseRequestHandler):
                 raise ValueError("invalid RA-TLS preface magic")
             owner_nonce = preface[len(PREFACE_MAGIC) :]
 
+            if self.server.status_cache is not None:
+                self.server.status_cache.snapshot()
             key = ec.generate_private_key(ec.SECP256R1())
             spki_der = key.public_key().public_bytes(
                 serialization.Encoding.DER,
                 serialization.PublicFormat.SubjectPublicKeyInfo,
             )
             evidence = self.server.collector.collect_composite(owner_nonce, spki_der)
-            certificate = _make_certificate(key, evidence.to_der())
+            status_der = (self.server.status_cache.snapshot(evidence.gpu_envelope)
+                          if self.server.status_cache is not None else None)
+            certificate = _make_certificate(key, evidence.to_der(), status_der)
             connection = SSL.Connection(_tls_context(key, certificate), raw)
             connection.setblocking(1)
             connection.set_accept_state()
@@ -981,7 +1001,11 @@ class GatewayHandler(socketserver.BaseRequestHandler):
             proof = self.server.collector.collect_exporter_proof(
                 owner_nonce, spki_der, tls_exporter, evidence.gpu_envelope
             )
+            if self.server.status_cache is not None:
+                self.server.status_cache.snapshot(evidence.gpu_envelope)
             _send_proof(connection, proof.to_der())
+            if self.server.status_cache is not None:
+                self.server.status_cache.snapshot(evidence.gpu_envelope)
 
             deadline.arm(
                 channel_started + hard_deadline - time.monotonic(),
@@ -999,7 +1023,9 @@ class GatewayHandler(socketserver.BaseRequestHandler):
                 self.server.tally,
             )
         except Exception as exc:
-            if isinstance(exc, CollectorError):
+            if isinstance(exc, StatusUnavailable):
+                reason = "status_proofs_not_ready"
+            elif isinstance(exc, CollectorError):
                 reason = "collector_failed"
             elif isinstance(exc, TimeoutError):
                 reason = "timeout"
@@ -1055,6 +1081,8 @@ COLLECTOR_CONTRACT = {
         "quote_pcrs_b64",
     ],
     "exporter-proof-v1 response hex fields": ["qualifying_data_hex"],
+    "status-inventory-v1 request": {"operation": "status-inventory-v1"},
+    "status-inventory-v1 response fields": ["chain_b64", "driver", "vbios", "architecture"],
 }
 
 
@@ -1102,6 +1130,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="a connection not admitted (preface, handshake, exporter proof) "
         "within this many seconds of accept is force-closed",
     )
+    parser.add_argument("--status-proofs", action="store_true",
+                        help="deliver independently refreshed signed status proofs")
     parser.add_argument("--print-collector-contract", action="store_true")
     return parser
 
@@ -1133,6 +1163,10 @@ def main() -> int:
     metrics_server = LoopbackMetricsServer((args.metrics_host, args.metrics_port), tally)
     metrics_thread = threading.Thread(target=metrics_server.serve_forever, daemon=True)
     metrics_thread.start()
+    status_cache = ProofCache(Collateral()) if args.status_proofs else None
+    status_worker = StatusWorker(collector, status_cache) if status_cache is not None else None
+    if status_worker is not None:
+        status_worker.start()
     try:
         with GatewayServer(
             (args.listen_host, args.listen_port),
@@ -1145,6 +1179,7 @@ def main() -> int:
             channel_force_close_grace=args.channel_force_close_grace_seconds,
             admission_timeout=args.admission_timeout_seconds,
             tally=tally,
+            status_cache=status_cache,
         ) as server:
             host, port = server.server_address
             print(json.dumps({"event": "listening", "host": host, "port": port}), flush=True)
@@ -1153,6 +1188,8 @@ def main() -> int:
             except KeyboardInterrupt:
                 pass
     finally:
+        if status_worker is not None:
+            status_worker.stop()
         metrics_server.shutdown()
         metrics_server.server_close()
     return 0

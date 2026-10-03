@@ -35,6 +35,7 @@ EXPORTER_PROOF_PATH: Final = "/._sol/spp/exporter-proof"
 COMPOSITE_MEDIA_TYPE: Final = "application/vnd.sol.spp-composite-evidence-v1+der"
 EXPORTER_PROOF_MEDIA_TYPE: Final = "application/vnd.sol.spp-exporter-proof-v1+der"
 PROTOCOL_VERSION: Final = 1
+STATUS_PROOFS: Final = json.loads(Path(__file__).with_name("status-proofs-contract.json").read_bytes())
 
 
 COMPOSITE_FIELDS: Final = (
@@ -196,6 +197,7 @@ class ExporterProof:
 def contract_artifact() -> dict[str, object]:
     return {
         "protocol_version": PROTOCOL_VERSION,
+        "status_proofs": STATUS_PROOFS,
         "preface": {"magic_ascii_nul": "SPPRAT1", "owner_nonce_bytes": OWNER_NONCE_BYTES},
         "x509_extension": {
             "oid": COMPOSITE_EVIDENCE_OID,

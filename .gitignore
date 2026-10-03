@@ -27,6 +27,7 @@ venv/
 *.cert
 *.crt
 *.der
+!test/status-proofs/*.der
 *.bin
 !test/fixtures/spp-attest-azure/*.bin
 *.quote
