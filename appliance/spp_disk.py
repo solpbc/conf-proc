@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import os
 from pathlib import Path
@@ -16,6 +17,32 @@ import uuid
 from typing import Final
 
 BUILD_EPOCH: Final = 1788652800
+
+
+FAT_VOLUME_SERIAL: Final = "53505031"
+FAKETIME_LIBRARY: Final = Path("/usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1")
+
+
+def mtools_env(mtools_root: Path, build_epoch: int) -> dict[str, str]:
+    """Environment for building the ESP with mtools at the build epoch.
+
+    mtools stamps FAT directory entries with the wall clock and ignores SOURCE_DATE_EPOCH, and
+    mformat draws a random volume serial unless one is given (`-N FAT_VOLUME_SERIAL`). Without
+    both, two builds of the same inputs produce different disks.
+    """
+    if not FAKETIME_LIBRARY.is_file():
+        raise SystemExit("pinned faketime library is missing; use the toolchain root")
+    frozen = datetime.datetime.fromtimestamp(build_epoch, datetime.timezone.utc)
+    return {
+        "PATH": str(mtools_root) + ":/usr/bin:/bin",
+        "LANG": "C",
+        "LC_ALL": "C",
+        "TZ": "UTC",
+        "MTOOLS_SKIP_CHECK": "1",
+        "LD_PRELOAD": str(FAKETIME_LIBRARY),
+        "FAKETIME": frozen.strftime("%Y-%m-%d %H:%M:%S"),
+        "FAKETIME_DONT_FAKE_MONOTONIC": "1",
+    }
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -297,15 +324,9 @@ def build_disk(
     fat = work / "esp.fat"
     with fat.open("xb") as handle:
         handle.truncate(sizes["esp"])
-    env = {
-        "PATH": str(mtools_root) + ":/usr/bin:/bin",
-        "LANG": "C",
-        "LC_ALL": "C",
-        "TZ": "UTC",
-        "MTOOLS_SKIP_CHECK": "1",
-    }
+    env = mtools_env(mtools_root, build_epoch)
     run(
-        [str(mtools_root / "mformat"), "-i", str(fat), "-F", "-v", "SPPDIAG", "::"],
+        [str(mtools_root / "mformat"), "-i", str(fat), "-F", "-N", FAT_VOLUME_SERIAL, "-v", "SPPDIAG", "::"],
         cwd=work,
         env=env,
         command_prefix=command_prefix,

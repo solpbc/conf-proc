@@ -701,15 +701,9 @@ def build_disk_r1(
     fat = work / "esp.fat"
     with fat.open("xb") as handle:
         handle.truncate(sizes["esp"])
-    env = {
-        "PATH": str(mtools_root) + ":/usr/bin:/bin",
-        "LANG": "C",
-        "LC_ALL": "C",
-        "TZ": "UTC",
-        "MTOOLS_SKIP_CHECK": "1",
-    }
+    env = spp_disk.mtools_env(mtools_root, build_epoch)
     spp_disk.run(
-        [str(mtools_root / "mformat"), "-i", str(fat), "-F", "-v", "SPPR1", "::"],
+        [str(mtools_root / "mformat"), "-i", str(fat), "-F", "-N", spp_disk.FAT_VOLUME_SERIAL, "-v", "SPPR1", "::"],
         cwd=work,
         env=env,
         command_prefix=command_prefix,
