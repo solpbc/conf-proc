@@ -276,7 +276,7 @@ Environment=TRITON_CACHE_DIR=/run/sglang/triton
 Environment=OUTLINES_CACHE_DIR=/run/sglang/outlines
 TimeoutStartSec=2400
 ExecStartPre=/opt/spp/stage-model.sh
-ExecStart=/usr/bin/python3 -m sglang.launch_server --model-path /dev/shm/qwen --served-model-name Qwen/Qwen3.5-4B --host 127.0.0.1 --port 8000 --mem-fraction-static 0.80 --context-length 16384 --trust-remote-code --stream-response-default-include-usage
+ExecStart=/usr/bin/python3 -m sglang.launch_server --model-path /dev/shm/qwen --served-model-name Qwen/Qwen3.5-4B --host 127.0.0.1 --port 8000 --mem-fraction-static 0.80 --context-length 262144 --max-prefill-tokens 262144 --chunked-prefill-size 16384 --grammar-backend xgrammar --mm-process-config '{"image":{"max_pixels":1003520}}' --stream-response-default-include-usage
 Restart=no
 [Install]
 WantedBy=multi-user.target
