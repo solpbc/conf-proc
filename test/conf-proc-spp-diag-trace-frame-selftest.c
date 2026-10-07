@@ -7,7 +7,8 @@
 
 #include "../conf_proc_spp_diag_trace.h"
 
-/* Same-lode native vectors: baseline regression, not an independent oracle.
+/* Native vectors written with the implementation: baseline regression, not an
+ * independent oracle.
  * Overlap of caller-owned ranges is a non-detected precondition. */
 
 #define CANARY ((uint8_t)0xa5)

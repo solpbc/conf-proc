@@ -3,7 +3,7 @@
 
 This file is derived only from the reviewed wire prose.  It does not import,
 parse, or generate values from the production C header, implementation, or
-same-lode native tests.  Its sole production-facing input is a thin executable
+native tests written with it.  Its sole production-facing input is a thin executable
 that returns raw tab-separated numeric results, decoded fields, and bytes.
 """
 

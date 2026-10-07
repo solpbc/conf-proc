@@ -5,7 +5,7 @@
 
 Uses the shared PCR selection (conf_proc_spp_diag_pcr) and the shared quote-qualifying-
 data constructor (conf_proc_spp_diagbundle_protocol.quote_qualifying_data) -- never
-re-derives either by hand, per the two-extraction requirement this lode exists to
+re-derives either by hand, per the two-extraction requirement this module exists to
 satisfy. Never imports conf_proc_spp_diag_attest or any other appraiser module; the
 quote command is constructed and issued here, appraised only later, elsewhere.
 """
