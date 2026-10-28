@@ -164,14 +164,24 @@ def _expect_failure(action) -> None:
 class CResolverProbe:
     """Directly include the native resolver and run it against these fixtures."""
 
-    def __init__(self, directory: Path) -> None:
-        source = directory / "direct-resolver.c"
-        self.binary = directory / "direct-resolver"
+    def __init__(self, directory: Path, *, production: bool = False) -> None:
+        name = "direct-resolver-prod" if production else "direct-resolver"
+        source = directory / (name + ".c")
+        self.binary = directory / name
         escaped = str(ROOT / "spp-diag-runtime-src/spp_diag_handoff.c").replace("\\", "\\\\").replace('"', '\\"')
         source.write_text(
             f'''#define main embedded_handoff_main
 #include "{escaped}"
 #undef main
+
+#ifdef SPP_R1_GPT_PIN
+static int probe_open(void *ctx, const char *path, int flags, mode_t mode) {{
+    char expected[PATH_MAX];
+    if (strcmp(path, "/spp-gpt-array.bin") != 0 ||
+        snprintf(expected, sizeof(expected), "%s/spp-gpt-array.bin", (char *)ctx) < 0) return -1;
+    return open(expected, flags, mode);
+}}
+#endif
 
 int main(int argc, char **argv) {{
     static const char *const names[] = {{"ordinary", "gptdisk", "gptdiskp1", "duplicate", "duplicatep1", "rogue"}};
@@ -192,6 +202,11 @@ int main(int argc, char **argv) {{
     }}
     struct spp_diag_resolver_roots roots = {{class_root, dev_block_root, virtual_root, device_root, bindings, binding_count}};
     char id[32]; dev_t rdev = 0; int fd = -1; int result;
+#ifdef SPP_R1_GPT_PIN
+    const struct spp_diag_handoff_ops load_ops = {{.open=probe_open, .read=real_read, .close=real_close}};
+    if (spp_r1_load_gpt(&load_ops, argv[1]) != 0) result = -1;
+    else
+#endif
     result = spp_diag_resolve_partuuid_at(&roots, argv[2], id, sizeof(id), &rdev, &fd);
     if ((strcmp(argv[3], "ok") == 0 && result != 0) || (strcmp(argv[3], "fail") == 0 && result == 0)) {{
         if (fd >= 0) close(fd);
@@ -212,6 +227,8 @@ int main(int argc, char **argv) {{
             encoding="utf-8",
         )
         command = ["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-pedantic", "-o", str(self.binary), str(source)]
+        if production:
+            command.extend(["-DSPP_R1_SYSTEMD_INIT", "-DSPP_R1_GPT_PIN", "-static", "-Os"])
         compiled = subprocess.run(command, capture_output=True, text=True)
         assert compiled.returncode == 0, compiled.stderr
 

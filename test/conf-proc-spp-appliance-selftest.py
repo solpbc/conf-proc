@@ -60,7 +60,7 @@ class ApplianceCmdlineTest(unittest.TestCase):
             f_prod = build_cmdline(work, p_root, p_verity, p_binding, rhash, stage="prod")
             text_prod = f_prod.read_text()
             self.assertNotIn("console=", text_prod)
-            self.assertIn("ip=off spp_diag.root_data=", text_prod)
+            self.assertIn("ip=off systemd.gpt_auto=0 systemd.swap=0 spp_diag.root_data=", text_prod)
 
 
 def fake_nft_pkg(root: Path) -> Path:

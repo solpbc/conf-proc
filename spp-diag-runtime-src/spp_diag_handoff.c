@@ -12,9 +12,9 @@
  * execve's the fixed PID-1 controller with the two tokens after ``--`` and
  * three pre-opened, inheritable fds (trace control=3, trace stream=4, serial=5).
  *
- * Every privileged operation is routed through struct spp_diag_handoff_ops
- * A compile-time-only test build substitutes a recording/scripted fake. The
- * production binary contains no environment-selected harness path.
+ * Boot orchestration uses struct spp_diag_handoff_ops; native GPT discovery
+ * performs its bounded sysfs and disk reads directly. Test fixtures bind
+ * ordinary files explicitly. Production has no environment-selected harness.
  *
  * The kernel's own pre-release canary check (call_usermodehelper against
  * /usr/local/libexec/solstone/pre-release-denied) runs entirely inside the
@@ -119,6 +119,31 @@ struct spp_diag_handoff_ops {
 /* ------------------------------------------------------------------ */
 /* Cmdline parsing                                                     */
 /* ------------------------------------------------------------------ */
+
+#ifdef SPP_R1_GPT_PIN
+static unsigned char spp_r1_gpt_array[128U * 128U];
+static int spp_r1_gpt_ready;
+
+static int spp_r1_load_gpt(const struct spp_diag_handoff_ops *ops, void *ctx) {
+    spp_r1_gpt_ready = 0;
+    int fd = ops->open(ctx, "/spp-gpt-array.bin", O_RDONLY | O_NOFOLLOW, 0);
+    if (fd < 0) return -1;
+    size_t used = 0;
+    int result = -1;
+    while (used < sizeof(spp_r1_gpt_array)) {
+        ssize_t got = ops->read(ctx, fd, spp_r1_gpt_array + used, sizeof(spp_r1_gpt_array) - used);
+        if (got <= 0) goto done;
+        used += (size_t)got;
+    }
+    unsigned char extra;
+    if (ops->read(ctx, fd, &extra, 1) != 0) goto done;
+    result = 0;
+done:
+    if (ops->close(ctx, fd) != 0) result = -1;
+    spp_r1_gpt_ready = result == 0;
+    return result;
+}
+#endif
 
 struct spp_diag_cmdline_fields {
     char data_partuuid[128];
@@ -463,6 +488,11 @@ int spp_diag_handoff_run(const struct spp_diag_handoff_ops *ops, void *ctx) {
     if (spp_r1_parse_cmdline(cmdline, &fields) != 0) {
         return SPP_DIAG_HANDOFF_ERR_CMDLINE_MALFORMED;
     }
+#ifdef SPP_R1_GPT_PIN
+    if (spp_r1_load_gpt(ops, ctx) != 0) {
+        return SPP_DIAG_HANDOFF_ERR_VERITY;
+    }
+#endif
     if (spp_r1_load_module("/modules/dm-bufio.ko") != 0 ||
         spp_r1_load_module("/modules/dm-verity.ko") != 0) {
         return SPP_DIAG_HANDOFF_ERR_VERITY;
@@ -1492,6 +1522,9 @@ static int spp_diag_scan_disk(
             *found = 1;
         }
     }
+#ifdef SPP_R1_GPT_PIN
+    if (*found && (!spp_r1_gpt_ready || memcmp(first_array, spp_r1_gpt_array, sizeof(first_array)) != 0)) goto done;
+#endif
     result = spp_diag_revalidate_node(roots, fd, disk->major_number, disk->minor_number, &selected_stat);
 done:
     if (fd >= 0 && close(fd) != 0) result = -1;

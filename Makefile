@@ -134,8 +134,12 @@ test:
 	$(PYTHON) test/conf-proc-spp-candidate-workloads-selftest.py
 	$(PYTHON) test/python-verifier-selftest.py
 	$(PYTHON) test/ratls-gateway-selftest.py
+	$(PYTHON) test/collector-deadline-selftest.py
 	$(PYTHON) test/ratls-status-proofs-selftest.py
 	$(PYTHON) test/usage-tally-selftest.py
+	$(PYTHON) test/fleet-usage-selftest.py
+	$(PYTHON) test/allowance-selftest.py
+	$(PYTHON) test/health-push-selftest.py
 	$(PYTHON) test/conf-proc-spp-appliance-selftest.py
 
 	$(PYTHON) test/spp-health-selftest.py

@@ -13,6 +13,8 @@ import os
 import threading
 from typing import Any
 
+from fleet_usage import FleetUsage
+
 TOKEN_MAX = 2**31 - 1
 USAGE_OBJECT_MAX_BYTES = 4096
 KEY_MAX_BYTES = 4096
@@ -28,6 +30,7 @@ class UsageWalker:
 
     def __init__(self) -> None:
         self.last: tuple[int, int] | None = None
+        self.last_cached: int | None = None
         self.bad: bool = False
         # Buffer or depth overflow: do not record totals for this response.
         self.disabled: bool = False
@@ -122,14 +125,14 @@ class UsageWalker:
                     self._expecting_key = False
                     self._key_buffer.clear()
                 elif self._expecting_value:
-                    if self._current_key == "usage":
+                    if self._current_key == "usage" and self._depth == 1:
                         self.bad = True
                     self._expecting_value = False
                     self._current_key = None
                 continue
 
             if self._expecting_value and not (b in b" \t\r\n"):
-                if self._current_key == "usage":
+                if self._current_key == "usage" and self._depth == 1:
                     if b == ord(b"{"):
                         self._capturing_usage = True
                         self._usage_start_depth = self._depth + 1
@@ -194,6 +197,9 @@ class UsageWalker:
                     and 0 <= ct <= TOKEN_MAX
                 ):
                     self.last = (pt, ct)
+                    details = parsed.get("prompt_tokens_details")
+                    cached = details.get("cached_tokens") if isinstance(details, dict) else None
+                    self.last_cached = cached if type(cached) is int and 0 <= cached <= pt else None
                 else:
                     self.bad = True
             else:
@@ -207,12 +213,13 @@ class UsageWalker:
 class ChatTally:
     """Thread-safe accounting of token usage across admitted channels."""
 
-    def __init__(self, key: bytes | None = None) -> None:
+    def __init__(self, key: bytes | None = None, fleet: FleetUsage | None = None) -> None:
         self._key = key if key is not None else os.urandom(32)
         self._lock = threading.Lock()
         self._prompt_tokens: dict[str, int] = {}
         self._completion_tokens: dict[str, int] = {}
         self._incomplete: int = 0
+        self.fleet = fleet if fleet is not None else FleetUsage()
 
     def label_for(self, credential: str) -> str:
         return device_label(self._key, credential)
@@ -233,12 +240,14 @@ class ChatTally:
                     pt, ct = last
                     self._prompt_tokens[label] = self._prompt_tokens.get(label, 0) + pt
                     self._completion_tokens[label] = self._completion_tokens.get(label, 0) + ct
+                    self.fleet.record(label, pt, ct, walker.last_cached)
                 self._incomplete += 1
                 return
             if not bad and last is not None:
                 pt, ct = last
                 self._prompt_tokens[label] = self._prompt_tokens.get(label, 0) + pt
                 self._completion_tokens[label] = self._completion_tokens.get(label, 0) + ct
+                self.fleet.record(label, pt, ct, walker.last_cached)
             else:
                 self._incomplete += 1
 

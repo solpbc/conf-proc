@@ -5,7 +5,7 @@
     "sources": [
       {
         "path": "spp-diag-runtime-src/spp_diag_handoff.c",
-        "sha256": "f58c09d44a8edab985bb0ed6c526c277b6bc1b144612721daa8644d7b115f49b"
+        "sha256": "58215ff86a3f93d261c4fdcbcac837aef25f250ee89af2b48d9f14bf9b760761"
       }
     ],
     "headers": []

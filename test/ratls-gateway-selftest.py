@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import io
+from email.message import Message
 import json
 import hashlib
 import http.server
@@ -98,6 +99,7 @@ from spp_health import HEALTH_PROBE_ENTITLEMENT, admit_gateway, probe_gateway  #
 
 
 TEST_ENTITLEMENT = "test-entitlement-token"
+TEST_JOURNAL = "J" * 43
 AUTHORIZATION_LINE = f"Authorization: Bearer {TEST_ENTITLEMENT}\r\n".encode()
 
 
@@ -123,6 +125,8 @@ class EntitlementAuthority:
                 )
                 self.send_response(response_status or (204 if authorized else 401))
                 self.send_header("Cache-Control", "no-store")
+                if authorized:
+                    self.send_header("X-Sol-SPP-Journal", TEST_JOURNAL)
                 self.end_headers()
 
             def log_message(self, _format: str, *_args: object) -> None:
@@ -343,6 +347,8 @@ class _FakeAuthorizeResponse:
     def __init__(self, status: int, body: bytes = b"") -> None:
         self.status = status
         self.body = body
+        self.headers = Message()
+        self.headers["X-Sol-SPP-Journal"] = TEST_JOURNAL
 
     def read(self, *_args: object, **_kwargs: object) -> bytes:
         return self.body
@@ -378,7 +384,21 @@ class PortalEntitlementAuthorizerDetailTest(unittest.TestCase):
 
     def test_204_success_admits(self) -> None:
         self._stub_open(lambda: _FakeAuthorizeResponse(204))
-        self.assertIsNone(self.authorizer.authorize("cred"))
+        result = self.authorizer.authorize("cred")
+        self.assertEqual(result.journal, TEST_JOURNAL)
+        self.assertIsNone(result.policy)
+
+    def test_invalid_authorization_metadata_fails_with_fixed_detail(self) -> None:
+        for values in ([], ["private-malformed-value"], [TEST_JOURNAL, TEST_JOURNAL]):
+            response = _FakeAuthorizeResponse(204)
+            del response.headers["X-Sol-SPP-Journal"]
+            for value in values:
+                response.headers["X-Sol-SPP-Journal"] = value
+            self._stub_open(lambda: response)
+            with self.assertRaises(EntitlementUnavailableError) as ctx:
+                self.authorizer.authorize("cred")
+            self.assertEqual(ctx.exception.detail, "status")
+            self.assertEqual(str(ctx.exception), "invalid authorization metadata")
 
     def test_bare_timeout_classifies_as_timeout(self) -> None:
         self._assert_detail(TimeoutError("timed out"), "timeout")

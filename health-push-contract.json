@@ -1,0 +1,413 @@
+{
+  "contract": "sol-spp-health-push",
+  "version": 1,
+  "authentication": "Source address only: the receiver admits exact sol-pbc-held IPs (ALLOWED_SOURCES) before parsing or storage, over TLS to the fixed hostname. The sender never reads a response body or header. Advisory only; never attestation.",
+  "transport": {
+    "content_type": "application/json",
+    "report_path": "/v1/report",
+    "max_report_bytes": 8192,
+    "push_interval_seconds": 60
+  },
+  "messages": {
+    "report": {
+      "type": "object",
+      "fields": {
+        "v": {
+          "type": "int",
+          "min": 1,
+          "max": 1
+        },
+        "kind": {
+          "type": "enum",
+          "values": [
+            "report"
+          ]
+        },
+        "build": {
+          "type": "hex",
+          "bytes": 32,
+          "note": "fixed source identity, self-reported, advisory cross-check only"
+        },
+        "boot": {
+          "type": "hex",
+          "bytes": 16
+        },
+        "accounting_boot": {
+          "type": "hex",
+          "bytes": 16,
+          "note": "gateway tally generation; counters and histogram never sum across generations"
+        },
+        "seq": {
+          "type": "int",
+          "min": 1,
+          "max": 9007199254740991
+        },
+        "uptime_s": {
+          "type": "int",
+          "min": 0,
+          "max": 1000000000
+        },
+        "cc": {
+          "type": "object",
+          "fields": {
+            "mode": {
+              "type": "enum",
+              "values": [
+                "on",
+                "off",
+                "unknown"
+              ],
+              "healthy": [
+                "on"
+              ]
+            },
+            "environment": {
+              "type": "enum",
+              "values": [
+                "production",
+                "development",
+                "unknown"
+              ],
+              "healthy": [
+                "production"
+              ]
+            }
+          }
+        },
+        "gpu": {
+          "type": "object",
+          "fields": {
+            "present": {
+              "type": "int",
+              "min": 0,
+              "max": 16,
+              "healthy": [
+                1
+              ]
+            },
+            "cc_ready": {
+              "type": "int",
+              "min": 0,
+              "max": 16,
+              "healthy": [
+                1
+              ]
+            }
+          }
+        },
+        "units": {
+          "type": "object",
+          "fields": {
+            "spp-gateway": {
+              "$ref": "unit"
+            },
+            "sglang": {
+              "$ref": "unit"
+            },
+            "spp-asr": {
+              "$ref": "unit"
+            },
+            "spp-gpu-bringup": {
+              "$ref": "oneshot_unit"
+            },
+            "spp-egress": {
+              "$ref": "oneshot_unit"
+            }
+          }
+        },
+        "models": {
+          "type": "object",
+          "fields": {
+            "text": {
+              "$ref": "model"
+            },
+            "asr": {
+              "$ref": "model"
+            }
+          }
+        },
+        "collector": {
+          "type": "object",
+          "fields": {
+            "snapshot": {
+              "type": "enum",
+              "values": [
+                "current",
+                "missing",
+                "stale",
+                "invalid"
+              ],
+              "healthy": [
+                "current"
+              ]
+            },
+            "state": {
+              "type": "enum",
+              "values": [
+                "idle",
+                "running",
+                "unavailable"
+              ],
+              "healthy": [
+                "idle",
+                "running"
+              ]
+            },
+            "operation": {
+              "type": "enum",
+              "values": [
+                "none",
+                "certificate-evidence-v1",
+                "exporter-proof-v1",
+                "status-inventory-v1",
+                "unknown"
+              ]
+            },
+            "active_ms": {
+              "type": "int",
+              "min": 0,
+              "max": 86400000,
+              "healthy_max": 130000
+            },
+            "last_result": {
+              "type": "enum",
+              "values": [
+                "none",
+                "success",
+                "failed",
+                "queue_timeout",
+                "execution_timeout",
+                "cleanup_failed"
+              ],
+              "healthy": [
+                "none",
+                "success",
+                "failed",
+                "queue_timeout",
+                "execution_timeout"
+              ]
+            },
+            "queue_timeouts": {
+              "type": "int",
+              "min": 0,
+              "max": 1000000000
+            },
+            "execution_timeouts": {
+              "type": "int",
+              "min": 0,
+              "max": 1000000000
+            },
+            "available": {
+              "type": "bool",
+              "healthy": [
+                true
+              ]
+            }
+          }
+        },
+        "counters": {
+          "type": "object",
+          "fields": {
+            "as_of_day": {
+              "type": "int",
+              "min": 0,
+              "max": 99991231
+            },
+            "prompt_tokens_total": {
+              "type": "int",
+              "min": 0,
+              "max": 9007199254740991
+            },
+            "prompt_tokens_cached": {
+              "type": "int",
+              "min": 0,
+              "max": 9007199254740991
+            },
+            "prompt_tokens_cache_measured": {
+              "type": "int",
+              "min": 0,
+              "max": 9007199254740991
+            },
+            "cache_unavailable_responses": {
+              "type": "int",
+              "min": 0,
+              "max": 9007199254740991
+            }
+          },
+          "note": "cumulative values frozen at the last UTC midnight; as_of_day YYYYMMDD, 0 until the first midnight"
+        },
+        "histogram": {
+          "type": "object",
+          "protected": true,
+          "fields": {
+            "month": {
+              "type": "int",
+              "min": 0,
+              "max": 999912
+            },
+            "released": {
+              "type": "bool"
+            },
+            "counted_days": {
+              "type": "int",
+              "min": 0,
+              "max": 31
+            },
+            "bands": {
+              "type": "array",
+              "len": 3,
+              "items": {
+                "type": "int",
+                "min": 0,
+                "max": 1000000000
+              }
+            }
+          }
+        },
+        "errors": {
+          "type": "array",
+          "max_len": 8,
+          "items": {
+            "type": "object",
+            "fields": {
+              "component": {
+                "type": "enum",
+                "values": [
+                  "spp-gateway",
+                  "sglang",
+                  "spp-asr",
+                  "collector",
+                  "reporter",
+                  "kernel"
+                ]
+              },
+              "code": {
+                "type": "enum",
+                "values": [
+                  "crash",
+                  "oom",
+                  "abort",
+                  "timeout",
+                  "restart_limit",
+                  "gpu_xid",
+                  "unknown"
+                ]
+              },
+              "count": {
+                "type": "int",
+                "min": 1,
+                "max": 1000000000
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "unit": {
+      "type": "object",
+      "fields": {
+        "state": {
+          "type": "enum",
+          "values": [
+            "active",
+            "activating",
+            "deactivating",
+            "inactive",
+            "failed",
+            "unknown"
+          ],
+          "healthy": [
+            "active"
+          ]
+        },
+        "restarts": {
+          "type": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "last_exit": {
+          "type": "enum",
+          "values": [
+            "none",
+            "clean",
+            "signal",
+            "error",
+            "oom",
+            "timeout",
+            "unknown"
+          ]
+        }
+      }
+    },
+    "oneshot_unit": {
+      "type": "object",
+      "fields": {
+        "state": {
+          "type": "enum",
+          "values": [
+            "active",
+            "activating",
+            "deactivating",
+            "inactive",
+            "failed",
+            "unknown"
+          ],
+          "healthy": [
+            "active"
+          ]
+        },
+        "restarts": {
+          "type": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "last_exit": {
+          "type": "enum",
+          "values": [
+            "none",
+            "clean",
+            "signal",
+            "error",
+            "oom",
+            "timeout",
+            "unknown"
+          ],
+          "healthy": [
+            "none",
+            "clean"
+          ]
+        }
+      }
+    },
+    "model": {
+      "type": "object",
+      "fields": {
+        "identity": {
+          "type": "enum",
+          "values": [
+            "match",
+            "mismatch",
+            "unknown"
+          ],
+          "healthy": [
+            "match"
+          ]
+        },
+        "ready": {
+          "type": "enum",
+          "values": [
+            "ready",
+            "loading",
+            "failed",
+            "unknown"
+          ],
+          "healthy": [
+            "ready"
+          ]
+        }
+      }
+    }
+  }
+}

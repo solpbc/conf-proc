@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -22,6 +23,7 @@ if str(BUILD_DIR) not in sys.path:
     sys.path.insert(0, str(BUILD_DIR))
 
 import spp_disk
+import spp_layout
 from spp_image_sbom import generate_image_sbom
 from spp_image_sbom_check import check_image_sbom
 
@@ -108,11 +110,19 @@ for port in sorted(ports):
 """
 
 NFT_RULESET: Final = """table inet spp_filter {
+    chain input {
+        type filter hook input priority 0; policy drop;
+        iif "lo" accept
+        ct state established,related accept
+        udp sport 67 udp dport 68 accept
+        tcp dport 9443 accept
+    }
     chain output {
         type filter hook output priority 0; policy drop;
+        socket cgroupv2 level 1 "sppcontent.slice" oif "lo" tcp dport { 9100, 9443 } drop
         oif "lo" accept
-        ct state established,related accept
         socket cgroupv2 level 1 "sppcontent.slice" drop
+        ct state established,related accept
         udp sport 68 udp dport 67 accept
         ip daddr 168.63.129.16 udp dport 53 accept
         ip daddr 168.63.129.16 tcp dport 53 accept
@@ -175,6 +185,7 @@ After=network.target
 [Service]
 Environment=PYTHONPATH=/opt/conf-proc:/opt/spp/pydeps
 RuntimeDirectory=gw
+RuntimeDirectoryMode=0700
 Environment=TMPDIR=/run/gw
 ExecStart=/usr/bin/python3 /opt/conf-proc/ratls_gateway.py --listen-host 0.0.0.0 --listen-port 9443 --upstream-host 127.0.0.1 --upstream-port 8000 --audio-upstream-host 127.0.0.1 --audio-upstream-port 8100 --collector-command /opt/conf-proc/run-collector.sh --entitlement-url https://services.solstone.app/spp/authorize --entitlement-timeout 10 --metrics-host 127.0.0.1 --metrics-port 9100 --status-proofs
 Restart=no
@@ -276,7 +287,7 @@ Environment=TRITON_CACHE_DIR=/run/sglang/triton
 Environment=OUTLINES_CACHE_DIR=/run/sglang/outlines
 TimeoutStartSec=2400
 ExecStartPre=/opt/spp/stage-model.sh
-ExecStart=/usr/bin/python3 -m sglang.launch_server --model-path /dev/shm/qwen --served-model-name Qwen/Qwen3.5-4B --host 127.0.0.1 --port 8000 --mem-fraction-static 0.80 --context-length 262144 --max-prefill-tokens 262144 --chunked-prefill-size 16384 --grammar-backend xgrammar --mm-process-config '{"image":{"max_pixels":1003520}}' --stream-response-default-include-usage
+ExecStart=/usr/bin/python3 -m sglang.launch_server --model-path /dev/shm/qwen --served-model-name Qwen/Qwen3.5-4B --host 127.0.0.1 --port 8000 --mem-fraction-static 0.80 --context-length 262144 --max-prefill-tokens 262144 --chunked-prefill-size 16384 --grammar-backend xgrammar --mm-process-config '{"image":{"min_pixels":65536,"max_pixels":3686400}}' --stream-response-default-include-usage --enable-cache-report
 Restart=no
 [Install]
 WantedBy=multi-user.target
@@ -316,8 +327,26 @@ def _require(unit: str, deps: str, slice_name: str) -> str:
 
 SLICE_UNITS: Final = {
     "sppcontent.slice": "[Unit]\nDescription=SPP content-handling services (no egress beyond loopback)\n",
-    "sppgateway.slice": "[Unit]\nDescription=SPP RA-TLS gateway (the only service allowed out on 443)\n",
+    "sppgateway.slice": "[Unit]\nDescription=SPP gateway and fixed health reporter (443 egress)\n",
 }
+
+UNIT_HEALTH: Final = """[Unit]
+Description=SPP fixed-schema advisory health push
+Requires=spp-egress.service
+After=spp-egress.service network.target systemd-tmpfiles-setup.service
+[Service]
+User=spp-health
+Group=spp-health
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+Slice=sppgateway.slice
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 /opt/conf-proc/spp_health_push.py
+Restart=on-failure
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+"""
 
 
 def unit_sglang(stage: str) -> str:
@@ -627,7 +656,7 @@ def build_cmdline(
     cmdline_file = work / "cmdline.txt"
     cmdline = (
         "ro rdinit=/spp-diag-handoff root=/dev/mapper/spp-diag-root rootfstype=squashfs "
-        "ip=off " + ("" if stage in PROD_STAGES else "console=ttyS0 ")
+        "ip=off " + ("systemd.gpt_auto=0 systemd.swap=0 " if stage in PROD_STAGES else "console=ttyS0 ")
         + f"spp_diag.root_data=PARTUUID={root_partuuid} "
         f"spp_diag.root_hash=PARTUUID={verity_partuuid} "
         f"spp_diag.roothash={root_hash}"
@@ -649,6 +678,7 @@ def build_disk_r1(
     run_id: str,
     build_epoch: int = BUILD_EPOCH,
     command_prefix: list[str] | tuple[str, ...] = (),
+    expected_gpt: bytes | None = None,
 ) -> tuple[Path, dict[str, object]]:
     mib = 1024 * 1024
     gib = 1024 * 1024 * 1024
@@ -663,6 +693,12 @@ def build_disk_r1(
     for name in ("esp", "root", "verity", "binding"):
         starts[name] = cursor
         cursor += sizes[name]
+
+    if expected_gpt is not None:
+        if diagnostic.stat().st_size > spp_layout.UKI_PAYLOAD_MAX:
+            raise ValueError("production UKI exceeds fixed ESP payload budget")
+        sizes, starts = spp_layout.geometry(rootfs.stat().st_size, verity.stat().st_size)
+        cursor = starts["binding"] + sizes["binding"]
 
     virtual_size = max(gib, spp_disk.align(cursor + 8 * mib, gib))
     raw = work / "diagnostic.raw"
@@ -690,6 +726,14 @@ def build_disk_r1(
         )
     command.append(str(raw))
     spp_disk.run(command, cwd=work, command_prefix=command_prefix)
+    if expected_gpt is not None:
+        with raw.open("rb") as disk:
+            disk.seek(2 * 512)
+            primary = disk.read(16384)
+            disk.seek(virtual_size - 512 - 16384)
+            backup = disk.read(16384)
+        if len(expected_gpt) != 16384 or primary != expected_gpt or backup != expected_gpt:
+            raise ValueError("constructed GPT does not match measured partition entries")
     verify = spp_disk.run(
         ["/usr/sbin/sgdisk", "--verify", "--print", str(raw)],
         cwd=work,
@@ -815,10 +859,10 @@ def _inventory_files(tree: Path) -> set[str]:
     return files
 
 
-# What the image runs from this repository: the gateway, its collector, the ASR sidecar and the
-# AMD roots they check against. Nothing else of the repo reaches the image, so a change to the
-# recipe or the docs does not move the roothash, and the image carries no unused code.
-RUNTIME_SOURCE: Final = ("LICENSE", "asr_shim.py", "ratls_collector.py", "ratls_contract.py",
+# Runtime files from this repository. The image also binds the source commit in
+# /etc/spp/build-id, so even a documentation-only commit changes the root hash.
+RUNTIME_SOURCE: Final = ("LICENSE", "allowance.py", "asr_shim.py", "ratls_collector.py", "ratls_contract.py", "fleet_usage.py",
+                         "spp_health_push.py", "health-push-contract.json",
                          "ratls_gateway.py", "ratls_status_proofs.py", "status-proofs-contract.json",
                          "status-collateral/", "roots/amd/", "strict_wav.py", "usage_tally.py", "verifier.py")
 
@@ -871,6 +915,11 @@ def assemble_serving_rootfs(
     # The tree shares inodes with the SGLang input (cp -al): replace, never write through.
     (tree / "etc/machine-id").unlink(missing_ok=True)
     (tree / "etc/machine-id").write_text("00000000000000000000000000000001\n")
+    patches = []
+    if stage in PROD_STAGES:
+        from sglang_patches import apply
+        patches = apply(tree)
+        (work / "serving-patches.json").write_text(canonical_dumps(patches))
     sglang_files = _inventory_files(tree)
     origins.append(
         {
@@ -881,9 +930,13 @@ def assemble_serving_rootfs(
             if paths["SGLANG_ROOTFS"].is_file()
             else "",
             "revision": "",
-            "files": sorted(sglang_files),
+            "files": sorted(sglang_files - {p["path"] for p in patches}),
         }
     )
+    if patches:
+        origins.append({"kind": "recipe", "name": "sglang-cache-measurements", "version": "1",
+                        "sha256": "", "revision": require_clean_repo(REPO),
+                        "files": sorted(p["path"] for p in patches)})
 
     # Driver debs
     driver_debs = paths["DRIVER_DEBS"]
@@ -1266,6 +1319,15 @@ def assemble_rootfs_prod(
         )
 
     harden_service_identities(tree)
+    (tree / "etc/systemd/system/spp-health.service").write_text(UNIT_HEALTH)
+    (tree / "etc/systemd/system/multi-user.target.wants/spp-health.service").symlink_to(
+        "/etc/systemd/system/spp-health.service")
+    health_tmpfiles = tree / "etc/tmpfiles.d/spp-health.conf"
+    health_tmpfiles.parent.mkdir(parents=True, exist_ok=True)
+    health_tmpfiles.write_text("d /run/spp-health 0750 spp-gateway spp-health -\n")
+    build_id = tree / "etc/spp/build-id"
+    build_id.parent.mkdir(parents=True, exist_ok=True)
+    build_id.write_text(hashlib.sha256((require_clean_repo(REPO) + "\0" + stage).encode("ascii")).hexdigest() + "\n")
     smoke_imports(tree)
 
     # Ensure all files currently in tree are accounted for
@@ -1296,8 +1358,9 @@ def harden_service_identities(tree: Path) -> None:
     for name, rows in (
         ("passwd", ["spp-gateway:x:61100:61100::/run/gw:/usr/sbin/nologin",
                     "spp-sglang:x:61101:61101::/run/sglang:/usr/sbin/nologin",
-                    "spp-asr:x:61102:61102::/run/asr:/usr/sbin/nologin"]),
-        ("group", ["spp-gateway:x:61100:", "spp-sglang:x:61101:", "spp-asr:x:61102:"]),
+                    "spp-asr:x:61102:61102::/run/asr:/usr/sbin/nologin",
+                    "spp-health:x:61103:61103::/run/spp-health:/usr/sbin/nologin"]),
+        ("group", ["spp-gateway:x:61100:", "spp-sglang:x:61101:", "spp-asr:x:61102:", "spp-health:x:61103:"]),
     ):
         path = tree / "etc" / name
         old = path.read_text()
@@ -1380,13 +1443,14 @@ def smoke_imports(tree: Path) -> None:
             raise SystemExit(f"{name} imports fail inside the image:\n{result.stderr[-2000:]}")
 
 
-def compile_r1_init(work: Path) -> Path:
+def compile_r1_init(work: Path, *, stage: str = "1a") -> Path:
     # The flags the qualified boots' init was built with.
     out = work / "spp-diag-handoff"
     spp_disk.run(
         [
             "/usr/bin/gcc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-pedantic",
             "-DSPP_R1_SYSTEMD_INIT", "-static", "-Os",
+            *(["-DSPP_R1_GPT_PIN"] if stage in PROD_STAGES else []),
             str(REPO / "spp-diag-runtime-src/spp_diag_handoff.c"),
             "-o", str(out),
         ],
@@ -1437,11 +1501,16 @@ def build_initramfs_r1(
     paths: dict[str, Path],
     *,
     build_epoch: int = BUILD_EPOCH,
+    expected_gpt: Path | None = None,
 ) -> Path:
     # The layout the init expects: it mounts proc/sys/devtmpfs onto /proc, /sys and /dev, opens
     # the verity root at /mnt/spp-diag-root, and loads /modules/dm-bufio.ko and dm-verity.ko.
     directories = (".", "dev", "dev/mapper", "mnt", "mnt/spp-diag-root", "modules", "proc", "sys")
     files = {"spp-diag-handoff": (init_bin, stat.S_IFREG | 0o555)}
+    if expected_gpt is not None:
+        if expected_gpt.stat().st_size != 16384:
+            raise ValueError("invalid expected GPT array size")
+        files["spp-gpt-array.bin"] = (expected_gpt, stat.S_IFREG | 0o444)
     for mod_name in R1_MODULES:
         mod_path = paths["MODULE_DIR"] / mod_name
         if not mod_path.exists():
@@ -1710,7 +1779,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--signer-dir is required unless --ephemeral-signer is given")
 
     # Compile handoff init
-    init_bin = compile_r1_init(work)
+    init_bin = compile_r1_init(work, stage=stage)
 
     # Assemble Rootfs
     origins: list[dict[str, object]] = []
@@ -1733,8 +1802,23 @@ def main(argv: list[str] | None = None) -> int:
     # Verity
     verity, _, root_hash = spp_disk.build_verity(work, rootfs, run_id=run_id, command_prefix=cmd_prefix)
 
+    # Partition identities and geometry are known before signing the UKI.
+    import uuid
+    partuuids = {
+        name: str(uuid.uuid5(uuid.NAMESPACE_URL, f"{run_id}:{name}"))
+        for name in ("esp", "root", "verity", "binding")
+    }
+    disk_guid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{run_id}:disk"))
+    expected_gpt = None
+    expected_gpt_path = None
+    if stage in PROD_STAGES:
+        expected_gpt = spp_layout.entry_array(rootfs.stat().st_size, verity.stat().st_size, partuuids)
+        expected_gpt_path = work / "spp-gpt-array.bin"
+        spp_disk.write_bytes(expected_gpt_path, expected_gpt, 0o444)
+
     # Initramfs
-    initramfs = build_initramfs_r1(work, init_bin, paths, build_epoch=BUILD_EPOCH)
+    initramfs = build_initramfs_r1(work, init_bin, paths, build_epoch=BUILD_EPOCH,
+                                 expected_gpt=expected_gpt_path)
 
     # For prod stage: emit origins & SBOM outside rootfs
     if stage in PROD_STAGES:
@@ -1749,15 +1833,6 @@ def main(argv: list[str] | None = None) -> int:
         sbom_doc = generate_image_sbom(tree, origins, boot_meta, build_epoch=BUILD_EPOCH)
         (work / "image-sbom.json").write_text(canonical_dumps(sbom_doc))
         check_image_sbom(tree, sbom_doc)
-
-    # UUIDs
-    import uuid
-
-    partuuids = {
-        name: str(uuid.uuid5(uuid.NAMESPACE_URL, f"{run_id}:{name}"))
-        for name in ("esp", "root", "verity", "binding")
-    }
-    disk_guid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{run_id}:disk"))
 
     # Cmdline & UKI
     cmdline = build_cmdline(
@@ -1821,6 +1896,7 @@ def main(argv: list[str] | None = None) -> int:
             run_id=run_id,
             build_epoch=BUILD_EPOCH,
             command_prefix=cmd_prefix,
+            expected_gpt=expected_gpt,
         )
 
     # Certificate DER sha256

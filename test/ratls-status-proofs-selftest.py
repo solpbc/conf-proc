@@ -334,15 +334,19 @@ class InventoryAndDeliveryTest(unittest.TestCase):
         cache = populated()
         admitted = []
         expired = [False]
+        deadlines = []
         class Collector:
-            def collect_composite(_self, nonce, spki):
+            def collect_composite(_self, nonce, spki, *, deadline=None):
+                deadlines.append(deadline)
                 return CompositeEvidence(nonce, spki, *([b"fixture"] * 9), ENVELOPE)
-            def collect_exporter_proof(_self, nonce, spki, exporter, envelope):
+            def collect_exporter_proof(_self, nonce, spki, exporter, envelope, *, deadline=None):
+                deadlines.append(deadline)
                 if expired[0]:
                     cache.clock = lambda: FIXTURE_NOW + 86400
                 return ExporterProof(nonce, spki, exporter, b"msg", b"sig", b"pcrs")
         server = GatewayServer(("127.0.0.1", 0), Collector(), mock.Mock(), ("127.0.0.1", 1), 5,
-                               status_cache=cache)
+                               status_cache=cache, admission_timeout=30,
+                               channel_lifetime=10, channel_force_close_grace=1)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
@@ -361,6 +365,9 @@ class InventoryAndDeliveryTest(unittest.TestCase):
                 connection.send(b"GET /._sol/spp/exporter-proof HTTP/1.1\r\nHost: fixture\r\n\r\n")
                 response = connection.recv(8192)
                 self.assertTrue(response.startswith(b"HTTP/1.1 200"))
+                self.assertEqual(deadlines[0], deadlines[1])
+                self.assertGreater(deadlines[0], time.monotonic())
+                self.assertLessEqual(deadlines[0] - time.monotonic(), 11)
                 connection.close()
                 raw.close()
                 for _ in range(50):

@@ -27,6 +27,7 @@ from ratls_gateway import (
     RelayProtocolError,
     _http_relay,
 )
+from allowance import Allowance, Authorization
 from usage_tally import (
     KEY_MAX_BYTES,
     PARSER_DEPTH_MAX,
@@ -43,9 +44,10 @@ class DummyAuthorizer:
     def __init__(self, reject: set[str] | None = None) -> None:
         self.reject = reject or set()
 
-    def authorize(self, credential: str) -> None:
+    def authorize(self, credential: str) -> Authorization:
         if credential in self.reject:
             raise EntitlementRejectedError("rejected credential")
+        return Authorization(credential, None)
 
 
 class MockUpstream:
@@ -232,6 +234,7 @@ class UsageTallyTest(unittest.TestCase):
                     60.0,
                     time.monotonic(),
                     tally,
+                    Allowance(),
                 )
 
             client_bytes = _run_client_request(relay_call_json, req)
@@ -290,6 +293,7 @@ class UsageTallyTest(unittest.TestCase):
                     60.0,
                     time.monotonic(),
                     tally,
+                    Allowance(),
                 )
 
             client_bytes2 = _run_client_request(relay_call_chunked, req2)
@@ -335,6 +339,7 @@ class UsageTallyTest(unittest.TestCase):
                     60.0,
                     time.monotonic(),
                     tally,
+                    Allowance(),
                 )
 
             client_bytes3 = _run_client_request(relay_call_cred2, req3)
@@ -390,6 +395,7 @@ class UsageTallyTest(unittest.TestCase):
                     60.0,
                     time.monotonic(),
                     tally,
+                    Allowance(),
                 )
 
             client_bytes = _run_client_request(relay_call, req)
@@ -448,6 +454,7 @@ class UsageTallyTest(unittest.TestCase):
                         60.0,
                         time.monotonic(),
                         tally,
+                        Allowance(),
                     )
 
                 client_bytes = _run_client_request(relay_call, req)
@@ -490,6 +497,7 @@ class UsageTallyTest(unittest.TestCase):
                     60.0,
                     time.monotonic(),
                     tally,
+                    Allowance(),
                 )
 
             client_bytes = _run_client_request(relay_call_max, req_max)
@@ -543,6 +551,7 @@ class UsageTallyTest(unittest.TestCase):
                         60.0,
                         time.monotonic(),
                         tally,
+                        Allowance(),
                     )
             finally:
                 client_sock.close()
@@ -585,6 +594,7 @@ class UsageTallyTest(unittest.TestCase):
                     60.0,
                     time.monotonic(),
                     tally,
+                    Allowance(),
                 )
                 resp = client_sock.recv(4096)
                 self.assertIn(b"401 Unauthorized", resp)
@@ -628,6 +638,7 @@ class UsageTallyTest(unittest.TestCase):
                     60.0,
                     time.monotonic(),
                     tally,
+                    Allowance(),
                 )
                 resp = client_sock.recv(4096)
                 self.assertIn(b"404 Not Found", resp)
@@ -807,6 +818,7 @@ class UsageTallyTest(unittest.TestCase):
                         60.0,
                         time.monotonic(),
                         tally,
+                        Allowance(),
                     )
 
                 client_bytes = _run_client_request(relay_call, req)

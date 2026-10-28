@@ -215,8 +215,12 @@ class AsrShimTest(unittest.TestCase):
         cls.shim.close()
 
     def test_smoke_f_canonical_wav_to_verbose_json_words(self) -> None:
-        status, body = self.shim.post_wav(canonical_wav(2.0), device="dev-abc.1")
+        status, headers, body = self.shim.request(
+            "POST", "/v1/audio/transcriptions", multipart_body(canonical_wav(2.0)),
+            {"Content-Type": f"multipart/form-data; boundary={BOUNDARY}",
+             "x-sol-device": "dev-abc.1", "X-Sol-Audio-Milliseconds": "0"})
         self.assertEqual(status, 200)
+        self.assertEqual(headers["X-Sol-Audio-Milliseconds"], "2000")
         payload = json.loads(body)
         # the exact checks the journal's _parse_words applies
         self.assertIn("words", payload)

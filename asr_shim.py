@@ -498,7 +498,7 @@ class AsrHandler(BaseHTTPRequestHandler):
         audio_seconds = sample_count / CANONICAL_SAMPLE_RATE
         metrics.record_outcome("ok")
         metrics.record_audio(audio_seconds, self.headers.get("x-sol-device"))
-        self._send_json(200, pending.result)
+        self._send_json(200, pending.result, {"X-Sol-Audio-Milliseconds": str((sample_count * 1000 + CANONICAL_SAMPLE_RATE - 1) // CANONICAL_SAMPLE_RATE)})
 
 
 class AsrServer(ThreadingHTTPServer):

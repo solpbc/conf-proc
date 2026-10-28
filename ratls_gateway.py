@@ -47,9 +47,11 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import re
 import select
 import shlex
+import signal
 import socket
 import socketserver
 import ssl
@@ -85,6 +87,7 @@ from ratls_contract import (
     CompositeEvidence,
     ExporterProof,
 )
+from allowance import Allowance, Authorization, OccupancyExceeded, audio_units, parse_authorization
 from usage_tally import (
     ChatTally,
     LoopbackMetricsServer,
@@ -208,7 +211,7 @@ class PortalEntitlementAuthorizer:
             _NoRedirectHandler(),
         )
 
-    def authorize(self, credential: str) -> None:
+    def authorize(self, credential: str) -> Authorization:
         request = urllib.request.Request(
             self.url,
             data=b"",
@@ -225,6 +228,10 @@ class PortalEntitlementAuthorizer:
                     raise EntitlementUnavailableError(
                         "portal returned an invalid authorization response", detail="status"
                     )
+                try:
+                    return parse_authorization(response.headers)
+                except (ValueError, TypeError, RecursionError):
+                    raise EntitlementUnavailableError("invalid authorization metadata", detail="status") from None
         except urllib.error.HTTPError as exc:
             try:
                 if exc.code in {401, 403}:
@@ -291,35 +298,149 @@ class CommandCollector:
         # admissions racing the collector fail EBUSY. Evidence collection is
         # rare and sub-second — serialize it.
         self._lock = threading.Lock()
+        self._diagnostic_lock = threading.Lock()
+        self._state = "idle"
+        self._operation = "none"
+        self._started = 0.0
+        self._last_result = "none"
+        self._queue_timeouts = 0
+        self._execution_timeouts = 0
+        self._unavailable = False
 
-    def call(self, request: dict[str, object]) -> dict[str, Any]:
-        with self._lock:
-            completed = subprocess.run(
+    def snapshot(self) -> dict[str, object]:
+        """Construct a content-free view without waiting for collection."""
+        with self._diagnostic_lock:
+            return {
+                "state": self._state,
+                "operation": self._operation,
+                "active_seconds": max(0.0, time.monotonic() - self._started)
+                if self._state == "running" else 0.0,
+                "last_result": self._last_result,
+                "queue_timeouts": self._queue_timeouts,
+                "execution_timeouts": self._execution_timeouts,
+                "available": not self._unavailable,
+            }
+
+    @staticmethod
+    def _group_active(pgid: int) -> bool:
+        # Linux zombies cannot run or hold the TPM. Orphan zombies may await
+        # PID 1 reaping, so killpg(0) alone cannot establish quiescence.
+        with os.scandir("/proc") as entries:
+            for entry in entries:
+                if not entry.name.isdecimal():
+                    continue
+                try:
+                    with open(f"/proc/{entry.name}/stat", "rb") as stream:
+                        fields = stream.read().rsplit(b")", 1)[1].split()
+                    if int(fields[2]) == pgid and fields[0] not in {b"Z", b"X"}:
+                        return True
+                except (FileNotFoundError, ProcessLookupError):
+                    continue
+        return False
+
+    def _cleanup(self, process: subprocess.Popen) -> bool:
+        end = time.monotonic() + 1.0
+        try:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=max(0.001, end - time.monotonic()))
+            while self._group_active(process.pid):
+                if time.monotonic() >= end:
+                    return False
+                time.sleep(0.01)
+            return True
+        except (OSError, ValueError, IndexError, subprocess.TimeoutExpired):
+            return False
+        finally:
+            # Do not communicate() again: a descendant can retain a pipe.
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except OSError:
+                        # Linux closes the descriptor even when close reports
+                        # an error; process quiescence was checked separately.
+                        pass
+
+    def call(
+        self, request: dict[str, object], *, deadline: float | None = None
+    ) -> dict[str, Any]:
+        end = min(deadline if deadline is not None else float("inf"),
+                  time.monotonic() + self.timeout)
+        remaining = end - time.monotonic()
+        if remaining <= 0 or not self._lock.acquire(timeout=remaining):
+            with self._diagnostic_lock:
+                self._queue_timeouts += 1
+            raise CollectorError("attestation collector queue timeout")
+        process = None
+        result = "failed"
+        try:
+            if self._unavailable:
+                result = "cleanup_failed"
+                raise CollectorError("attestation collector unavailable")
+            if time.monotonic() >= end:
+                result = "queue_timeout"
+                with self._diagnostic_lock:
+                    self._queue_timeouts += 1
+                raise CollectorError("attestation collector queue timeout")
+            operation = request.get("operation")
+            if operation not in {"certificate-evidence-v1", "exporter-proof-v1", "status-inventory-v1"}:
+                operation = "unknown"
+            payload = (json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            with self._diagnostic_lock:
+                self._state = "running"
+                self._operation = operation
+                self._started = time.monotonic()
+            if time.monotonic() >= end:
+                result = "queue_timeout"
+                with self._diagnostic_lock:
+                    self._queue_timeouts += 1
+                raise CollectorError("attestation collector queue timeout")
+            process = subprocess.Popen(
                 self.command,
-                input=(json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n").encode(),
+                stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                timeout=self.timeout,
-                check=False,
+                start_new_session=True,
             )
-        if completed.returncode != 0:
-            raise CollectorError(
-                f"attestation collector failed with exit {completed.returncode}"
-            )
-        if len(completed.stdout) > MAX_COLLECTOR_OUTPUT_BYTES:
-            raise CollectorError("attestation collector output exceeds limit")
-        try:
-            response = json.loads(completed.stdout)
-        except json.JSONDecodeError as exc:
-            raise CollectorError("attestation collector returned invalid JSON") from exc
-        if not isinstance(response, dict):
-            raise CollectorError("attestation collector response must be an object")
-        return response
+            try:
+                stdout, _ = process.communicate(payload, timeout=max(0.001, end - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                result = "execution_timeout"
+                with self._diagnostic_lock:
+                    self._execution_timeouts += 1
+                raise CollectorError("attestation collector execution timeout") from None
+            if process.returncode != 0:
+                raise CollectorError(f"attestation collector failed with exit {process.returncode}")
+            if len(stdout) > MAX_COLLECTOR_OUTPUT_BYTES:
+                raise CollectorError("attestation collector output exceeds limit")
+            try:
+                response = json.loads(stdout)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                raise CollectorError("attestation collector returned invalid JSON") from None
+            if not isinstance(response, dict):
+                raise CollectorError("attestation collector response must be an object")
+            result = "success"
+            return response
+        finally:
+            clean = process is None or self._cleanup(process)
+            with self._diagnostic_lock:
+                if not clean:
+                    self._unavailable = True
+                    result = "cleanup_failed"
+                self._state = "unavailable" if self._unavailable else "idle"
+                self._operation = "none"
+                self._last_result = result
+            self._lock.release()
+            if not clean:
+                raise CollectorError("attestation collector cleanup failed") from None
 
     def collect_status_inventory(self) -> dict[str, str]:
         return self.call({"operation": "status-inventory-v1"})
 
-    def collect_composite(self, owner_nonce: bytes, spki_der: bytes) -> CompositeEvidence:
+    def collect_composite(self, owner_nonce: bytes, spki_der: bytes, *, deadline: float | None = None) -> CompositeEvidence:
         response = self.call(
             {
                 "operation": "certificate-evidence-v1",
@@ -327,7 +448,7 @@ class CommandCollector:
                 "tls_spki_der_b64": _b64(spki_der),
                 "binding_domain": CERTIFICATE_BINDING_DOMAIN.decode("ascii"),
                 "binding_formula": "SHA256(domain || nonce || SHA256(tls_spki_der) || SHA256(SPPGPU1_TLV))",
-            }
+            }, deadline=deadline,
         )
         evidence = CompositeEvidence(
             owner_nonce=_unb64(response, "owner_nonce_b64"),
@@ -358,6 +479,7 @@ class CommandCollector:
         spki_der: bytes,
         tls_exporter: bytes,
         gpu_envelope: bytes,
+        *, deadline: float | None = None,
     ) -> ExporterProof:
         qualifying_data = exporter_binding(
             owner_nonce, spki_der, tls_exporter, gpu_envelope
@@ -372,7 +494,7 @@ class CommandCollector:
                 "qualifying_data_hex": qualifying_data.hex(),
                 "binding_domain": EXPORTER_BINDING_DOMAIN.decode("ascii"),
                 "binding_formula": "SHA256(domain || nonce || SHA256(tls_spki_der) || tls_exporter || SHA256(SPPGPU1_TLV))",
-            }
+            }, deadline=deadline,
         )
         if response.get("qualifying_data_hex") != qualifying_data.hex():
             raise CollectorError("collector exporter quote used the wrong qualifying data")
@@ -594,7 +716,7 @@ def _canonical_request_head(lines: list[bytes], device_id: str) -> bytes:
         line
         for line in lines[1:]
         if line.partition(b":")[0].strip().lower()
-        not in {b"authorization", b"x-sol-device"}
+        not in {b"authorization", b"x-sol-device", b"x-sol-spp-journal", b"x-sol-spp-allowance"}
     ]
     return b"\r\n".join(
         [lines[0], *retained, f"x-sol-device: {device_id}".encode("ascii"), b"", b""]
@@ -712,6 +834,38 @@ def _copy_chunked(
                 return
 
 
+def _wait_allowance(client, delay: float) -> None:
+    if delay <= 0:
+        return
+    deadline = time.monotonic() + delay
+    poller = select.poll()
+    terminal = select.POLLHUP | select.POLLERR | select.POLLNVAL | getattr(select, "POLLRDHUP", 0)
+    poller.register(client.fileno(), terminal)
+    while True:
+        left = deadline - time.monotonic()
+        events = poller.poll(max(0, int(left * 1000) + 1))
+        if any(flags & terminal for _, flags in events):
+            raise ConnectionError("client closed during allowance cooldown")
+        if time.monotonic() >= deadline:
+            return
+
+
+def _send_occupancy_error(client) -> None:
+    body = b'{"error":"simultaneous processing limit"}'
+    client.sendall(b"HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\n"
+                   b"Retry-After: 1\r\nConnection: close\r\n" +
+                   f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body)
+
+
+def _audio_duration(headers: dict[bytes, list[bytes]]) -> int:
+    values = headers.get(b"x-sol-audio-milliseconds", [])
+    if len(values) == 1 and re.fullmatch(rb"[0-9]{1,6}", values[0]):
+        value = int(values[0])
+        if value <= 330_000:
+            return value
+    return 330_000
+
+
 def _http_relay(
     client: SSL.Connection,
     default_upstream: tuple[str, int],
@@ -721,6 +875,7 @@ def _http_relay(
     channel_lifetime: float,
     channel_started: float,
     tally: ChatTally,
+    allowance: Allowance,
 ) -> None:
     """Serial per-request HTTP/1.1 relay over the one admitted channel.
 
@@ -737,6 +892,7 @@ def _http_relay(
     reader = _RelayReader(client, idle_timeout=timeout)
     admitted_credential: str | None = None
     device_id: str | None = None
+    authorization: Authorization | None = None
 
     def lifetime_expired() -> bool:
         if time.monotonic() - channel_started < channel_lifetime:
@@ -766,9 +922,9 @@ def _http_relay(
         try:
             credential = _bearer_credential(headers)
             if admitted_credential is None:
-                authorizer.authorize(credential)
+                authorization = authorizer.authorize(credential)
                 admitted_credential = credential
-                device_id = tally.label_for(credential)
+                device_id = tally.label_for(authorization.journal)
                 LOG.info("event=entitlement_admitted")
             elif not hmac.compare_digest(credential, admitted_credential):
                 raise EntitlementRejectedError(
@@ -815,75 +971,106 @@ def _http_relay(
             if not _drain_exact(reader, body_length):
                 return
             continue
+        assert authorization is not None
         try:
-            upstream = socket.create_connection(target, timeout=timeout)
-        except OSError as exc:
-            raise UpstreamUnavailableError("upstream connect failed") from exc
+            lease = allowance.begin(authorization)
+        except OccupancyExceeded:
+            _send_occupancy_error(client)
+            return
+        work_started, completed, status, duration_ms, walker = False, False, 0, 330_000, None
         try:
-            upstream.sendall(head)
-            if body_length:
-                _copy_exact(reader, upstream, body_length)
-            upstream_reader = _RelayReader(upstream)
-            while True:
-                response_head = upstream_reader.read_head()
-                if response_head is None:
-                    raise UpstreamUnavailableError("upstream closed before response")
-                response_lines = response_head[:-4].split(b"\r\n")
-                status_parts = response_lines[0].split(b" ", 2)
-                if (
-                    len(status_parts) < 2
-                    or not status_parts[0].startswith(b"HTTP/1.1")
-                    or len(status_parts[1]) != 3
-                    or not status_parts[1].isdigit()
-                ):
-                    raise RelayProtocolError("malformed status line")
-                status = int(status_parts[1])
-                client.sendall(response_head)
-                if 100 <= status < 200:
-                    continue  # interim response; the real one follows
-                response_headers = _parse_relay_headers(response_lines[1:])
-                mode, length = _response_body_mode(status, method, response_headers)
-                if not is_audio:
-                    walker = UsageWalker()
-                    try:
-                        if mode == "length":
-                            if length:
-                                _copy_exact(
-                                    upstream_reader, client, length, observer=walker.feed
+            if lease is not None:
+                _wait_allowance(client, lease.delay)
+            try:
+                upstream = socket.create_connection(target, timeout=timeout)
+            except OSError as exc:
+                raise UpstreamUnavailableError("upstream connect failed") from exc
+            try:
+                upstream.sendall(head)
+                if body_length:
+                    _copy_exact(reader, upstream, body_length)
+                work_started = True
+                upstream_reader = _RelayReader(upstream)
+                while True:
+                    response_head = upstream_reader.read_head()
+                    if response_head is None:
+                        raise UpstreamUnavailableError("upstream closed before response")
+                    response_lines = response_head[:-4].split(b"\r\n")
+                    status_parts = response_lines[0].split(b" ", 2)
+                    if (
+                        len(status_parts) < 2
+                        or not status_parts[0].startswith(b"HTTP/1.1")
+                        or len(status_parts[1]) != 3
+                        or not status_parts[1].isdigit()
+                    ):
+                        raise RelayProtocolError("malformed status line")
+                    status = int(status_parts[1])
+                    # The duration is trusted only from the local shim and never
+                    # becomes an owner-visible header, even with allowance OFF.
+                    response_head = b"\r\n".join([response_lines[0], *[
+                        line for line in response_lines[1:]
+                        if line.partition(b":")[0].strip().lower() != b"x-sol-audio-milliseconds"
+                    ], b"", b""])
+                    client.sendall(response_head)
+                    if 100 <= status < 200:
+                        continue  # interim response; the real one follows
+                    response_headers = _parse_relay_headers(response_lines[1:])
+                    duration_ms = _audio_duration(response_headers)
+                    mode, length = _response_body_mode(status, method, response_headers)
+                    if not is_audio:
+                        walker = UsageWalker()
+                        try:
+                            if mode == "length":
+                                if length:
+                                    _copy_exact(
+                                        upstream_reader, client, length, observer=walker.feed
+                                    )
+                                tally.commit_response(device_id, walker, truncated=False)
+                            elif mode == "chunked":
+                                _copy_chunked(
+                                    upstream_reader, client, observer=walker.feed
                                 )
-                            tally.commit_response(device_id, walker, truncated=False)
+                                tally.commit_response(device_id, walker, truncated=False)
+                            elif mode == "close":
+                                while True:
+                                    chunk = upstream_reader.read_available(RELAY_CHUNK_BYTES)
+                                    if not chunk:
+                                        break
+                                    client.sendall(chunk)
+                                    walker.feed(chunk)
+                                tally.commit_response(device_id, walker, truncated=False)
+                                completed = True
+                                return  # close-delimited response ends the channel
+                        except (RelayProtocolError, OSError, ConnectionError):
+                            tally.commit_response(device_id, walker, truncated=True)
+                            raise
+                    else:
+                        if mode == "length" and length:
+                            _copy_exact(upstream_reader, client, length)
                         elif mode == "chunked":
-                            _copy_chunked(
-                                upstream_reader, client, observer=walker.feed
-                            )
-                            tally.commit_response(device_id, walker, truncated=False)
+                            _copy_chunked(upstream_reader, client)
                         elif mode == "close":
                             while True:
                                 chunk = upstream_reader.read_available(RELAY_CHUNK_BYTES)
                                 if not chunk:
                                     break
                                 client.sendall(chunk)
-                                walker.feed(chunk)
-                            tally.commit_response(device_id, walker, truncated=False)
+                            completed = True
                             return  # close-delimited response ends the channel
-                    except (RelayProtocolError, OSError, ConnectionError):
-                        tally.commit_response(device_id, walker, truncated=True)
-                        raise
-                else:
-                    if mode == "length" and length:
-                        _copy_exact(upstream_reader, client, length)
-                    elif mode == "chunked":
-                        _copy_chunked(upstream_reader, client)
-                    elif mode == "close":
-                        while True:
-                            chunk = upstream_reader.read_available(RELAY_CHUNK_BYTES)
-                            if not chunk:
-                                break
-                            client.sendall(chunk)
-                        return  # close-delimited response ends the channel
-                break
+                    completed = True
+                    break
+            finally:
+                upstream.close()
         finally:
-            upstream.close()
+            units = 0
+            if lease is not None and work_started and not (400 <= status < 500 or status == 503):
+                if is_audio:
+                    units = audio_units(duration_ms, lease.policy)
+                elif completed and walker is not None and not walker.disabled and not walker.bad and walker.last is not None:
+                    units = sum(walker.last)
+                else:
+                    units = 262_144
+            allowance.finish(lease, units, work_started)
         if client_wants_close:
             return
 
@@ -952,7 +1139,11 @@ class GatewayServer(socketserver.ThreadingTCPServer):
         self.channel_force_close_grace = channel_force_close_grace
         self.admission_timeout = admission_timeout
         self.tally = tally if tally is not None else ChatTally()
+        self.allowance = Allowance()
         super().__init__(address, GatewayHandler)
+
+    def service_actions(self) -> None:
+        self.allowance.expire()
 
 
 class GatewayHandler(socketserver.BaseRequestHandler):
@@ -967,8 +1158,9 @@ class GatewayHandler(socketserver.BaseRequestHandler):
         channel_started = time.monotonic()
         hard_deadline = self.server.channel_lifetime + self.server.channel_force_close_grace
         deadline = _ConnectionDeadline(raw)
+        admission_deadline = channel_started + min(self.server.admission_timeout, hard_deadline)
         deadline.arm(
-            min(self.server.admission_timeout, hard_deadline),
+            admission_deadline - time.monotonic(),
             "admission_deadline_expired",
         )
         try:
@@ -984,7 +1176,7 @@ class GatewayHandler(socketserver.BaseRequestHandler):
                 serialization.Encoding.DER,
                 serialization.PublicFormat.SubjectPublicKeyInfo,
             )
-            evidence = self.server.collector.collect_composite(owner_nonce, spki_der)
+            evidence = self.server.collector.collect_composite(owner_nonce, spki_der, deadline=admission_deadline)
             status_der = (self.server.status_cache.snapshot(evidence.gpu_envelope)
                           if self.server.status_cache is not None else None)
             certificate = _make_certificate(key, evidence.to_der(), status_der)
@@ -999,7 +1191,7 @@ class GatewayHandler(socketserver.BaseRequestHandler):
             )
             _recv_proof_request(connection)
             proof = self.server.collector.collect_exporter_proof(
-                owner_nonce, spki_der, tls_exporter, evidence.gpu_envelope
+                owner_nonce, spki_der, tls_exporter, evidence.gpu_envelope, deadline=admission_deadline
             )
             if self.server.status_cache is not None:
                 self.server.status_cache.snapshot(evidence.gpu_envelope)
@@ -1021,6 +1213,7 @@ class GatewayHandler(socketserver.BaseRequestHandler):
                 self.server.channel_lifetime,
                 channel_started,
                 self.server.tally,
+                self.server.allowance,
             )
         except Exception as exc:
             if isinstance(exc, StatusUnavailable):
@@ -1160,6 +1353,9 @@ def main() -> int:
         else None
     )
     tally = ChatTally()
+    from spp_health_push import SnapshotWriter
+    health_writer = SnapshotWriter(collector, tally.fleet)
+    health_writer.start()
     metrics_server = LoopbackMetricsServer((args.metrics_host, args.metrics_port), tally)
     metrics_thread = threading.Thread(target=metrics_server.serve_forever, daemon=True)
     metrics_thread.start()
@@ -1188,6 +1384,7 @@ def main() -> int:
             except KeyboardInterrupt:
                 pass
     finally:
+        health_writer.stop()
         if status_worker is not None:
             status_worker.stop()
         metrics_server.shutdown()
