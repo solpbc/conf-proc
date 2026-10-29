@@ -8,6 +8,9 @@ from pathlib import Path
 
 OPENAI_PATH = "sgl-workspace/sglang/python/sglang/srt/entrypoints/openai"
 PATCHES = (
+    ("../http_server.py", "7854f5bec953d0b69874d4220f4982249d24017f2a1225ddd9ea3e5b7ada1d23",
+     'def _execute_server_warmup(server_args: ServerArgs):\n    headers = {}',
+     'def _execute_server_warmup(server_args: ServerArgs):\n    headers = {"x-sol-device": "0" * 64}'),
     ("protocol.py", "4f4e9714c27509b845f0389528c431ff296de9cfec796fcf91b6e4e77f00a7bc",
      'class PromptTokensDetails(BaseModel):\n    """Details about prompt tokens."""\n\n    cached_tokens: int = 0',
      'class PromptTokensDetails(BaseModel):\n    """Details about prompt tokens."""\n\n    cached_tokens: Optional[int] = None'),
@@ -46,6 +49,6 @@ def apply(root: Path) -> list[dict[str, str]]:
         path.unlink()
         path.write_bytes(patched)
         path.chmod(mode)
-        records.append({"path": str(path.relative_to(root)), "input_sha256": digest,
+        records.append({"path": str(path.resolve().relative_to(root.resolve())), "input_sha256": digest,
                         "output_sha256": hashlib.sha256(patched).hexdigest()})
     return records
