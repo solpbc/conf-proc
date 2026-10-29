@@ -15,7 +15,7 @@ body lengths) and reads only a model-reported usage object on a finished chat
 response.  Before the first upstream byte, it validates the request's bearer
 credential against the portal's live entitlement state; each later request on
 the channel must carry the same credential.  It derives the process-randomized
-metering label from that credential (not stable across restart of this process)
+metering label from the portal-authorized journal binding (not stable across restart of this process)
 rather than trusting a client-asserted ``x-sol-device`` value.  Bodies stream
 through untouched and unlogged.  With ``--audio-upstream-port``,
 ``/v1/audio/*`` routes to the ASR sidecar loopback and everything else routes
