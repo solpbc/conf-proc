@@ -71,9 +71,12 @@ def inside(package):
         for port in (8000, 8001, 9100, 9443):
             serve(port)
 
-        def incoming(port):
-            code = ("import socket,sys\ntry:\n s=socket.create_connection(('10.98.0.1'," + str(port) +
-                    "),.4); s.close(); sys.exit(0)\nexcept OSError: sys.exit(1)")
+        def incoming(port, ip_options=False):
+            # NOP,NOP,NOP,EOL: a harmless IPv4 options block, enough to set the header length to 6.
+            options = "s.setsockopt(socket.IPPROTO_IP,socket.IP_OPTIONS,bytes([1,1,1,0]))\n" if ip_options else ""
+            code = ("import socket,sys\ns=socket.socket()\n" + options + "s.settimeout(.4)\ntry:\n"
+                    " s.connect(('10.98.0.1'," + str(port) + ")); s.close(); sys.exit(0)\n"
+                    "except OSError: sys.exit(1)")
             result = subprocess.run([*prefix, sys.executable, "-c", code], capture_output=True, timeout=3)
             assert result.returncode in (0, 1), result.stderr
             return result.returncode == 0
@@ -95,6 +98,7 @@ def inside(package):
 
         assert all(connect("127.0.0.1", port) for port in (8000, 9100, 9443)), "loopback listener controls"
         assert incoming(8001) and incoming(9443), "incoming listener controls"
+        assert incoming(9443, ip_options=True), "incoming IP options control"
         assert outgoing(80) > 0, "outbound packet control"
         held = subprocess.Popen([*prefix, sys.executable, "-u", "-c",
             "import socket,sys\ns=socket.create_connection(('10.98.0.1',8001),1)\n"
@@ -114,8 +118,9 @@ def inside(package):
         assert connect("127.0.0.1", 8000) and connect("127.0.0.1", 9443), "gateway loopback"
         assert outgoing(443) > 0 and outgoing(80) == 0, "gateway egress restriction"
         assert incoming(9443), "gateway incoming positive"
+        assert not incoming(9443, ip_options=True), "gateway incoming IP options denial"
         assert not incoming(8001), "extra listener incoming denial"
-        print("PASS: listener controls, content isolation, established denial, gateway egress and inbound firewall")
+        print("PASS: listener controls, content isolation, established denial, gateway egress, IP options denial and inbound firewall")
     finally:
         for process in (held, peer):
             if process is not None and process.poll() is None:

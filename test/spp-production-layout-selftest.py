@@ -123,6 +123,9 @@ class ProductionLayout(unittest.TestCase):
         incoming = NFT_RULESET.split("chain input", 1)[1].split("chain output", 1)[0]
         self.assertIn("policy drop", incoming)
         self.assertIn("tcp dport 9443 accept", incoming)
+        # IPv4 TCP carrying IP options never reaches the handshake (CVE-2026-98432).
+        self.assertLess(incoming.index("ip protocol tcp ip hdrlength > 5 drop"),
+                        incoming.index("tcp dport 9443 accept"))
         self.assertNotIn("tcp dport 8000 accept", incoming)
 
 

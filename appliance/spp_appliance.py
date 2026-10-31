@@ -112,6 +112,7 @@ for port in sorted(ports):
 NFT_RULESET: Final = """table inet spp_filter {
     chain input {
         type filter hook input priority 0; policy drop;
+        ip protocol tcp ip hdrlength > 5 drop
         iif "lo" accept
         ct state established,related accept
         udp sport 67 udp dport 68 accept
