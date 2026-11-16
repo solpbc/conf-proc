@@ -36,23 +36,23 @@
    "filename": "nvidia-userspace-595-server",
    "files_count": 4,
    "path": "stock-kernel/debs/nvidia-userspace-595-server",
-   "sha256": "81be8f3e7cb4aa0325d699607134cdee916f96c98028a2e43b178f2f20e45445",
-   "size_bytes": 162488276,
+   "sha256": "9f195dfa75652911d014123a8377eccd7f059ca3ddb3e74c83ce33120fa2121e",
+   "size_bytes": 162488738,
    "url": ""
   },
   "KERNEL_BZIMAGE": {
-   "filename": "vmlinuz-6.8.0-1058-azure-fde",
-   "path": "stock-kernel/extract/boot/vmlinuz-6.8.0-1058-azure-fde",
-   "sha256": "78d4c293142d78588d7b31a2fd9272109e2d305d93c8685abeb6cbcb60c39609",
-   "size_bytes": 14455296,
+   "filename": "vmlinuz-6.8.0-1071-azure-fde",
+   "path": "stock-kernel/extract/boot/vmlinuz-6.8.0-1071-azure-fde",
+   "sha256": "3068f996183680ca0be1d2c80f4026b2e22c1d58fd2caae7d539d9bf66125a89",
+   "size_bytes": 15192576,
    "url": ""
   },
   "MODULE_DIR": {
    "filename": "md",
    "files_count": 38,
-   "path": "stock-kernel/extract/lib/modules/6.8.0-1058-azure-fde/kernel/drivers/md",
-   "sha256": "f69008efa069fd2da160029c426f0ec4ec2b37d4b58358c41e8f1b8f7269d2a7",
-   "size_bytes": 3834606,
+   "path": "stock-kernel/extract/lib/modules/6.8.0-1071-azure-fde/kernel/drivers/md",
+   "sha256": "954343a751b67bea7013c29c0aac71778f81de32d56c223d85ede084f325c056",
+   "size_bytes": 3860782,
    "url": ""
   },
   "MTOOLS_ROOT": {
@@ -72,17 +72,17 @@
    "url": ""
   },
   "NV_FIRMWARE_DEB": {
-   "filename": "nvidia-firmware-595-server-595.71.05_595.71.05-0ubuntu0.22.04.1_amd64.deb",
-   "path": "stock-kernel/debs/nvidia-userspace-595-server/nvidia-firmware-595-server-595.71.05_595.71.05-0ubuntu0.22.04.1_amd64.deb",
-   "sha256": "740636b37668ac78a5f392dee3139b78f534561b01a6152db74c8380b00ec1f9",
-   "size_bytes": 74976158,
+   "filename": "nvidia-firmware-595-server-595.91.07_595.91.07-0ubuntu0.22.04.1_amd64.deb",
+   "path": "stock-kernel/debs/nvidia-userspace-595-server/nvidia-firmware-595-server-595.91.07_595.91.07-0ubuntu0.22.04.1_amd64.deb",
+   "sha256": "87f0daec92a5a1002017060f3cd8ab53b54197f61ed35cba732835fbdcc4ba6e",
+   "size_bytes": 75004038,
    "url": ""
   },
   "NV_MODULES_DEB": {
-   "filename": "linux-modules-nvidia-595-server-open-6.8.0-1058-azure-fde_6.8.0-1058.65~22.04.1_amd64.deb",
-   "path": "stock-kernel/debs/nvidia-modules-fde-1058/linux-modules-nvidia-595-server-open-6.8.0-1058-azure-fde_6.8.0-1058.65~22.04.1_amd64.deb",
-   "sha256": "194779828374b36e53ee7293415d44023f3dc7399fc852874a16852d6a8e897c",
-   "size_bytes": 8165906,
+   "filename": "linux-modules-nvidia-595-server-open-6.8.0-1071-azure-fde_6.8.0-1071.78~22.04.1_amd64.deb",
+   "path": "stock-kernel/debs/nvidia-modules-fde-1071/linux-modules-nvidia-595-server-open-6.8.0-1071-azure-fde_6.8.0-1071.78~22.04.1_amd64.deb",
+   "sha256": "43b2715ce9ad0b2e33f1b343464a5c4791fa5636d41ef27184092e2ab80713f6",
+   "size_bytes": 8172178,
    "url": ""
   },
   "PARAKEET": {
@@ -124,10 +124,10 @@
    "url": "docker://lmsysorg/sglang@sha256:9611bd4c5624b0e9e17829506188a12f17205f2083de0dd44d6c521733553a50 (every blob verified; applied with rootless umoci)"
   },
   "STOCK_MODULES_DEB": {
-   "filename": "linux-modules-6.8.0-1058-azure-fde_6.8.0-1058.65~22.04.1_amd64.deb",
-   "path": "stock-kernel/debs/kernel-fde-1058/linux-modules-6.8.0-1058-azure-fde_6.8.0-1058.65~22.04.1_amd64.deb",
-   "sha256": "64350ba17e95e02796291dac6072b8b7fb29addbda0be6f8023da16764c99037",
-   "size_bytes": 23500102,
+   "filename": "linux-modules-6.8.0-1071-azure-fde_6.8.0-1071.78~22.04.1_amd64.deb",
+   "path": "stock-kernel/debs/kernel-fde-1071/linux-modules-6.8.0-1071-azure-fde_6.8.0-1071.78~22.04.1_amd64.deb",
+   "sha256": "c8d28188053d275307cda9dbcc902f8f8dc38fe0f2d45b114b2f4a13ffeed0af",
+   "size_bytes": 25203236,
    "url": ""
   },
   "STUB": {

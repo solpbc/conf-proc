@@ -28,7 +28,7 @@ from spp_image_sbom import generate_image_sbom
 from spp_image_sbom_check import check_image_sbom
 
 BUILD_EPOCH: Final = spp_disk.BUILD_EPOCH
-KERNEL_RELEASE: Final = "6.8.0-1058-azure-fde"
+KERNEL_RELEASE: Final = "6.8.0-1071-azure-fde"
 R1_MODULES: Final = ("dm-bufio.ko", "dm-verity.ko")
 PARAKEET_SHA: Final = "3cbdc85877e668ca7b82d0d56770eb1fac76691f55d6b97545e8d61ca588d10d"
 

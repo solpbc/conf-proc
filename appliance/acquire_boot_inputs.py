@@ -28,29 +28,30 @@ LP = "https://launchpad.net/ubuntu/+archive/primary/+files/"
 PYPI = "https://files.pythonhosted.org/packages/"
 
 # (workspace-relative destination, url, sha256, size). Kernel/driver debs are jammy
-# 6.8.0-1058.65~22.04.1 + NVIDIA 595.71.05 — the pair qualified on the confidential H100.
+# 6.8.0-1071.78~22.04.1 + NVIDIA 595.91.07: the fixed kernel for CVE-2026-98432 and the driver
+# Canonical signs its NVIDIA modules from for that kernel.
 PINS = [
-    ("stock-kernel/debs/kernel-fde-1058/linux-image-6.8.0-1058-azure-fde_6.8.0-1058.65~22.04.1_amd64.deb",
-     UBU + "pool/main/l/linux-signed-azure-fde-6.8/linux-image-6.8.0-1058-azure-fde_6.8.0-1058.65~22.04.1_amd64.deb",
-     "99d817a1e226c62c8fb281b4560d5e409eadb4eaf7e8d6f6561a17c869e61c0e", 51195136),
-    ("stock-kernel/debs/kernel-fde-1058/linux-modules-6.8.0-1058-azure-fde_6.8.0-1058.65~22.04.1_amd64.deb",
-     UBU + "pool/main/l/linux-azure-fde-6.8/linux-modules-6.8.0-1058-azure-fde_6.8.0-1058.65~22.04.1_amd64.deb",
-     "64350ba17e95e02796291dac6072b8b7fb29addbda0be6f8023da16764c99037", 23500102),
-    ("stock-kernel/debs/nvidia-modules-fde-1058/linux-modules-nvidia-595-server-open-6.8.0-1058-azure-fde_6.8.0-1058.65~22.04.1_amd64.deb",
-     UBU + "pool/restricted/l/linux-restricted-signatures-azure-fde-6.8/linux-modules-nvidia-595-server-open-6.8.0-1058-azure-fde_6.8.0-1058.65~22.04.1_amd64.deb",
-     "194779828374b36e53ee7293415d44023f3dc7399fc852874a16852d6a8e897c", 8165906),
-    ("stock-kernel/debs/nvidia-userspace-595-server/nvidia-firmware-595-server-595.71.05_595.71.05-0ubuntu0.22.04.1_amd64.deb",
-     UBU + "pool/multiverse/n/nvidia-graphics-drivers-595-server/nvidia-firmware-595-server-595.71.05_595.71.05-0ubuntu0.22.04.1_amd64.deb",
-     "740636b37668ac78a5f392dee3139b78f534561b01a6152db74c8380b00ec1f9", None),
-    ("stock-kernel/debs/nvidia-userspace-595-server/libnvidia-compute-595-server_595.71.05-0ubuntu0.22.04.1_amd64.deb",
-     LP + "libnvidia-compute-595-server_595.71.05-0ubuntu0.22.04.1_amd64.deb",
-     "7fe71bab8a0d93af0b4da1845b33e61a7af116a90979423e244ddf41a3224a2f", 86732312),
-    ("stock-kernel/debs/nvidia-userspace-595-server/nvidia-utils-595-server_595.71.05-0ubuntu0.22.04.1_amd64.deb",
-     LP + "nvidia-utils-595-server_595.71.05-0ubuntu0.22.04.1_amd64.deb",
-     "aa45cc940578e412673bb6ae0629217d7be94a60f791f9f271203c7bd39b830b", 618300),
-    ("stock-kernel/debs/nvidia-userspace-595-server/libnvidia-cfg1-595-server_595.71.05-0ubuntu0.22.04.1_amd64.deb",
-     LP + "libnvidia-cfg1-595-server_595.71.05-0ubuntu0.22.04.1_amd64.deb",
-     "2669f15b5d7ac7d22f81b901c9929dccd3e4d122f36dca0a0079608752eceaba", 161506),
+    ("stock-kernel/debs/kernel-fde-1071/linux-image-6.8.0-1071-azure-fde_6.8.0-1071.78~22.04.1_amd64.deb",
+     UBU + "pool/main/l/linux-signed-azure-fde-6.8/linux-image-6.8.0-1071-azure-fde_6.8.0-1071.78~22.04.1_amd64.deb",
+     "294ffe6fbc874db51b05ebbcfe3e8ae318f1c801c607843c7ec97f4f75d6e66d", 52427186),
+    ("stock-kernel/debs/kernel-fde-1071/linux-modules-6.8.0-1071-azure-fde_6.8.0-1071.78~22.04.1_amd64.deb",
+     UBU + "pool/main/l/linux-azure-fde-6.8/linux-modules-6.8.0-1071-azure-fde_6.8.0-1071.78~22.04.1_amd64.deb",
+     "c8d28188053d275307cda9dbcc902f8f8dc38fe0f2d45b114b2f4a13ffeed0af", 25203236),
+    ("stock-kernel/debs/nvidia-modules-fde-1071/linux-modules-nvidia-595-server-open-6.8.0-1071-azure-fde_6.8.0-1071.78~22.04.1_amd64.deb",
+     UBU + "pool/restricted/l/linux-restricted-signatures-azure-fde-6.8/linux-modules-nvidia-595-server-open-6.8.0-1071-azure-fde_6.8.0-1071.78~22.04.1_amd64.deb",
+     "43b2715ce9ad0b2e33f1b343464a5c4791fa5636d41ef27184092e2ab80713f6", 8172178),
+    ("stock-kernel/debs/nvidia-userspace-595-server/nvidia-firmware-595-server-595.91.07_595.91.07-0ubuntu0.22.04.1_amd64.deb",
+     UBU + "pool/multiverse/n/nvidia-graphics-drivers-595-server/nvidia-firmware-595-server-595.91.07_595.91.07-0ubuntu0.22.04.1_amd64.deb",
+     "87f0daec92a5a1002017060f3cd8ab53b54197f61ed35cba732835fbdcc4ba6e", 75004038),
+    ("stock-kernel/debs/nvidia-userspace-595-server/libnvidia-compute-595-server_595.91.07-0ubuntu0.22.04.1_amd64.deb",
+     UBU + "pool/multiverse/n/nvidia-graphics-drivers-595-server/libnvidia-compute-595-server_595.91.07-0ubuntu0.22.04.1_amd64.deb",
+     "9dc881896e1d705d45ee4c7f5f80749eac4bb329197e556bb287edd01cd1a847", 86704668),
+    ("stock-kernel/debs/nvidia-userspace-595-server/nvidia-utils-595-server_595.91.07-0ubuntu0.22.04.1_amd64.deb",
+     UBU + "pool/multiverse/n/nvidia-graphics-drivers-595-server/nvidia-utils-595-server_595.91.07-0ubuntu0.22.04.1_amd64.deb",
+     "759a56835779f36f56c8fb7bee680e7a1db2c4aabf29cb5ab7bde010a6308fcd", 618488),
+    ("stock-kernel/debs/nvidia-userspace-595-server/libnvidia-cfg1-595-server_595.91.07-0ubuntu0.22.04.1_amd64.deb",
+     UBU + "pool/multiverse/n/nvidia-graphics-drivers-595-server/libnvidia-cfg1-595-server_595.91.07-0ubuntu0.22.04.1_amd64.deb",
+     "c99461297940b647f2659d725002e4deaf74f3107eb056ca2a9b1dd9fa305e80", 161544),
     # systemd 255 (noble): the stub implements the LoadFile2 initrd protocol the 6.8 EFI stub expects;
     # ukify from the same release.
     ("stock-kernel/debs/systemd-boot-efi_255.4-1ubuntu8.17_amd64.deb",
@@ -151,9 +152,9 @@ COLLECTOR_PINS = [
      "7d971045eeeb8de183b56bc7530eb8f3d8276072d08017a962c2c34e93bfdd26", 355468),
 ]
 
-# Expected digest of the kernel image extracted from the linux-image deb (the value the
-# R1 SBOM recorded, so this also proves the deb is the one the qualified image used).
-BZIMAGE_SHA256 = "78d4c293142d78588d7b31a2fd9272109e2d305d93c8685abeb6cbcb60c39609"
+# Expected digest of the kernel image extracted from the linux-image deb: the .linux section of
+# Canonical's signed UKI, so this also proves the deb is the pinned one.
+BZIMAGE_SHA256 = "3068f996183680ca0be1d2c80f4026b2e22c1d58fd2caae7d539d9bf66125a89"
 
 # From the pinned package set: what the recipe copies tpm2-tools, libtss2 and nvidia-modprobe from.
 A24_PACKAGES = ("tpm2-tools.deb", "libtss2-esys.deb", "libtss2-mu.deb", "libtss2-rc.deb",
@@ -206,7 +207,7 @@ def main() -> int:
     rows = [fetch(ws, *pin) for pin in PINS + COLLECTOR_PINS]
 
     ext = ws / "stock-kernel/extract"
-    vmlinuz = ext / "boot/vmlinuz-6.8.0-1058-azure-fde"
+    vmlinuz = ext / "boot/vmlinuz-6.8.0-1071-azure-fde"
     if not vmlinuz.exists():
         ext.mkdir(parents=True, exist_ok=True)
         for rel, *_ in PINS[:2]:
@@ -214,7 +215,7 @@ def main() -> int:
         # The azure-fde image package ships Canonical's own signed UKI, not a bare vmlinuz.
         # The kernel we embed is that UKI's .linux section: Canonical's signed bzImage, byte-exact.
         sh("objcopy", "-O", "binary", "--only-section=.linux",
-           str(ext / "usr/lib/linux/efi/kernel.efi-6.8.0-1058-azure-fde"), str(vmlinuz))
+           str(ext / "usr/lib/linux/efi/kernel.efi-6.8.0-1071-azure-fde"), str(vmlinuz))
     if hashlib.sha256(vmlinuz.read_bytes()).hexdigest() != BZIMAGE_SHA256:
         raise SystemExit("extracted vmlinuz does not match the qualified kernel image")
 

@@ -32,12 +32,15 @@ from ratls_status_proofs import (Collateral, NvidiaTransport, ProofCache, Status
                                 inventory_from_envelope, verify_response)
 
 DATA = ROOT / "test/status-proofs"
+# The captured evidence below came from a 595.71.05 engine; it is checked against that
+# engine's collateral, kept beside it.
+FIXTURE_COLLATERAL = DATA / "collateral"
 ENVELOPE = (DATA / "gpu-envelope.tlv").read_bytes()
 FIXTURE_NOW = 1790993100
 
 
 def populated(clock=lambda: FIXTURE_NOW):
-    cache = ProofCache(Collateral(), clock)
+    cache = ProofCache(Collateral(FIXTURE_COLLATERAL), clock)
     cache.initialize(inventory_from_envelope(ENVELOPE))
     responses = decode_bundle((DATA / "bundle.der").read_bytes())
     for subject in cache.required():
@@ -195,7 +198,7 @@ class InventoryAndDeliveryTest(unittest.TestCase):
 
     def test_no_boot_cache_and_exact_headroom_expiry(self):
         now = [FIXTURE_NOW]
-        empty = ProofCache(Collateral(), lambda: now[0])
+        empty = ProofCache(Collateral(FIXTURE_COLLATERAL), lambda: now[0])
         with self.assertRaises(StatusUnavailable):
             empty.snapshot()
         cache = populated(lambda: now[0])
@@ -253,7 +256,7 @@ class InventoryAndDeliveryTest(unittest.TestCase):
         cache.snapshot()
 
     def test_warm_inventory_and_failure_retry_schedule(self):
-        cache = ProofCache(Collateral(), lambda: FIXTURE_NOW)
+        cache = ProofCache(Collateral(FIXTURE_COLLATERAL), lambda: FIXTURE_NOW)
         collector = mock.Mock(timeout=1)
         collector.collect_status_inventory.return_value = inventory_from_envelope(ENVELOPE)
         responses = {ocsp.load_der_ocsp_response(r).serial_number:r
@@ -318,6 +321,11 @@ class InventoryAndDeliveryTest(unittest.TestCase):
                 with self.assertRaises(TimeoutError):
                     transport(b"CertID")
             response.read1.assert_not_called()
+
+    def test_shipped_collateral_loads_its_own_driver_manifest(self):
+        collateral = Collateral()
+        self.assertIn(f"NV_GPU_DRIVER_GH100_{collateral.profile['driver']}.xml", collateral.profile["files"])
+        self.assertTrue(collateral.rims)
 
     def test_immutable_collateral_digest_mismatch_refused(self):
         import tempfile
@@ -398,7 +406,7 @@ class InventoryAndDeliveryTest(unittest.TestCase):
             thread.join(5)
 
     def test_not_ready_refuses_before_evidence_collection(self):
-        cache = ProofCache(Collateral())
+        cache = ProofCache(Collateral(FIXTURE_COLLATERAL))
         collector = mock.Mock()
         server = GatewayServer(("127.0.0.1", 0), collector, mock.Mock(), ("127.0.0.1", 1), 5,
                                status_cache=cache)
