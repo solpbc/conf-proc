@@ -24,6 +24,24 @@ PATCHES = (
       '            raise ValueError("canonical journal namespace required")\n'
       '        cache_namespace = "spp:" + cache_labels[0]\n'
       '        reasoning_effort = (', '            extra_key=cache_namespace,')),
+    # Media in a request must arrive inline. A URL or path in an image, audio or video part is
+    # refused before SGLang opens or fetches it.
+    ("../../utils/common.py", "edc951a16ab2f64e24e444a90d5372016a8379492a381ccaaad423ee58278426",
+     ('def load_audio(\n    audio_file: str, sr: Optional[int] = None, mono: bool = True\n) -> np.ndarray:\n',
+      '    # Normalize input: resolve URL / base64 / file:// to bytes or path\n    if isinstance(audio_file, bytes):\n',
+      '    if isinstance(image_file, ImageData):\n        image_file = image_file.url\n\n    image = None\n',
+      '    """Normalize various image inputs into raw bytes."""\n    if isinstance(image_file, bytes):\n',
+      '    if isinstance(video_file, bytes):\n        return video_file\n    elif isinstance(video_file, str):\n'
+      '        if video_file.startswith(("http://", "https://")):\n'),
+     ('def _inline_media_only(value):\n'
+      '    if isinstance(value, str) and not value.startswith("data:"):\n'
+      '        raise ValueError("media must be an inline data: URL")\n\n\n'
+      'def load_audio(\n    audio_file: str, sr: Optional[int] = None, mono: bool = True\n) -> np.ndarray:\n',
+      '    # Normalize input: resolve URL / base64 / file:// to bytes or path\n    _inline_media_only(audio_file)\n    if isinstance(audio_file, bytes):\n',
+      '    if isinstance(image_file, ImageData):\n        image_file = image_file.url\n    _inline_media_only(image_file)\n\n    image = None\n',
+      '    """Normalize various image inputs into raw bytes."""\n    _inline_media_only(image_file)\n    if isinstance(image_file, bytes):\n',
+      '    if isinstance(video_file, bytes):\n        return video_file\n    elif isinstance(video_file, str):\n'
+      '        _inline_media_only(video_file)\n        if video_file.startswith(("http://", "https://")):\n')),
 )
 
 
