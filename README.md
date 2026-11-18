@@ -127,7 +127,7 @@ or destroy that standing infrastructure.
 
 ## history
 
-[confidential processing: image #5](RELEASE-NOTES.md)
+[confidential processing: image #6 and earlier](RELEASE-NOTES.md)
 
 the engine graduated from [`solpbc/devops-lab`](https://github.com/solpbc/devops-lab)
 on 2026-07-21. this repository preserves that Git ancestry, so historical
